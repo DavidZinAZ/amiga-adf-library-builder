@@ -1,0 +1,42 @@
+name: Enhancement request
+description: Propose a new feature or improvement
+title: "[ENHANCEMENT] "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem should this solve?
+      description: Describe the user-facing problem, not the implementation.
+      placeholder: I want the library builder to...
+    validations:
+      required: true
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe exactly what should happen when the work is complete.
+      placeholder: When I run..., the application should...
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: List observable results that must be true before this issue can close.
+      placeholder: |
+        - [ ] Works on the representative test data
+        - [ ] Produces the expected NFO/JPG/staging output
+        - [ ] Does not alter original ADF files
+        - [ ] Documentation is updated
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes or examples
+      description: Optional screenshots, links, example filenames, or other context.

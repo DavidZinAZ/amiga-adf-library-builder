@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "amiga-adf-library-builder"
+version = "0.2.3"
+description = "Preservation-first Amiga ADF catalogue and Gotek SD-card builder"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+license = "MIT"
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pillow>=10"]
+# Optional runtime extras. The core library degrades gracefully when Pillow is
+# absent (artwork/enrich raise a clear "Pillow unavailable" error instead of
+# faking output). Declare it so qualification and artwork users can install it.
+artwork = ["pillow>=10"]
+
+[project.scripts]
+amiga-adf-library-builder = "amiga_adf_library_builder.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+

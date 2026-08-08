@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
+# Development/runtime artifacts
+.coverage
+htmlcov/
+*.egg-info/
+dist/
+build/
+
+# Local configuration and secrets
+.env
+*.env
+config/local.*
+config/secrets.*
+
+# Runtime data
+*.sqlite
+*.sqlite3
+*.db
+logs/
+work/
+cache/
+output/
+
+# Disk images and downloaded media
+*.adf
+*.dsk
+*.hfe
+*.img
+*.ipf
+*.scp
+*.jpg
+*.jpeg
+*.png
+
+# Editor and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local scratch
+.task/
+
+# User-generated library/configuration data (never commit)
+config/manual-approvals/
+config/metadata-curated/
+catalog/
+assets/
+unknown/
+review/
+rejected/
+reports/

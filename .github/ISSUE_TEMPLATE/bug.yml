@@ -1,0 +1,43 @@
+name: Bug report
+description: Report something that is broken or incorrect
+title: "[BUG] "
+labels:
+  - bug
+body:
+  - type: textarea
+    id: observed
+    attributes:
+      label: What happened?
+      description: Include the exact command and output.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What should have happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Run...
+        2. Open...
+        3. Observe...
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Fix acceptance criteria
+      placeholder: |
+        - [ ] Bug reproduced before fix
+        - [ ] Real-corpus test passes after fix
+        - [ ] Existing ADF files remain unchanged
+        - [ ] Documentation updated if behavior changed
+    validations:
+      required: true

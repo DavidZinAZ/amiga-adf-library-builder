@@ -1,0 +1,241 @@
+"""Pipeline: orchestrate scan -> parse -> group -> enrich -> quarantine.
+
+Phase 5 (Gotek export) is intentionally NOT invoked here; it is hard-gated by
+``exporter_guard.export_gate_open`` and requires an explicit operator safety signal.
+
+All writes target managed data directories (catalog, assets, review, unknown,
+work). ``original/`` is read-only throughout.
+"""
+from __future__ import annotations
+
+import itertools
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
+
+from . import artwork as artwork_mod
+from . import catalog, enrich, exporter, grouper, quarantine, scanner
+from .enrich import VERIFIED_ARTWORK_WIDTH, VERIFIED_ARTWORK_HEIGHT
+from .exporter_guard import export_gate_open
+from .models import ParsedRecord, ReleaseGroup, ScanRecord
+from .parser import parse_filename
+from .naming import release_basename
+from .paths import PathConfig
+
+# Monotonic, process-global counter that guarantees a unique run identifier even
+# when two operations start within the same wall-clock second. A bare
+# second-granularity timestamp used to let a later run reuse / overwrite the
+# staging directory of an earlier run that shared the same timestamp, which
+# corrupted both isolation guarantees and overwrite-conflict detection.
+_run_id_counter = itertools.count()
+
+
+def _run_id() -> str:
+    """Return a unique, deterministic-prefix run identifier.
+
+    The leading component is still the UTC second (so run ids stay human
+    readable and time-ordered), but a per-process monotonic counter and the
+    process id make the value unique regardless of how many operations start
+    inside the same second. Run ids are never reused within a process.
+    """
+    seq = next(_run_id_counter)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return f"{stamp}-{os.getpid()}-{seq:05d}"
+
+
+def run_pipeline(
+    *,
+    cfg: PathConfig,
+    online: bool = False,
+    refresh_metadata: bool = False,
+    require_artwork: bool = False,
+    upstream_task_closed: bool = False,
+    run_id: Optional[str] = None,
+    export: bool = False,
+    verify_only: bool = False,
+    verified_artwork_width: Optional[int] = VERIFIED_ARTWORK_WIDTH,
+    verified_artwork_height: Optional[int] = VERIFIED_ARTWORK_HEIGHT,
+    local_media_config_path: Optional[str] = None,
+) -> dict:
+    """Execute phases 2-4, 5 (optional), and 6. Returns a result summary dict.
+
+    All filesystem locations come from ``cfg`` (:class:`PathConfig`). The
+    original corpus (``cfg.original_dir``) is read-only throughout.
+    """
+    library_root = cfg.library_root
+    original_dir = cfg.original_dir
+    catalog_dir = cfg.catalog_dir
+    nfo_dir = cfg.nfo_dir
+    artwork_original_dir = cfg.artwork_original_dir
+    artwork_processed_dir = cfg.artwork_processed_dir
+    metadata_cache_dir = cfg.metadata_cache_dir
+    curated_metadata_dir = cfg.curated_metadata_dir
+    review_dir = cfg.review_dir
+    unknown_dir = cfg.quarantine_dir
+
+    run_id = run_id or _run_id()
+
+    # Phase 2: scan (read-only) + parse.
+    scans = scanner.scan_intake(original_dir)
+    scan_map = {s.filename: s for s in scans}
+    records: list[ParsedRecord] = [parse_filename(s.filename) for s in scans]
+
+    # Phase 3: group.
+    groups: list[ReleaseGroup] = grouper.group_records(records)
+
+    # manual-approval feature: apply operator manual approvals BEFORE enrich + quarantine so an
+    # approved special-only set is retitled, de-quarantined, and routed for
+    # export rather than written to unknown/. No-op when no config is present.
+    from . import manual_approvals
+
+    approvals = manual_approvals.load_approvals(cfg.library_root)
+    apply_result = manual_approvals.apply_approvals(
+        groups, approvals, original_dir=original_dir
+    )
+    groups = apply_result[0]
+    _applied = apply_result[1]
+    _unmatched = apply_result[2]
+    _hash_failures = apply_result.hash_failures
+
+    # Persist catalogue (reusable across runs; documented behavior).
+    n_scan = catalog.write_scan_records(catalog_dir, scans)
+    n_parse = catalog.write_parse_records(catalog_dir, records)
+    catalog.write_groups(catalog_dir, groups, run_id)
+
+    # Phase 4: enrich (offline NFO; artwork guarded).
+    # Build the local-media provider (local-media provider base app) when configured. It is
+    # read-only against any source library and copies selected sources into the
+    # app's own cache; a disabled/absent config yields provider=None so the
+    # existing offline + online artwork paths are unchanged. A provider failure
+    # must never break the run -- we degrade to the standard enrich path.
+    local_media_provider = None
+    if local_media_config_path:
+        try:
+            from . import local_media as lm
+
+            lm_cfg = lm.load_local_media_config(local_media_config_path)
+            if lm_cfg.enabled:
+                lm.assert_read_only_roots(lm_cfg)
+                local_media_provider = lm.LocalMediaProvider(
+                    lm_cfg, cfg.artwork_original_dir
+                )
+                local_media_provider.discover()
+        except Exception:  # provider failure must not break the pipeline
+            local_media_provider = None
+    enrich_results = enrich.enrich_all(
+        groups,
+        nfo_dir=nfo_dir,
+        scans=scans,
+        artwork_original_dir=artwork_original_dir,
+        artwork_processed_dir=artwork_processed_dir,
+        metadata_cache_dir=metadata_cache_dir,
+        curated_metadata_dir=curated_metadata_dir,
+        online=online,
+        refresh=refresh_metadata,
+        local_media_provider=local_media_provider,
+    )
+
+    # Phase 6: quarantine routing for flagged groups.
+    quarantine_summary = quarantine.route_quarantine(
+        groups, review_dir=review_dir, unknown_dir=unknown_dir, scans=scan_map
+    )
+
+    # Phase 5: Gotek export (gated). Runs only when requested AND the gate is
+    # open. Writes exclusively to a run-owned staging dir; never the SD card.
+    export_result = None
+    if export:
+        export_result = exporter.export_all(
+            groups,
+            staging_dir=cfg.staging_dir,
+            run_id=run_id,
+            upstream_task_closed=upstream_task_closed,
+            verified_artwork_width=verified_artwork_width,
+            verified_artwork_height=verified_artwork_height,
+            artwork_original_dir=artwork_original_dir,
+            artwork_processed_dir=artwork_processed_dir,
+            nfo_dir=nfo_dir,
+            original_dir=original_dir,
+            verify_only=verify_only,
+            require_artwork=require_artwork,
+        )
+
+    # Phase 5 gate check (report even when export not requested).
+    gate_open, gate_reason = export_gate_open(
+        upstream_task_closed,
+        verified_artwork_width,
+        verified_artwork_height,
+    )
+
+    # Preservation re-verify.
+    ok, problems = scanner.records_byte_identical(scans)
+
+    # Per-group diagnostic detail (structured logging): surfaced for the per-run log so
+    # operators can see, per release, quarantine routing, the metadata provider
+    # that answered (or that we ran offline), and the enrichment notes (including
+    # artwork download/failure details and cache hits). Additive; existing
+    # aggregate keys above are unchanged.
+    per_group = []
+    for g, r in zip(groups, enrich_results):
+        # Route event (quarantine/review) is only known after Phase 6 runs, so it
+        # is recorded here alongside the enrichment events from enrich_group.
+        events = [e.to_dict() for e in r.events]
+        if g.quarantine_reason:
+            special_only = (not g.has_main_disk) and bool(g.specials)
+            events.append({
+                "category": ("route_quarantine" if special_only else "route_review"),
+                "detail": g.quarantine_reason,
+                "url": None,
+                "cache": None,
+                "ok": True,
+                "error": None,
+            })
+        per_group.append(
+            {
+                "release_key": g.release_key,
+                "title": g.title,
+                "quarantine_reason": g.quarantine_reason,
+                "provider": r.provider,
+                "artwork_missing": (not g.quarantine_reason) and bool(r.artwork_missing),
+                "notes": list(r.notes),
+                "events": events,
+            }
+        )
+
+    result: dict = {
+        "run_id": run_id,
+        "online": online,
+        "metadata_providers": [r.provider for r in enrich_results],
+        "metadata_records": [str(r.metadata_path) for r in enrich_results if r.metadata_path],
+        "files_scanned": len(scans),
+        "records_parsed": len(records),
+        "groups": len(groups),
+        "catalog_new_scan": n_scan,
+        "catalog_new_parse": n_parse,
+        "nfo_written": [str(r.nfo_path) for r in enrich_results if r.nfo_path],
+        "artwork_resized": [str(r.artwork_resized) for r in enrich_results if r.artwork_resized],
+        "artwork_missing": [release_basename(g) for g, r in zip(groups, enrich_results) if not g.quarantine_reason and r.artwork_missing],
+        "enrichment_notes": [note for r in enrich_results for note in r.notes],
+        "review_routed": quarantine_summary["review"],
+        "unknown_routed": quarantine_summary["unknown"],
+        "applied_approvals": _applied,
+        "unmatched_approvals": _unmatched,
+        "hash_failures": _hash_failures,
+        "export_gate_open": gate_open,
+        "export_gate_reason": gate_reason,
+        "original_preserved": ok,
+        "original_problems": problems,
+        "per_group": per_group,
+    }
+    if export_result is not None:
+        result["export"] = {
+            "releases_exported": export_result.releases_exported,
+            "folders_written": export_result.folders_written,
+            "files_written": export_result.files_written,
+            "files_unchanged": export_result.files_unchanged,
+            "conflicts": export_result.conflicts,
+            "skipped_quarantined": export_result.skipped_quarantined,
+            "errors": export_result.errors,
+            "staging_root": str(export_result.staging_root),
+        }
+    return result

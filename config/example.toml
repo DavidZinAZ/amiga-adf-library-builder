@@ -1,0 +1,39 @@
+# Example portable configuration (portable path configuration).
+#
+# Only `library_root` is required. Every other role is derived beneath it unless
+# overridden here. `cache_dir` defaults to the XDG cache
+# (~/.cache/amiga-adf-library-builder) when omitted.
+#
+# Replace the paths below with locations you choose; no host-specific value is
+# required or assumed by the application.
+
+library_root = "/path/to/my-amiga-library"
+
+# Optional explicit role overrides (omit to use derived defaults):
+# original_dir   = "/path/to/my-amiga-library/original"
+# staging_dir    = "/path/to/my-amiga-library/work/staging"
+# output_dir     = "/path/to/my-amiga-library/output"
+# quarantine_dir = "/path/to/my-amiga-library/unknown"
+# approvals_dir  = "/path/to/my-amiga-library/config/manual-approvals"
+# reports_dir    = "/path/to/my-amiga-library/reports"
+# logs_dir       = "/path/to/my-amiga-library/logs"
+# cache_dir      = "/path/to/cache/amiga-adf-library-builder"
+
+# --- local-media provider local-media artwork provider (base app) ------------------------
+# Offline, read-only, no signup/key/network. Point at one or more LaunchBox
+# (or LaunchBox-compatible) image libraries. The builder searches the configured
+# platform folders, copies the chosen source into its OWN artwork cache, and
+# records provenance. It NEVER modifies anything under the source roots.
+#
+# Platform mapping: platform_names maps to the LaunchBox Images/<Platform>
+# folders. preferred_image_types sets the exact priority order searched
+# (higher-priority confident matches win): Screenshot - Game Title, then
+# Box - Front, then Screenshot - Gameplay.
+[local_media]
+enabled = false
+roots = ["/path/to/LaunchBox"]
+platform_names = ["Commodore Amiga", "Amiga"]
+preferred_image_types = ["Screenshot - Game Title", "Box - Front", "Screenshot - Gameplay"]
+recursive = true
+# confidence_threshold = 0.95
+
