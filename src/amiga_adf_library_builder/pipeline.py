@@ -57,6 +57,7 @@ def run_pipeline(
     verified_artwork_width: Optional[int] = VERIFIED_ARTWORK_WIDTH,
     verified_artwork_height: Optional[int] = VERIFIED_ARTWORK_HEIGHT,
     local_media_config_path: Optional[str] = None,
+    rtfm_config_path: Optional[str] = None,
 ) -> dict:
     """Execute phases 2-4, 5 (optional), and 6. Returns a result summary dict.
 
@@ -136,6 +137,26 @@ def run_pipeline(
         local_media_provider=local_media_provider,
     )
 
+    # Phase 4b: RTFM deterministic manual sidecar build (M1; offline, NO-AI).
+    # Built only when an [rtfm] config is present and enabled. Strictly read-only
+    # against the configured discovery roots; writes only under assets/rtfm.
+    # A disabled/absent config yields rtfm_results=[] so the export phase is
+    # unchanged. A failure must never break the run (degrade to no .rtfm).
+    rtfm_results: list = []
+    rtfm_dir = cfg.rtfm_dir
+    if rtfm_config_path:
+        try:
+            from . import rtfm as rtfm_mod
+            from .paths import load_rtfm_config
+
+            rtfm_cfg = rtfm_mod.RtfmConfig.from_dict(load_rtfm_config(rtfm_config_path))
+            if rtfm_cfg.enabled:
+                rtfm_results = rtfm_mod.build_rtfm_all(
+                    groups, cfg=rtfm_cfg, rtfm_dir=rtfm_dir
+                )
+        except Exception:  # RTFM build failure must not break the pipeline
+            rtfm_results = []
+
     # Phase 6: quarantine routing for flagged groups.
     quarantine_summary = quarantine.route_quarantine(
         groups, review_dir=review_dir, unknown_dir=unknown_dir, scans=scan_map
@@ -155,6 +176,7 @@ def run_pipeline(
             artwork_original_dir=artwork_original_dir,
             artwork_processed_dir=artwork_processed_dir,
             nfo_dir=nfo_dir,
+            rtfm_dir=rtfm_dir,
             original_dir=original_dir,
             verify_only=verify_only,
             require_artwork=require_artwork,
@@ -238,4 +260,14 @@ def run_pipeline(
             "errors": export_result.errors,
             "staging_root": str(export_result.staging_root),
         }
+    result["rtfm"] = {
+        "configured": bool(rtfm_config_path),
+        "built": [str(r.rtfm_path) for r in rtfm_results if r.written],
+        "routed_for_review": [
+            {"release_key": r.release_key, "reason": r.review_reason}
+            for r in rtfm_results
+            if r.routed_for_review
+        ],
+        "provenance_written": [str(r.provenance_path) for r in rtfm_results if r.provenance_path],
+    }
     return result

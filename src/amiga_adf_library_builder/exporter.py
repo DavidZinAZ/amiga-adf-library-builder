@@ -160,6 +160,7 @@ def export_release(
     artwork_original_dir: Optional[Path] = None,
     artwork_processed_dir: Optional[Path] = None,
     nfo_dir: Optional[Path] = None,
+    rtfm_dir: Optional[Path] = None,
     verify_only: bool = False,
 ) -> tuple[list[str], list[str], list[str]]:
     """Export one release group to the staging tree.
@@ -229,6 +230,25 @@ def export_release(
         else:
             unchanged.append(str(nfo_dest))
 
+    # RTFM: copy the deterministic manual sidecar produced by the RTFM builder
+    # (M1). It is a first-class export sidecar, copied into the staging folder
+    # alongside .nfo/.jpg, mirroring the NFO handling. The provenance sidecar
+    # (*.rtfm.provenance.json) is intentionally NOT copied into the Gotek
+    # staging tree (it lives under assets/rtfm, outside the export).
+    rtfm_src = Path(rtfm_dir) / f"{basename}.rtfm" if rtfm_dir is not None else None
+    if rtfm_src is not None and rtfm_src.is_file():
+        rtfm_bytes = rtfm_src.read_bytes()
+        rtfm_dest = folder / f"{basename}.rtfm"
+        if verify_only:
+            if rtfm_dest.exists() and rtfm_dest.read_bytes() != rtfm_bytes:
+                conflicts.append(str(rtfm_dest))
+        else:
+            status = _copy_if_changed(rtfm_bytes, rtfm_dest)
+            if status == "written":
+                written.append(str(rtfm_dest))
+            else:
+                unchanged.append(str(rtfm_dest))
+
     # Artwork: prefer the processed enrichment artifact; otherwise process a master.
     processed = Path(artwork_processed_dir) / f"{basename}.jpg" if artwork_processed_dir is not None else None
     try:
@@ -286,6 +306,7 @@ def export_all(
     artwork_original_dir: Optional[Path] = None,
     artwork_processed_dir: Optional[Path] = None,
     nfo_dir: Optional[Path] = None,
+    rtfm_dir: Optional[Path] = None,
     verify_only: bool = False,
     require_artwork: bool = False,
     # Internal: original/ path used to resolve source bytes.
@@ -380,6 +401,7 @@ def export_all(
             artwork_original_dir=artwork_original_dir,
             artwork_processed_dir=artwork_processed_dir,
             nfo_dir=nfo_dir,
+            rtfm_dir=rtfm_dir,
             verify_only=verify_only,
         )
         result.files_written.extend(written)

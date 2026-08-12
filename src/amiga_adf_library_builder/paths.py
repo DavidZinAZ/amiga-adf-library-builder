@@ -193,6 +193,12 @@ class PathConfig:
     def nfo_dir(self) -> Path:
         return self.assets_dir / "nfo"
 
+    @property
+    def rtfm_dir(self) -> Path:
+        # M1: RTFM assets live under assets/rtfm, a NEW derived dir kept OUTSIDE
+        # the Gotek export tree (provenance + .rtfm are builder-side artifacts).
+        return self.assets_dir / "rtfm"
+
     def as_dict(self) -> dict:
         return {
             "library_root": str(self.library_root),
@@ -345,6 +351,29 @@ def load_local_media_config(config: Optional[str] = None) -> dict:
     if not isinstance(lm, dict):
         return {}
     return dict(lm)
+
+
+def load_rtfm_config(config: Optional[str] = None) -> dict:
+    """Return the ``[rtfm]`` TOML table from the resolved config file.
+
+    Mirrors :func:`load_local_media_config` exactly: same precedence chain
+    (explicit ``config`` > env > XDG > system), returns ``{}`` when no config
+    file is found or no ``[rtfm]`` table is present. ``rtfm.py`` provides the
+    typed :class:`~amiga_adf_library_builder.rtfm.RtfmConfig`; this helper is the
+    paths-layer entry point so precedence logic stays in one module.
+
+    M1 note: the ``[rtfm.online]`` table is parsed and ignored (online providers
+    are deferred; ``RtfmConfig.online_enabled`` is surfaced but never used by the
+    deterministic build path).
+    """
+    path = _discover_config_file(config)
+    if path is None:
+        return {}
+    data = _read_config_file(path)
+    rc = data.get("rtfm")
+    if not isinstance(rc, dict):
+        return {}
+    return dict(rc)
 
 
 # --- Discovery + precedence ---------------------------------------------------

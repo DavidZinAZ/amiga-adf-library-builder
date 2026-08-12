@@ -37,3 +37,33 @@ preferred_image_types = ["Screenshot - Game Title", "Box - Front", "Screenshot -
 recursive = true
 # confidence_threshold = 0.95
 
+# --- RTFM v2 manual sidecar (deterministic, local-only, NO-AI) ----------------
+# Offline, read-only, no signup/key/network. Point at one or more local manual
+# libraries (Manuals, Instructions, Cheats). The builder discovers plain-text
+# sources, composes them into a GTi-compatible .rtfm, and writes a provenance
+# sidecar. It NEVER modifies anything under the source roots.
+#
+# Online providers (PDF/HTML extraction, AI summarization) are DEFERRED; the
+# [rtfm.online] table is parsed but ignored (online_enabled is never acted on).
+[rtfm]
+enabled = false
+# Built-in templates: controls-first (default), quick-start, adventure-rpg,
+# arcade-action, full-reference. Empty sections are omitted from output.
+template = "controls-first"
+# Conservative review-on-overflow target in bytes; must be <= 16000 (the GTi
+# hard limit). Content that would exceed this is routed for review (never
+# silently truncated).
+max_bytes = 15360
+recursive = true
+
+[rtfm.local]
+# One or more read-only roots per category. Placeholder /path/to/... values only
+# (no real host paths). Each root may use any layout; discovery is recursive.
+manuals = ["/path/to/manuals"]
+instructions = ["/path/to/instructions"]
+cheats = ["/path/to/cheats"]
+
+[rtfm.online]
+# DEFERRED in M1. Parsed and ignored. Online must stay disabled.
+enabled = false
+
