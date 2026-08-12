@@ -367,8 +367,17 @@ def _split_existing_rtfm(text: str) -> tuple[Optional[list[str]], Optional[dict]
 
     Returns ``(None, None)`` when the text contains no canonical v2 marker, so
     the caller can fall back to treating it as a single verbatim blob.
+
+    Every documented v2 section marker is recognized, including
+    ``[ADDITIONAL REFERENCE]`` (used by the ``full-reference`` template). A
+    marker not in this set is NOT silently merged into the previous section;
+    if we ever encounter an unknown ``[WORD]`` marker we leave it verbatim in
+    the body rather than losing its content.
     """
-    marker_set = set(CANONICAL_MARKERS)
+    # All markers that may appear in a v2 .rtfm (union of every template's
+    # preferred markers). ADDITIONAL REFERENCE is the only one not in
+    # CANONICAL_MARKERS.
+    marker_set = set().union(*TEMPLATES.values())
     sections: dict[str, list[str]] = {}
     order: list[str] = []
     current: Optional[str] = None
@@ -669,6 +678,226 @@ def _compose_sections(sources: list[RtfmSource], group) -> tuple[dict, list[Rtfm
 # --- Rendering ---------------------------------------------------------------
 
 
+def _order_sections(
+    template: str,
+    forced_order: Optional[list[str]],
+    sections: dict[str, str],
+) -> list[str]:
+    """Return present section markers in the order they should be emitted.
+
+    Honors ``forced_order`` (existing-``.rtfm`` passthrough: highest-fidelity
+    preservation of the author's marker order) when given; otherwise follows
+    the template's preferred order with any extra present canonical markers
+    appended in canonical order. Empty sections are always omitted.
+    """
+    if forced_order:
+        # Passthrough: preserve the source's marker order, dropping empties.
+        final_order = [m for m in forced_order if m in sections and sections[m].strip()]
+        # Append any other present canonical markers not in the source order
+        # (defensive; should not normally happen for a clean passthrough).
+        for m in CANONICAL_MARKERS:
+            if m in sections and sections[m].strip() and m not in final_order:
+                final_order.append(m)
+        return final_order
+
+    # Determine order: template preferred order for present sections, then any
+    # extra present sections in canonical order.
+    order = list(TEMPLATES.get(template, TEMPLATES[DEFAULT_TEMPLATE]))
+    present = [m for m in order if m in sections and sections[m].strip()]
+    extra = [
+        m for m in CANONICAL_MARKERS
+        if m in sections and sections[m].strip() and m not in present
+    ]
+    # full-reference may have contributed [ADDITIONAL REFERENCE]; keep it last.
+    return present + extra
+
+
+def _assemble_rtfm(title: str, sections: dict[str, str], final_order: list[str]) -> str:
+    """Assemble the final ``.rtfm`` text from ordered, non-empty section bodies.
+
+    Header ``# <title>`` + one blank line + each ``[MARKER]`` + body, separated
+    by a blank line. NO hard-wrapping of body paragraphs (verbatim preserved).
+    """
+    title = (title or "").strip() or "Unknown"
+    lines: list[str] = [f"# {title}", ""]
+    for i, marker in enumerate(final_order):
+        body = sections[marker].rstrip()
+        lines.append(f"[{marker}]")
+        lines.append(body)
+        if i != len(final_order) - 1:
+            lines.append("")  # blank-line separator between sections
+    return "\n".join(lines).rstrip() + "\n"
+
+
+#: Priority for SIZE-AWARE CONDENSATION (controls-first default). Higher = kept
+#: longer. CONTROLS is always the most important; ADDITIONAL REFERENCE the least.
+#: HINTS & CHEATS (50) outranks NOTES (40) so low-value notes/reference are
+#: dropped before player-useful hints, matching the issue's stated priorities.
+_CONDENSE_PRIORITY: dict[str, int] = {
+    MARKER_CONTROLS: 100,
+    MARKER_GETTING_STARTED: 80,
+    MARKER_HOW_TO_PLAY: 70,
+    MARKER_HINTS_CHEATS: 50,
+    MARKER_NOTES: 40,
+    MARKER_ADDITIONAL_REFERENCE: 10,
+}
+
+
+#: Conservative heuristics for LOW-VALUE content we may safely drop first under
+#: size pressure. These are deliberately high-precision (whole-line matches
+#: only) — never matched against a line that carries real control/mechanic/cheat
+#: evidence, and we never invent content. Blank lines are handled separately by
+#: the caller (``_condense_sections`` Stage 2), so this pattern never relies on
+#: a zero-width ``\s*`` alternative — that would wrongly match every line.
+_LOW_VALUE_LINE_RE = re.compile(
+    r"^(?:"                                      # whole-line match only
+    r"\*+\s*$|={3,}\s*$|"                        # decorative rules / asterisks
+    r"(?:table of contents|contents?)\b.*|"      # TOC headers
+    r"(?:credits?|thank you|thanks to)\b.*|"     # credits
+    r"copyright.*|\(c\)\s*\d|all rights reserved|"  # legal
+    r"published by .*|licen[cs]e[ds]? .*|"       # publisher / license
+    r"reprinted .*|distributed by .*|"           # distribution
+    r"page\s*\d+|"                               # page numbers
+    r"\d+\s*$)"                                  # lines that are only a number
+    , re.IGNORECASE,
+)
+
+
+def _is_low_value_line(line: str) -> bool:
+    """True for a low-value, non-evidence line safe to drop under pressure.
+
+    Conservative: only blank lines, decorative rules, TOC/credits/legal/
+    publisher/license/page-number lines. Never matches a line that carries
+    control/mechanic/cheat evidence.
+    """
+    return bool(_LOW_VALUE_LINE_RE.match(line))
+
+
+def _condense_sections(
+    *,
+    title: str,
+    sections: dict[str, str],
+    order: list[str],
+    template: str,
+    max_bytes: int,
+) -> tuple[Optional[str], list[str], bool, Optional[str], list[str]]:
+    """Deterministically reduce ``sections`` to fit ``max_bytes`` (<= 16000).
+
+    Progressive, boundary-safe compaction with CONTROLS-first priority.
+    Returns ``(text, final_order, routed_for_review, review_reason, notes)``.
+
+    Stages:
+      1. Drop lowest-priority WHOLE sections first (never CONTROLS; always keep
+         at least one section). Stop once the budget is met.
+      2. Within remaining sections, drop exact-duplicate lines (global dedup)
+         and low-value boilerplate lines; drop any section that becomes empty
+         (except CONTROLS).
+      3. If still over budget, trim trailing lines one at a time from the
+         lowest-priority non-CONTROLS section (line-boundary only; never
+         truncate mid-line / mid-section).
+
+    If nothing fits within ``max_bytes`` (e.g. a single giant CONTROLS block),
+    returns ``(None, order, True, reason, notes)`` so the caller routes for
+    review — exactly the prior behavior for irreducible oversize.
+    """
+    notes: list[str] = []
+
+    def _render(secs: dict[str, list[str]], ordr: list[str]) -> Optional[str]:
+        if not ordr:
+            return None
+        assembled = {m: "\n".join(secs[m]).rstrip() + "\n" for m in ordr if m in secs}
+        return _assemble_rtfm(title, assembled, ordr)
+
+    def _budget_ok(t: Optional[str]) -> bool:
+        return t is not None and len(t.encode("utf-8")) <= max_bytes
+
+    # Work on line lists so trimming is boundary-safe; never mutate caller state.
+    work: dict[str, list[str]] = {
+        m: list(sections[m].split("\n")) for m in order if m in sections
+    }
+    ordr = [m for m in order if m in work]
+
+    # Stage 1: greedily drop whole lowest-priority non-CONTROLS sections until
+    # the budget is met (keep at least one section; CONTROLS never dropped).
+    text = _render(work, ordr)
+    while not _budget_ok(text) and len(ordr) > 1:
+        candidates = [
+            m for m in sorted(ordr, key=lambda m: _CONDENSE_PRIORITY.get(m, 0))
+            if m in work and m != MARKER_CONTROLS
+        ]
+        if not candidates:
+            break  # only CONTROLS (or nothing else) remains
+        victim = candidates[0]
+        work.pop(victim, None)
+        ordr = [x for x in ordr if x != victim]
+        notes.append(f"condensation: dropped whole section [{victim}]")
+        text = _render(work, ordr)
+    if _budget_ok(text):
+        return text, ordr, False, None, notes
+
+    # Stage 2: global dedup + drop low-value boilerplate lines within remaining
+    # sections (we never invent content; only verbatim lines are removed).
+    seen: set[str] = set()
+    for m in ordr:
+        if m not in work:
+            continue
+        new_lines: list[str] = []
+        for ln in work[m]:
+            s = ln.strip()
+            if not s:
+                continue  # collapse blank lines; assembly re-adds spacing
+            if _is_low_value_line(ln):
+                continue
+            if s in seen:
+                continue  # exact-duplicate line across the whole manual
+            seen.add(s)
+            new_lines.append(ln)
+        work[m] = new_lines
+        if m != MARKER_CONTROLS and not new_lines:
+            notes.append(
+                f"condensation: section [{m}] emptied by dedup/boilerplate removal"
+            )
+            work.pop(m, None)
+    ordr = [m for m in ordr if m in work]
+    text = _render(work, ordr)
+    if _budget_ok(text):
+        notes.append("condensation: reduced via duplicate/boilerplate-line removal")
+        return text, ordr, False, None, notes
+
+    # Stage 3: line-boundary trim of the lowest-priority non-CONTROLS sections.
+    # Trim one trailing line at a time; CONTROLS is preserved as long as
+    # possible. Never truncates mid-line.
+    while True:
+        candidates = [
+            m for m in sorted(ordr, key=lambda m: _CONDENSE_PRIORITY.get(m, 0))
+            if m in work and m != MARKER_CONTROLS and work[m]
+        ]
+        if not candidates:
+            break  # only CONTROLS remains (or everything trimmed)
+        victim = candidates[0]
+        work[victim] = work[victim][:-1]
+        if not work[victim]:
+            notes.append(f"condensation: section [{victim}] fully trimmed")
+            work.pop(victim, None)
+            ordr = [m for m in ordr if m in work]
+        text = _render(work, ordr)
+        if _budget_ok(text):
+            notes.append(
+                f"condensation: trimmed trailing lines from [{victim}] to fit "
+                f"{max_bytes} bytes"
+            )
+            return text, ordr, False, None, notes
+
+    # Could not fit within max_bytes using deterministic, no-AI reduction.
+    text = _render(work, ordr)
+    reason = (
+        f"rendered manual ({len(text.encode('utf-8')) if text else 0} bytes) "
+        f"could not be deterministically condensed to <= {max_bytes} bytes; "
+        f"routed for review"
+    )
+    return None, ordr, True, reason, notes
+
+
 def render_rtfm(
     *,
     title: str,
@@ -676,10 +905,11 @@ def render_rtfm(
     template: str,
     max_bytes: int,
     forced_order: Optional[list[str]] = None,
-) -> tuple[Optional[str], list[str], bool, Optional[str]]:
+) -> tuple[Optional[str], list[str], bool, Optional[str], list[str]]:
     """Render the ``.rtfm`` text from composed sections.
 
-    Returns (text, sections_present, routed_for_review, review_reason).
+    Returns ``(text, sections_present, routed_for_review, review_reason,
+    condensation_notes)``.
 
     * Empty sections are OMITTED (never emit a marker with no body).
     * Template order sets the PREFERRED order of present sections, unless
@@ -689,61 +919,53 @@ def render_rtfm(
       template preferred order; any extra present sections append in canonical
       order.
     * NO hard-wrapping of body paragraphs (verbatim content preserved).
-    * The result is guaranteed <= ``MAX_RTFM_BYTES``. If the natural content
-      would exceed ``max_bytes`` (the conservative target), ``text`` is ``None``
-      and ``routed_for_review`` is True (NEVER silently truncated).
+    * The result is guaranteed <= ``max_bytes`` (<= ``MAX_RTFM_BYTES``). If the
+      natural content would exceed ``max_bytes``, the pipeline attempts
+      deterministic, no-AI SIZE-AWARE CONDENSATION (controls-first priority,
+      never invents facts). If condensation still cannot fit, ``text`` is
+      ``None`` and ``routed_for_review`` is True (NEVER silently truncated).
     """
     title = (title or "").strip() or "Unknown"
 
-    if forced_order:
-        # Passthrough: preserve the source's marker order, dropping empties.
-        final_order = [m for m in forced_order if m in sections and sections[m].strip()]
-        # Append any other present canonical markers not in the source order
-        # (defensive; should not normally happen for a clean passthrough).
-        for m in CANONICAL_MARKERS:
-            if m in sections and sections[m].strip() and m not in final_order:
-                final_order.append(m)
-    else:
-        # Determine order: template preferred order for present sections, then
-        # any extra present sections in canonical order.
-        order = list(TEMPLATES.get(template, TEMPLATES[DEFAULT_TEMPLATE]))
-        present = [m for m in order if m in sections and sections[m].strip()]
-        extra = [
-            m for m in CANONICAL_MARKERS
-            if m in sections and sections[m].strip() and m not in present
-        ]
-        # full-reference may have contributed [ADDITIONAL REFERENCE]; keep it last.
-        final_order = present + extra
+    final_order = _order_sections(template, forced_order, sections)
 
     if not final_order:
-        # No content at all: emit a minimal title-only file? No — M1 requires a
-        # manual; an empty manual is routed for review (operator decides).
-        return None, [], True, "no manual content discovered for this title"
+        # No content at all: an empty manual is routed for review (operator decides).
+        return None, [], True, "no manual content discovered for this title", []
 
-    lines: list[str] = [f"# {title}", ""]
-    for i, marker in enumerate(final_order):
-        body = sections[marker].rstrip()
-        lines.append(f"[{marker}]")
-        lines.append(body)
-        if i != len(final_order) - 1:
-            lines.append("")  # blank-line separator between sections
-    text = "\n".join(lines).rstrip() + "\n"
+    text = _assemble_rtfm(title, sections, final_order)
 
-    if len(text.encode("utf-8")) > MAX_RTFM_BYTES:
-        # Hard cap breach is a programming-error-class failure; still route review.
-        return (
-            None,
-            final_order,
-            True,
-            "rendered manual exceeds the 16000-byte GTi hard limit",
-        )
-    if len(text.encode("utf-8")) > max_bytes:
-        # Conservative target breach: route for review, never truncate.
-        return None, final_order, True, (
-            f"rendered manual ({len(text.encode('utf-8'))} bytes) exceeds the "
-            f"configured review target ({max_bytes} bytes); routed for review"
-        )
-    return text, final_order, False, None
+    if len(text.encode("utf-8")) <= max_bytes:
+        # Fits naturally — no condensation needed.
+        return text, final_order, False, None, []
+
+    # Over budget: attempt deterministic, no-AI size-aware condensation.
+    cond_text, cond_order, routed, reason, notes = _condense_sections(
+        title=title,
+        sections=sections,
+        order=final_order,
+        template=template,
+        max_bytes=max_bytes,
+    )
+    if cond_text is not None and not routed:
+        # Hard-cap guard (defensive: max_bytes is already clamped <= 16000).
+        if len(cond_text.encode("utf-8")) > MAX_RTFM_BYTES:
+            return (
+                None,
+                final_order,
+                True,
+                "rendered manual exceeds the 16000-byte GTi hard limit",
+                notes,
+            )
+        return cond_text, cond_order, False, None, notes
+
+    # Condensation failed or produced an over-budget result -> route for review,
+    # never emit a > max_bytes / > 16000-byte file.
+    reason = reason or (
+        f"rendered manual ({len(text.encode('utf-8'))} bytes) exceeds the "
+        f"configured review target ({max_bytes} bytes); routed for review"
+    )
+    return None, final_order, True, reason, notes
 
 
 # --- Provenance --------------------------------------------------------------
@@ -883,7 +1105,7 @@ def build_rtfm_for_group(
         return result
 
     title = (getattr(group, "title", None) or "").strip() or basename
-    text, sections_present, routed, reason = render_rtfm(
+    text, sections_present, routed, reason, condensation_notes = render_rtfm(
         title=title,
         sections=sections,
         template=cfg.template,
@@ -893,6 +1115,9 @@ def build_rtfm_for_group(
         forced_order=passthrough_order,
     )
     result.sections_present = sections_present
+    # Record deterministic condensation audit trail (auditable in provenance).
+    for note in condensation_notes:
+        result.notes.append(note)
 
     if routed or text is None:
         result.routed_for_review = True

@@ -365,6 +365,28 @@ def test_full_reference_template_includes_additional_reference_when_present(tmp_
     assert "[ADDITIONAL REFERENCE]" in text
 
 
+def test_existing_rtfm_additional_reference_marker_preserved_in_body(tmp_path):
+    # Regression guard: the v2 [ADDITIONAL REFERENCE] marker must be recognized
+    # as a real section (not silently merged into [NOTES] / the prior body).
+    # Its body must NOT leak into the preceding section's text.
+    roots = {"instructions": tmp_path / "instructions"}
+    existing = (
+        b"[CONTROLS]\nFire: button 1\n"
+        b"\n[NOTES]\nNote A\n"
+        b"\n[ADDITIONAL REFERENCE]\nBox map reference.\n"
+    )
+    _write_sources(roots["instructions"], {"Example Space Tactics.rtfm": existing})
+    g = _manual_group("Example Space Tactics")
+    cfg = _cfg(roots, template="full-reference")
+    srcs = rc.discover_sources(cfg)
+    res = rc.build_rtfm_for_group(g, cfg=cfg, rtfm_dir=tmp_path / "rtfm", sources=srcs)
+    text = (tmp_path / "rtfm" / "Example Space Tactics.rtfm").read_text()
+    notes_body = text.split("[NOTES]")[1].split("[ADDITIONAL REFERENCE]")[0]
+    assert "Box map reference." not in notes_body
+    assert "Box map reference." in text
+    assert "[ADDITIONAL REFERENCE]" in text
+
+
 # ---------------------------------------------------------------------------
 # Empty-section omission
 # ---------------------------------------------------------------------------
@@ -976,3 +998,186 @@ def test_binary_only_source_routed_for_review(tmp_path):
     # Provenance is still written (auditable routing decision).
     assert res.provenance_path is not None and res.provenance_path.exists()
     assert any("source skipped" in n for n in res.notes)
+
+
+# ---------------------------------------------------------------------------
+# Issue #4 — size-aware condensation (auto-reduce oversized manuals to <= target)
+# ---------------------------------------------------------------------------
+
+
+def _big_block(char: str, n: int) -> str:
+    """A deterministic synthetic filler block of ``n`` repeats of ``char``."""
+    return (char * 80 + "\n") * (n // 80)
+
+
+def test_oversized_manual_condensed_to_valid(tmp_path):
+    # An oversized multi-section manual (controls + getting-started + how-to +
+    # huge low-value notes + cheats + extra reference) must be auto-condensed to
+    # a valid <= max_bytes .rtfm with the high-priority sections preserved,
+    # instead of always routing to review.
+    roots = {"manuals": tmp_path / "manuals", "instructions": tmp_path / "instructions",
+             "cheats": tmp_path / "cheats"}
+    # Passthrough .rtfm carrying several sections, with oversize NOTES /
+    # ADDITIONAL REFERENCE boilerplate.
+    manual = (
+        b"[CONTROLS]\nLeft/Right: move\nUp: jump\nFire: button 1\nPause: P\n"
+        b"\n[GETTING STARTED]\nInsert disk 1.\nChoose 1 player.\nPress Start.\n"
+        b"\n[HOW TO PLAY]\nAvoid the spikes.\nCollect the stars.\n"
+        b"\n[NOTES]\n" + (_big_block("N", 20000)).encode("utf-8") +
+        b"\n[HINTS & CHEATS]\nLevel skip: KANGAROO\nInfinite lives: HOLDTHETOY\n"
+        b"\n[ADDITIONAL REFERENCE]\n" + (_big_block("R", 20000)).encode("utf-8")
+    )
+    _write_sources(roots["manuals"], {"Oversize Game.rtfm": manual})
+    g = _manual_group("Oversize Game")
+    cfg = _cfg(roots, max_bytes=15360)
+    srcs = rc.discover_sources(cfg)
+    out = tmp_path / "rtfm"
+    res = rc.build_rtfm_for_group(g, cfg=cfg, rtfm_dir=out, sources=srcs)
+    # Condensed successfully: written and within budget.
+    assert res.written
+    assert not res.routed_for_review
+    data = (out / "Oversize Game.rtfm").read_bytes()
+    assert len(data) <= cfg.max_bytes
+    assert len(data) <= rc.MAX_RTFM_BYTES
+    text = data.decode("utf-8")
+    # High-priority sections preserved.
+    assert "[CONTROLS]" in text
+    assert "[GETTING STARTED]" in text
+    # Condensation audit note recorded.
+    assert any("condensation" in n for n in res.notes)
+
+
+def test_condensation_drops_low_priority_before_controls(tmp_path):
+    # Controls-first priority: when the budget forces dropping sections, the
+    # lowest-priority sections go first and CONTROLS is preserved to the end.
+    sections = {
+        "CONTROLS": "Left/Right: move\nUp: jump\nFire: button 1\n",
+        "GETTING STARTED": _big_block("G", 2500),
+        "HOW TO PLAY": _big_block("H", 2500),
+        "HINTS & CHEATS": _big_block("C", 2500),
+        "NOTES": _big_block("N", 2500),
+        "ADDITIONAL REFERENCE": _big_block("A", 2500),
+    }
+    # Layout: header + 6 sections; only CONTROLS + ~1 other fits <= 6000 bytes.
+    t, order, routed, reason, notes = rc.render_rtfm(
+        title="Priority Game", sections=sections,
+        template="controls-first", max_bytes=6000,
+    )
+    assert not routed
+    assert t is not None
+    assert len(t.encode("utf-8")) <= 6000
+    # CONTROLS is always retained (highest priority).
+    assert "CONTROLS" in order
+    # The lowest-priority sections (ADDITIONAL REFERENCE, then NOTES) are the
+    # first to be dropped.
+    assert "ADDITIONAL REFERENCE" not in order
+    assert "NOTES" not in order
+    # A higher-priority section beyond CONTROLS survived.
+    assert any(m in order for m in ("GETTING STARTED", "HOW TO PLAY", "HINTS & CHEATS"))
+
+
+def test_condensation_keeps_hints_over_notes_when_forced(tmp_path):
+    # Within the low-priority tail, HINTS & CHEATS (priority 50) must outrank
+    # NOTES (priority 40): when only one can be kept alongside CONTROLS, the
+    # HINTS & CHEATS survive and NOTES is dropped.
+    sections = {
+        "CONTROLS": "Fire: button 1\n",
+        "HINTS & CHEATS": _big_block("H", 4000),
+        "NOTES": _big_block("N", 4000),
+    }
+    t, order, routed, reason, notes = rc.render_rtfm(
+        title="HintVsNote", sections=sections,
+        template="controls-first", max_bytes=6000,
+    )
+    assert not routed
+    assert "CONTROLS" in order
+    assert "HINTS & CHEATS" in order
+    assert "NOTES" not in order
+
+
+def test_condensation_does_not_invent(tmp_path):
+    # The manual mentions only movement; condensation must NEVER add a control
+    # key, cheat, password, or mechanic that was not in the source.
+    roots = {"instructions": tmp_path / "instructions"}
+    _write_sources(roots["instructions"], {
+        "Example Space Tactics.txt": (
+            b"Walk left and right.\n" + (_big_block("X", 6000)).encode("utf-8")
+        ),
+    })
+    g = _manual_group("Example Space Tactics")
+    cfg = _cfg(roots, max_bytes=6000)
+    srcs = rc.discover_sources(cfg)
+    res = rc.build_rtfm_for_group(g, cfg=cfg, rtfm_dir=tmp_path / "rtfm", sources=srcs)
+    assert res.written
+    text = (tmp_path / "rtfm" / "Example Space Tactics.rtfm").read_text()
+    # Source fact survives.
+    assert "Walk left and right." in text
+    # No invented facts.
+    for invented in ("Pause", "Jump", "Boss", "Secret level", "KANGAROO", "password"):
+        assert invented not in text
+
+
+def test_condensation_deterministic(tmp_path):
+    # Identical oversized inputs must produce byte-identical condensed output.
+    sections = {
+        "CONTROLS": "Fire: button 1\nMove: joystick\n",
+        "GETTING STARTED": _big_block("G", 3000),
+        "NOTES": _big_block("N", 3000),
+        "ADDITIONAL REFERENCE": _big_block("A", 3000),
+    }
+    a, _, _, _, _ = rc.render_rtfm(
+        title="Det Game", sections=sections, template="controls-first", max_bytes=6000)
+    b, _, _, _, _ = rc.render_rtfm(
+        title="Det Game", sections=sections, template="controls-first", max_bytes=6000)
+    assert a == b
+    assert a is not None
+
+
+def test_unreducible_controls_block_still_routes(tmp_path):
+    # A single CONTROLS block that cannot be trimmed (one massive line) must
+    # still route for review and never emit a > max_bytes / > 16000-byte file.
+    roots = {"instructions": tmp_path / "instructions"}
+    _write_sources(roots["instructions"], {
+        "Example Space Tactics.txt": ("Controls: " + "A" * 20000 + "\n").encode("utf-8"),
+    })
+    g = _manual_group("Example Space Tactics")
+    cfg = _cfg(roots, max_bytes=15360)
+    srcs = rc.discover_sources(cfg)
+    res = rc.build_rtfm_for_group(g, cfg=cfg, rtfm_dir=tmp_path / "rtfm", sources=srcs)
+    assert res.routed_for_review
+    assert not res.written
+    assert res.rtfm_path is None or not res.rtfm_path.exists()
+    # Provenance still written (auditable routing decision).
+    assert res.provenance_path is not None and res.provenance_path.exists()
+
+
+def test_condensation_notes_recorded_in_provenance(tmp_path):
+    # When condensation occurs, its audit notes must surface in the provenance
+    # sidecar (operator-auditable rationale for the reduction).
+    sections = {
+        "CONTROLS": "Fire: button 1\n",
+        "GETTING STARTED": _big_block("G", 3000),
+        "NOTES": _big_block("N", 3000),
+        "ADDITIONAL REFERENCE": _big_block("A", 3000),
+    }
+    t, order, routed, reason, notes = rc.render_rtfm(
+        title="Prov Game", sections=sections, template="controls-first", max_bytes=6000)
+    assert not routed and t is not None
+    assert notes  # condensation produced audit notes
+    # Exercise the real build path to confirm notes land in provenance JSON.
+    roots = {"manuals": tmp_path / "manuals"}
+    manual = (
+        b"[CONTROLS]\nFire: button 1\n"
+        b"\n[GETTING STARTED]\n" + (_big_block("G", 3000)).encode("utf-8") +
+        b"\n[NOTES]\n" + (_big_block("N", 3000)).encode("utf-8") +
+        b"\n[ADDITIONAL REFERENCE]\n" + (_big_block("A", 3000)).encode("utf-8")
+    )
+    _write_sources(roots["manuals"], {"Prov Game.rtfm": manual})
+    g = _manual_group("Prov Game")
+    cfg = _cfg(roots, max_bytes=6000)
+    srcs = rc.discover_sources(cfg)
+    res = rc.build_rtfm_for_group(g, cfg=cfg, rtfm_dir=tmp_path / "rtfm", sources=srcs)
+    assert res.written
+    raw = res.provenance_path.read_text()
+    assert any("condensation" in n for n in res.notes)
+    assert "condensation" in raw
