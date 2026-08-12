@@ -312,18 +312,34 @@ class RtfmResult:
 
 
 def _decode_source(path: Path) -> str:
-    """Read a source file as UTF-8 text, tolerating a BOM, with LF endings.
+    """Read a source file as text, deterministically, with LF endings.
 
-    Raises ``RtfmError`` on decode failure (never guesses a different codec in
-    M1 — ASCII-targeted output). The caller has already bounded the size.
+    Decode chain (strict, no silent guessing of content):
+      1. ``utf-8-sig`` — preferred; preserves existing valid UTF-8 (incl. BOM).
+      2. ``cp1252``   — documented legacy Amiga / Western-European fallback.
+      3. ``latin-1``  — guaranteed single-byte map (every byte is a code point).
+
+    SAFETY: if the decoded text contains a NUL (``"\\x00"``), the source is
+    treated as binary / not safely decodable as text and ``RtfmError`` is
+    raised so the caller can route it for review rather than emit garbage.
+
+    The caller has already bounded the size. We never fabricate content or
+    silently truncate.
     """
     data = path.read_bytes()
+    text: str
     try:
         text = data.decode("utf-8-sig")
-    except UnicodeDecodeError as exc:
+    except UnicodeDecodeError:
+        try:
+            text = data.decode("cp1252")
+        except UnicodeDecodeError:
+            text = data.decode("latin-1")  # single-byte map: cannot fail
+    # A NUL in the decoded text means this is binary, not decodable text.
+    if "\x00" in text:
         raise RtfmError(
-            f"source is not valid UTF-8 (RTFM is ASCII-targeted): {path}"
-        ) from exc
+            f"source appears binary/contains NUL (not decodable as text): {path}"
+        )
     # Normalize line endings to LF. Do NOT strip/reflow body content.
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     return text
@@ -545,17 +561,23 @@ def _section_for_category(category: str) -> str:
     return CATEGORY_PRIMARY_MARKER[category]
 
 
-def _compose_sections(sources: list[RtfmSource], group) -> tuple[dict, list[RtfmProvenanceSource], Optional[list[str]]]:
+def _compose_sections(sources: list[RtfmSource], group) -> tuple[dict, list[RtfmProvenanceSource], Optional[list[str]], list[str]]:
     """Compose section bodies from matched sources (verbatim, deterministic).
 
-    Returns (sections: {marker: body_text}, provenance_sources). Existing
-    ``.rtfm`` sources take precedence (normalized passthrough, highest fidelity);
-    raw ``.txt`` sources are relocated verbatim into their category's primary
-    section. Composition concatenates per-section without duplication,
-    deterministically ordered.
+    Returns (sections: {marker: body_text}, provenance_sources,
+    passthrough_order, skipped_notes). Existing ``.rtfm`` sources take
+    precedence (normalized passthrough, highest fidelity); raw ``.txt`` sources
+    are relocated verbatim into their category's primary section. Composition
+    concatenates per-section without duplication, deterministically ordered.
+
+    A source that cannot be decoded (binary / NUL) is SKIPPED: it is not added
+    to ``sections`` or ``provenance_sources``, and a corresponding note is
+    recorded in ``skipped_notes`` so the caller can route it for review. This
+    keeps one bad source from aborting the whole group.
     """
     sections: dict[str, list[str]] = {}
     prov_sources: list[RtfmProvenanceSource] = []
+    skipped_notes: list[str] = []
     # When an existing .rtfm passthrough with a valid marker order is the
     # dominant source, we preserve its author's marker order (highest fidelity)
     # instead of reordering by template.
@@ -563,7 +585,13 @@ def _compose_sections(sources: list[RtfmSource], group) -> tuple[dict, list[Rtfm
 
     # Existing .rtfm passthrough first (highest fidelity), preserving order.
     for src in [s for s in sources if s.path.suffix.lower() == RTFM_SUFFIX]:
-        text = _decode_source(src.path)
+        try:
+            text = _decode_source(src.path)
+        except RtfmError as exc:
+            skipped_notes.append(
+                f"source skipped (decode failed, routed for review): {src.path.name}"
+            )
+            continue
         norm = _normalize_passthrough(text)
         order, parsed = _split_existing_rtfm(norm)
         parsed_sections: dict[str, list[str]] = parsed or {}
@@ -599,7 +627,13 @@ def _compose_sections(sources: list[RtfmSource], group) -> tuple[dict, list[Rtfm
 
     # Raw .txt sources: verbatim relocation into the category's primary section.
     for src in [s for s in sources if s.path.suffix.lower() in TXT_SUFFIXES]:
-        text = _decode_source(src.path)
+        try:
+            text = _decode_source(src.path)
+        except RtfmError:
+            skipped_notes.append(
+                f"source skipped (decode failed, routed for review): {src.path.name}"
+            )
+            continue
         # Trim a single leading/trailing blank line; keep internal structure.
         lines = text.split("\n")
         while lines and lines[0] == "":
@@ -629,7 +663,7 @@ def _compose_sections(sources: list[RtfmSource], group) -> tuple[dict, list[Rtfm
     joined: dict[str, str] = {}
     for marker, blocks in sections.items():
         joined[marker] = "\n\n".join(b for b in blocks if b).rstrip() + "\n"
-    return joined, prov_sources, passthrough_order
+    return joined, prov_sources, passthrough_order, skipped_notes
 
 
 # --- Rendering ---------------------------------------------------------------
@@ -832,8 +866,21 @@ def build_rtfm_for_group(
         safe_matched.append(s)
     matched = safe_matched
 
-    sections, prov_sources, passthrough_order = _compose_sections(matched, group)
+    sections, prov_sources, passthrough_order, skipped_notes = _compose_sections(matched, group)
     result.sources = prov_sources
+    result.notes.extend(skipped_notes)
+
+    if not sections and skipped_notes:
+        # Every matched source failed to decode (e.g. binary-only title). Route
+        # for review rather than aborting the run; provenance is still written.
+        result.routed_for_review = True
+        result.review_reason = "all matched sources failed to decode; routed for review"
+        result.notes.append(result.review_reason)
+        result.provenance_path = prov_path
+        _write_json_atomic(
+            prov_path, _build_provenance(group, result, max_bytes=cfg.max_bytes, mode="deterministic")
+        )
+        return result
 
     title = (getattr(group, "title", None) or "").strip() or basename
     text, sections_present, routed, reason = render_rtfm(

@@ -859,3 +859,120 @@ def test_deterministic_output(tmp_path):
     assert (tmp_path / "r1" / "Example Space Tactics.rtfm").read_bytes() == (
         tmp_path / "r2" / "Example Space Tactics.rtfm"
     ).read_bytes()
+
+
+# ---------------------------------------------------------------------------
+# Legacy-encoding ingestion (RTFM M1 robustness fix)
+# ---------------------------------------------------------------------------
+
+
+def test_decode_source_fallback_order_unit(tmp_path):
+    """Direct unit test of the _decode_source fallback chain + NUL safety."""
+    # cp1252: 0xE9 -> é (invalid UTF-8).
+    cp_path = tmp_path / "cp.txt"
+    cp_path.write_bytes("Café du Monde".encode("cp1252"))
+    assert rc._decode_source(cp_path) == "Café du Monde"
+
+    # latin-1 only: 0x81 is rejected by strict cp1252 but mapped by latin-1.
+    la_path = tmp_path / "la.txt"
+    la_path.write_bytes(b"\x81")  # U+0081
+    assert rc._decode_source(la_path) == ""
+
+    # NUL-bearing bytes are treated as binary and must raise RtfmError.
+    nul_path = tmp_path / "nul.txt"
+    nul_path.write_bytes(b"\x00\x01\x02\xff")
+    with pytest.raises(rc.RtfmError):
+        rc._decode_source(nul_path)
+
+
+def test_decode_cp1252_fallback(tmp_path):
+    # A .txt whose bytes are cp1252 (0xE9 = é) must decode correctly, not mojibake.
+    roots = {"manuals": tmp_path / "manuals"}
+    _write_sources(roots["manuals"], {
+        "Example Space Tactics.txt": "Café du Monde".encode("cp1252"),
+    })
+    g = _manual_group("Example Space Tactics")
+    cfg = _cfg(roots)
+    srcs = rc.discover_sources(cfg)
+    out = tmp_path / "rtfm"
+    res = rc.build_rtfm_for_group(g, cfg=cfg, rtfm_dir=out, sources=srcs)
+    assert res.written
+    text = (out / "Example Space Tactics.rtfm").read_text(encoding="utf-8")
+    assert "Café du Monde" in text
+
+
+def test_decode_latin1_fallback(tmp_path):
+    # A byte rejected by strict cp1252 (0x81) falls back to latin-1 and builds.
+    roots = {"manuals": tmp_path / "manuals"}
+    _write_sources(roots["manuals"], {
+        "Example Space Tactics.txt": b"raw\x81byte",
+    })
+    g = _manual_group("Example Space Tactics")
+    cfg = _cfg(roots)
+    srcs = rc.discover_sources(cfg)
+    out = tmp_path / "rtfm"
+    res = rc.build_rtfm_for_group(g, cfg=cfg, rtfm_dir=out, sources=srcs)
+    assert res.written
+    assert not any("source skipped" in n for n in res.notes)
+
+
+def test_utf8_bom_still_preserved(tmp_path):
+    # Regression guard: a UTF-8 BOM source keeps the existing (BOM-stripped)
+    # behavior exactly.
+    roots = {"manuals": tmp_path / "manuals"}
+    content = "Touche: Élan\n".encode("utf-8-sig")
+    _write_sources(roots["manuals"], {"Example Space Tactics.txt": content})
+    g = _manual_group("Example Space Tactics")
+    cfg = _cfg(roots)
+    srcs = rc.discover_sources(cfg)
+    out = tmp_path / "rtfm"
+    res = rc.build_rtfm_for_group(g, cfg=cfg, rtfm_dir=out, sources=srcs)
+    assert res.written
+    text = (out / "Example Space Tactics.rtfm").read_text(encoding="utf-8")
+    # BOM must be stripped; the content present without it.
+    assert text.startswith("# Example Space Tactics")
+    assert "Élan" in text
+
+
+def test_one_bad_source_does_not_abort_group(tmp_path):
+    # A group matched by TWO sources across categories: a valid UTF-8 .txt in
+    # manuals AND a binary (NUL-bearing) .txt in instructions. The bad source is
+    # skipped while the valid sibling still produces a .rtfm.
+    roots = {
+        "manuals": tmp_path / "manuals",
+        "instructions": tmp_path / "instructions",
+    }
+    _write_sources(roots["manuals"], {
+        "Example Space Tactics.txt": b"Controls: up down",
+    })
+    _write_sources(roots["instructions"], {
+        "Example Space Tactics.txt": b"\x00\x01\x02\xff",
+    })
+    g = _manual_group("Example Space Tactics")
+    cfg = _cfg(roots)
+    srcs = rc.discover_sources(cfg)
+    out = tmp_path / "rtfm"
+    res = rc.build_rtfm_for_group(g, cfg=cfg, rtfm_dir=out, sources=srcs)
+    assert res.written
+    text = (out / "Example Space Tactics.rtfm").read_text(encoding="utf-8")
+    assert "Controls: up down" in text
+    assert any("source skipped (decode failed" in n for n in res.notes)
+
+
+def test_binary_only_source_routed_for_review(tmp_path):
+    # A group whose only matched source is binary (NUL-bearing) must be routed
+    # for review, not abort the run, and emit no .rtfm.
+    roots = {"manuals": tmp_path / "manuals"}
+    _write_sources(roots["manuals"], {
+        "Example Space Tactics.txt": b"\x00\x01\x02\xff",
+    })
+    g = _manual_group("Example Space Tactics")
+    cfg = _cfg(roots)
+    srcs = rc.discover_sources(cfg)
+    out = tmp_path / "rtfm"
+    res = rc.build_rtfm_for_group(g, cfg=cfg, rtfm_dir=out, sources=srcs)
+    assert res.routed_for_review
+    assert not res.written
+    # Provenance is still written (auditable routing decision).
+    assert res.provenance_path is not None and res.provenance_path.exists()
+    assert any("source skipped" in n for n in res.notes)
