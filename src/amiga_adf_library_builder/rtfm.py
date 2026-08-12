@@ -286,8 +286,12 @@ class RtfmProvenanceSource:
     sections: list[str]      # markers this source contributed to
     sha256: str
     size: int
-    # ``.rtfm`` passthrough preserves the source marker order when known.
+    # `.rtfm` passthrough preserves the source marker order when known.
     marker_order: Optional[list[str]] = None
+    # Issue #6: deterministic match scoring for this source (auditable decision).
+    match_confidence: float = 0.0
+    match_kind: str = "none"
+    match_evidence: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -494,7 +498,13 @@ def _norm_title(title: str) -> str:
 
 
 def _source_matches_group(src: RtfmSource, group) -> bool:
-    """Deterministic canonical-title / variant match (reuse, no new matcher).
+    """Deterministic canonical-title / variant match.
+
+    DEPRECATED: kept for backward compatibility (the existing
+    ``test_canonical_title_match`` still calls it). It now delegates to the
+    Issue #6 scorer ``score_source_match`` and returns its ``matched`` flag.
+    New consumers should use ``score_source_match`` directly to get the
+    confidence / kind / evidence needed for the auto-accept vs. review decision.
 
     Matches when ANY of:
       * the source filename stem equals the group title (case/space-insensitive);
@@ -504,25 +514,7 @@ def _source_matches_group(src: RtfmSource, group) -> bool:
         stripped on both sides), serving cracks/trainers/alt-dumps/language/
         chipset/multi-disk variants of the SAME canonical game.
     """
-    title = getattr(group, "title", None) or ""
-    basename = _group_identity(group)
-    stem = src.stem
-    if not stem:
-        return False
-    # Raw identity equality (whitespace-insensitive).
-    if stem.strip().lower() == title.strip().lower() and title:
-        return True
-    if stem.strip().lower() == basename.strip().lower():
-        return True
-    # Normalized equality.
-    if _norm_title(stem) and _norm_title(stem) == _norm_title(title):
-        return True
-    # Canonical-reuse base match (release tags stripped on both sides).
-    base_stem = _strip_release_tags(stem)
-    base_title = _strip_release_tags(title)
-    if base_stem and base_title and _norm_title(base_stem) == _norm_title(base_title):
-        return True
-    return False
+    return bool(score_source_match(src, group).matched)
 
 
 def _strip_release_tags(title: str) -> str:
@@ -561,6 +553,270 @@ def _strip_release_tags(title: str) -> str:
     t = "".join(kept)
     t = re.sub(r"\s+[a-z]\s*$", " ", t, flags=re.IGNORECASE)
     return re.sub(r"\s+", " ", t).strip()
+
+
+# --- Issue #6: deterministic match SCORING (superset of the boolean matcher) --
+#
+# The legacy ``_source_matches_group`` was a boolean filter. Issue #6 replaces
+# the *consumer* decision (auto-accept vs. route-for-review) with a confidence
+# score so we can (a) auto-accept only unambiguous high-confidence matches and
+# (b) route ambiguous/near-tie/low-confidence matches to human review without
+# emitting a possibly-wrong ``.rtfm``. The scorer is fully deterministic (no
+# randomness) and read-only against sources.
+
+#: Minimum confidence required to AUTO-ACCEPT a match (emit ``.rtfm`` today).
+HIGH_CONFIDENCE = 0.95
+#: Two candidates within this confidence of the best are considered a near-tie.
+NEAR_TIE_EPSILON = 0.05
+
+# Article words whose position (leading ``The X`` / trailing ``X, The``) is
+# canonicalized for comparison. The article is PRESERVED (moved to a canonical
+# trailing position), not discarded, so a game and its ``The``-prefixed twin
+# stay distinct (per issue #6: "The Quest" vs "Quest" must NOT merge).
+_ARTICLE_WORDS = ("the", "a", "an")
+
+
+@dataclass
+class MatchScore:
+    """Deterministic match scoring for one (source, group) pair.
+
+    ``matched`` is True when the source is a plausible manual for the group
+    (used to filter candidates). ``confidence`` (0.0..1.0), ``kind``, and
+    ``evidence`` let the caller decide auto-accept vs. human review and make
+    the decision auditable in provenance.
+    """
+
+    matched: bool
+    confidence: float
+    kind: str                 # exact|basename|normalized|canonical_reuse|
+                               # roman_arabic|minor_spelling|none
+    evidence: list[str]       # human-readable deterministic reasons
+
+
+def _levenshtein(a: str, b: str) -> int:
+    """Iterative Levenshtein edit distance (deterministic, stdlib only)."""
+    if a == b:
+        return 0
+    la, lb = len(a), len(b)
+    if la == 0:
+        return lb
+    if lb == 0:
+        return la
+    prev = list(range(lb + 1))
+    for ca in a:
+        cur = [prev[0] + 1]
+        for j, cb in enumerate(b, 1):
+            cost = 0 if ca == cb else 1
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost))
+        prev = cur
+    return prev[lb]
+
+
+def _roman_to_arabic(tok: str) -> Optional[int]:
+    """Return the arabic value of ``tok`` if it is a valid roman numeral.
+
+    Handles standard subtractive forms (IV, IX, XL, XC, CD, CM) and the common
+    Amiga-era uppercase forms. Non-roman or non-standard (e.g. ``IIII``) tokens
+    return None so we never fabricate a numeral equivalence.
+    """
+    if not tok:
+        return None
+    up = tok.upper()
+    if not re.fullmatch(r"[IVXLCDM]+", up):
+        return None
+    vals = {"I": 1, "V": 5, "X": 10, "L": 50, "C": 100, "D": 500, "M": 1000}
+    total = 0
+    prev = 0
+    try:
+        for ch in reversed(up):
+            v = vals[ch]
+            total += -v if v < prev else v
+            prev = v
+    except KeyError:
+        return None
+    # Reject non-standard forms by confirming a clean re-encode round-trips.
+    if _arabic_to_roman(total) != up:
+        return None
+    return total
+
+
+def _arabic_to_roman(n: int) -> str:
+    """Encode an arabic integer (1..3999) to its standard roman numeral."""
+    if n <= 0 or n >= 4000:
+        return ""
+    table = (
+        (1000, "M"), (900, "CM"), (500, "D"), (400, "CD"),
+        (100, "C"), (90, "XC"), (50, "L"), (40, "XL"),
+        (10, "X"), (9, "IX"), (5, "V"), (4, "IV"), (1, "I"),
+    )
+    out = []
+    for value, sym in table:
+        while n >= value:
+            out.append(sym)
+            n -= value
+    return "".join(out)
+
+
+def _pad_roman_token(tok: str) -> str:
+    """Map a single token to a zero-padded 4-digit arabic string when numeric.
+
+    Roman numerals (``III``) and arabic integers (``3``) both map to ``0003``
+    so they compare equal on the canonical base; non-numeric tokens pass
+    through unchanged. This is what lets ``Synthetic Quest III`` == ``Synthetic
+    Quest 3`` (issue #6 roman<->arabic equivalence).
+    """
+    a = _roman_to_arabic(tok)
+    if a is not None:
+        return f"{a:04d}"
+    if tok.isdigit():
+        try:
+            return f"{int(tok):04d}"
+        except ValueError:
+            return tok
+    return tok
+
+
+def _pad_roman_to_4_tokens(norm: str) -> str:
+    """Apply roman<->arabic normalization across all tokens of a normalized title."""
+    return " ".join(_pad_roman_token(t) for t in norm.split(" "))
+
+
+def _normalize_title_tokens(title: str) -> str:
+    """Canonical normalized title for matching (strict superset of ``_norm_title``).
+
+    Lowercases; turns subtitle separators (``:`` ``-`` ``—`` ``/``) into spaces;
+    collapses underscores and repeated whitespace to one space; moves a
+    leading/trailing article to a canonical trailing position (``The X`` ==
+    ``X, The``); and strips punctuation/symbols. The article is preserved (not
+    discarded), so ``The Quest`` and ``Quest`` remain distinct games.
+    """
+    if not title:
+        return ""
+    t = (title or "").lower()
+    t = re.sub(r"[:\-—/]", " ", t)          # subtitle separators -> word breaks
+    t = re.sub(r"[_\s]+", " ", t)            # underscores + whitespace collapse
+    toks = [w for w in t.split(" ") if w]
+    # Canonicalize article position: "the x" -> "x the"; "x, the" -> "x the".
+    if len(toks) >= 2 and toks[0] in _ARTICLE_WORDS:
+        toks = toks[1:] + [toks[0]]
+    elif len(toks) >= 2 and toks[-1] in _ARTICLE_WORDS and toks[-1] != toks[0]:
+        toks = toks[:-1] + [toks[-1]]
+    # Final alphanumeric+space comparison key (punctuation removed).
+    return re.sub(r"[^a-z0-9 ]", "", " ".join(toks)).strip()
+
+
+def _article_moved(stem: str) -> bool:
+    """True when ``stem`` carried a leading/trailing article (for evidence)."""
+    toks = [w for w in re.sub(r"[_\s]+", " ", (stem or "").lower()).strip().split(" ") if w]
+    return len(toks) >= 2 and (toks[0] in _ARTICLE_WORDS or toks[-1] in _ARTICLE_WORDS)
+
+
+def _single_minor_spelling_fix(norm_a: str, norm_b: str):
+    """Detect a single unambiguous minor-spelling difference.
+
+    Returns ``(token_index, a_token, b_token)`` when exactly ONE token differs
+    and that token pair is at Levenshtein distance 1 (a single char insert /
+    delete / substitution). Returns None otherwise (0 or >=2 differing tokens,
+    or a distance > 1). The caller still requires the candidate to be the
+    UNIQUE best match before auto-accepting — a fuzzy *tie* is never merged.
+    """
+    if not norm_a or not norm_b:
+        return None
+    a = norm_a.split(" ")
+    b = norm_b.split(" ")
+    if len(a) != len(b):
+        return None
+    diffs = []
+    for i, (ta, tb) in enumerate(zip(a, b)):
+        if ta != tb:
+            if _levenshtein(ta, tb) == 1:
+                diffs.append((i, ta, tb))
+            else:
+                return None  # a token differs by more than one edit
+    if len(diffs) == 1:
+        return diffs[0]
+    return None
+
+
+def _canonical_game_key(src: "RtfmSource") -> str:
+    """Stable per-game key for ``src`` (release tags + roman numerals unified)."""
+    base = _strip_release_tags(src.stem)
+    return _pad_roman_to_4_tokens(_normalize_title_tokens(base))
+
+
+def _match_candidates(stem: str, title: str, basename: str) -> "MatchScore":
+    """Score ``stem`` against ONE identity form (``title`` or ``basename``)."""
+    if not stem:
+        return MatchScore(False, 0.0, "none", [])
+    # 1) Exact raw identity (whitespace-insensitive).
+    if stem.strip().lower() == title.strip().lower() and title:
+        return MatchScore(True, 1.00, "exact", ["exact_title_identity"])
+    if stem.strip().lower() == basename.strip().lower() and basename:
+        return MatchScore(True, 1.00, "basename", ["basename_identity"])
+    # 2) Normalized full-title equality (articles canonicalized, symbols stripped).
+    ns_stem = _normalize_title_tokens(stem)
+    ns_title = _normalize_title_tokens(title)
+    if ns_stem and ns_title and ns_stem == ns_title:
+        ev = ["normalized_title_identity"]
+        if _article_moved(stem):
+            ev.append("article_moved_for_canonical_compare")
+        return MatchScore(True, 0.98, "normalized", ev)
+    # 3) Canonical-reuse base equality (articles + release tags stripped).
+    base_stem = _strip_release_tags(stem)
+    base_title = _strip_release_tags(title)
+    nb_stem = _normalize_title_tokens(base_stem)
+    nb_title = _normalize_title_tokens(base_title)
+    rb_stem = _pad_roman_to_4_tokens(nb_stem)
+    rb_title = _pad_roman_to_4_tokens(nb_title)
+    base_eq = bool(nb_stem and nb_title and nb_stem == nb_title)
+    roman_eq = bool(nb_stem and nb_title and rb_stem == rb_title)
+    if roman_eq:
+        ev = ["canonical_reuse_base"]
+        if base_stem != stem or base_title != title:
+            ev.append("release_tags_stripped")
+        if not base_eq:
+            # Equality only holds after roman<->arabic normalization.
+            ev.append("roman_arabic_equivalence")
+            return MatchScore(True, 0.95, "roman_arabic", ev)
+        return MatchScore(True, 0.95, "canonical_reuse", ev)
+    # 4) Roman<->arabic equivalence on the NORMALIZED full title (numeral only).
+    if ns_stem and ns_title and (
+        _pad_roman_to_4_tokens(ns_stem) == _pad_roman_to_4_tokens(ns_title)
+    ):
+        return MatchScore(True, 0.95, "roman_arabic", ["roman_arabic_equivalence"])
+    # 5) Single unambiguous minor-spelling fix (Levenshtein == 1 on one token).
+    fix = _single_minor_spelling_fix(ns_stem, ns_title)
+    if fix is not None:
+        i, ta, tb = fix
+        return MatchScore(
+            True, 0.92, "minor_spelling",
+            [f"minor_spelling_distance_1:token{i}:{ta}->{tb}"],
+        )
+    return MatchScore(False, 0.0, "none", [])
+
+
+def score_source_match(src: "RtfmSource", group) -> "MatchScore":
+    """Score how well one source manual matches a release group.
+
+    Deterministic. Compares the source stem against BOTH the group title and its
+    release basename (multi-disk/variant identity) and returns the stronger of
+    the two comparisons. This powers the auto-accept vs. route-for-review
+    decision in ``build_rtfm_for_group``.
+    """
+    title = (getattr(group, "title", None) or "").strip()
+    try:
+        basename = _group_identity(group)
+    except Exception:
+        basename = title
+    stem = (src.stem or "").strip()
+    if not stem:
+        return MatchScore(False, 0.0, "none", ["empty_source_stem"])
+    by_title = _match_candidates(stem, title, title)
+    by_basename = _match_candidates(stem, basename, basename)
+    # Stronger match wins; on a tie keep the already-matched side.
+    if by_basename.confidence > by_title.confidence:
+        return by_basename
+    return by_title
 
 
 # --- Synthesis ---------------------------------------------------------------
@@ -620,6 +876,7 @@ def _compose_sections(sources: list[RtfmSource], group) -> tuple[dict, list[Rtfm
             if contributed:
                 passthrough_order = contributed
         root_index = getattr(src, "root_index", 0)
+        sc = score_source_match(src, group)
         prov_sources.append(
             RtfmProvenanceSource(
                 category=src.category,
@@ -631,6 +888,9 @@ def _compose_sections(sources: list[RtfmSource], group) -> tuple[dict, list[Rtfm
                 sha256=_sha256_file(src.path),
                 size=src.path.stat().st_size,
                 marker_order=order,
+                match_confidence=sc.confidence,
+                match_kind=sc.kind,
+                match_evidence=list(sc.evidence),
             )
         )
 
@@ -655,6 +915,7 @@ def _compose_sections(sources: list[RtfmSource], group) -> tuple[dict, list[Rtfm
         marker = _section_for_category(src.category)
         sections.setdefault(marker, []).append(body)
         root_index = getattr(src, "root_index", 0)
+        sc = score_source_match(src, group)
         prov_sources.append(
             RtfmProvenanceSource(
                 category=src.category,
@@ -665,6 +926,9 @@ def _compose_sections(sources: list[RtfmSource], group) -> tuple[dict, list[Rtfm
                 sections=[marker],
                 sha256=_sha256_file(src.path),
                 size=src.path.stat().st_size,
+                match_confidence=sc.confidence,
+                match_kind=sc.kind,
+                match_evidence=list(sc.evidence),
             )
         )
 
@@ -971,6 +1235,32 @@ def render_rtfm(
 # --- Provenance --------------------------------------------------------------
 
 
+def _provenance_source_from_scored(src: "RtfmSource", group, *, kind: str) -> "RtfmProvenanceSource":
+    """Build a provenance source entry for a scored candidate (auditable match).
+
+    Carries the deterministic ``match_confidence`` / ``match_kind`` /
+    ``match_evidence`` so review routing is explainable in provenance even when
+    the source was NOT composed into a ``.rtfm`` (e.g. routed-for-review
+    branches, where no section body exists yet). ``kind`` is the file kind
+    label (``txt verbatim`` / ``.rtfm passthrough``).
+    """
+    sc = score_source_match(src, group)
+    root_index = getattr(src, "root_index", 0)
+    return RtfmProvenanceSource(
+        category=src.category,
+        root_index=root_index,
+        source_rel=_relative_to_root(src.path, src.root),
+        filename=src.path.name,
+        kind=kind,
+        sections=[],
+        sha256=_sha256_file(src.path),
+        size=src.path.stat().st_size,
+        match_confidence=sc.confidence,
+        match_kind=sc.kind,
+        match_evidence=list(sc.evidence),
+    )
+
+
 def _write_json_atomic(path: Path, data: dict) -> None:
     """Write JSON to ``path`` via a temp file + atomic replace (no partial reads)."""
     path = Path(path)
@@ -1055,16 +1345,99 @@ def build_rtfm_for_group(
         result.provenance_path = prov_path
         return result
 
-    # Discover + match sources.
+    # Discover + SCORE sources (Issue #6: deterministic confidence scoring).
     all_sources = sources if sources is not None else discover_sources(cfg)
-    matched = [s for s in all_sources if _source_matches_group(s, group)]
+    scored = [(s, score_source_match(s, group)) for s in all_sources]
+    matched = [s for s, sc in scored if sc.matched]
+    # Deterministic sort by (descending confidence, ascending canonical key) so
+    # the "best" and "near-tie" candidates are stable and reproducible.
+    ranked = sorted(
+        ((sc, s) for s, sc in scored if sc.matched),
+        key=lambda scs: (-round(scs[0].confidence, 6), _canonical_game_key(scs[1])),
+    )
     if not matched:
-        # Nothing found for this title. Route for review (operator may add a
-        # manual) rather than emitting an empty file.
+        # Nothing found. Route for review (operator may add a manual) rather
+        # than emitting an empty file. Record the best non-matching candidate
+        # stems (if any) for auditability without leaking host paths.
+        best_stems = sorted(
+            (s.stem for s, sc in scored),
+            key=lambda x: x.lower(),
+        )[:5]
         result.routed_for_review = True
-        result.review_reason = "no matching manual source discovered for this title"
+        result.review_reason = (
+            "no matching manual source discovered for this title"
+            + (f"; nearest stems: {best_stems}" if best_stems else "")
+        )
         result.notes.append(result.review_reason)
-        result.sources = []
+        result.sources = [
+            _provenance_source_from_scored(s, group, kind=(
+                ".rtfm passthrough" if s.path.suffix.lower() == RTFM_SUFFIX
+                else "txt verbatim"
+            ))
+            for s in matched
+        ]
+        _write_json_atomic(
+            prov_path, _build_provenance(group, result, max_bytes=cfg.max_bytes, mode="deterministic")
+        )
+        result.provenance_path = prov_path
+        return result
+
+    # Decide AUTO-ACCEPT vs. ROUTE-FOR-REVIEW from the confidence ranking.
+    # Near-tie detection dedupes by canonical game key so multiple copies of the
+    # SAME game (separate category roots, disk/alt tags) count once — only a
+    # genuinely DISTINCT rival manual forces review.
+    top_conf = ranked[0][0].confidence
+    if top_conf >= HIGH_CONFIDENCE:
+        top_key = _canonical_game_key(ranked[0][1])
+        near_ties = [
+            s.stem for sc, s in ranked[1:]
+            if top_conf - sc.confidence <= NEAR_TIE_EPSILON
+            and _canonical_game_key(s) != top_key
+        ]
+        if near_ties:
+            result.routed_for_review = True
+            result.review_reason = (
+                "ambiguous high-confidence match (near-tie candidates within "
+                f"{NEAR_TIE_EPSILON} of best {top_conf:.2f}): {near_ties}"
+            )
+            result.notes.append(result.review_reason)
+            result.sources = [
+                _provenance_source_from_scored(s, group, kind=(
+                    ".rtfm passthrough" if s.path.suffix.lower() == RTFM_SUFFIX
+                    else "txt verbatim"
+                ))
+                for s, sc in scored if sc.matched
+            ]
+            _write_json_atomic(
+                prov_path, _build_provenance(group, result, max_bytes=cfg.max_bytes, mode="deterministic")
+            )
+            result.provenance_path = prov_path
+            return result
+        # Unambiguous high-confidence: fall through to build + emit (auto-accept).
+    else:
+        # Best candidate is in the plausible-but-not-high band [0.5, 0.95) OR too
+        # low to trust: route to review naming the ambiguity. Never auto-accept
+        # a fuzzy/low-confidence match (issue #6: never merge a fuzzy tie).
+        reason_band = "plausible-but-not-high-confidence" if top_conf >= 0.5 else "low-confidence"
+        other_stems = [s.stem for sc, s in ranked[1:]]
+        tie_note = ""
+        if len(ranked) >= 2 and (top_conf - ranked[1][0].confidence) <= NEAR_TIE_EPSILON:
+            reason_band = "near-tie ambiguous"
+            tie_note = f"; near-tie stems: {other_stems}"
+        result.routed_for_review = True
+        result.review_reason = (
+            f"{reason_band} match (best confidence {top_conf:.2f} < "
+            f"auto-accept threshold {HIGH_CONFIDENCE}); candidate stems: "
+            f"{[s.stem for sc, s in ranked]}{tie_note}"
+        )
+        result.notes.append(result.review_reason)
+        result.sources = [
+            _provenance_source_from_scored(s, group, kind=(
+                ".rtfm passthrough" if s.path.suffix.lower() == RTFM_SUFFIX
+                else "txt verbatim"
+            ))
+            for s, sc in scored if sc.matched
+        ]
         _write_json_atomic(
             prov_path, _build_provenance(group, result, max_bytes=cfg.max_bytes, mode="deterministic")
         )
