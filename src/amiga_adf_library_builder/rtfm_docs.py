@@ -38,8 +38,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import shutil
-import tempfile
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -73,6 +71,13 @@ class RtfmDocsConfig:
     # Rasterization zoom factor for pages/images sent to OCR (higher = more
     # detail, more memory). Kept modest for safety.
     ocr_zoom: float = 2.0
+    # HARD CAP on rasterized pixel count for OCR: w = int(rect.width*ocr_zoom),
+    # h = int(rect.height*ocr_zoom); if w*h > ocr_max_pixels the page is NOT
+    # rasterized (routes to `unavailable`, native-text extraction preserved).
+    # Defends against zip-bomb-style MediaBox expansion: pymupdf's get_pixmap
+    # imposes no default pixel cap, so a tiny PDF declaring a huge page can
+    # otherwise attempt a multi-hundred-GB bitmap (memory-exhaustion DoS).
+    ocr_max_pixels: int = 4_000_000
 
     @classmethod
     def from_dict(cls, data: Optional[dict]) -> "RtfmDocsConfig":
@@ -101,6 +106,7 @@ class RtfmDocsConfig:
             ocr_required=bool(raw.get("ocr_required", False)),
             ocr_timeout=_float("ocr_timeout", cls.ocr_timeout),
             ocr_zoom=_float("ocr_zoom", cls.ocr_zoom),
+            ocr_max_pixels=_int("ocr_max_pixels", cls.ocr_max_pixels),
         )
 
 
@@ -309,67 +315,80 @@ def _extract_pdf_with_fitz(path: Path, cfg: RtfmDocsConfig, tesseract: bool) -> 
     any_native = False
     any_ocr = False
 
-    tmpdir = tempfile.mkdtemp(prefix="rtfm-doc-")
     try:
         doc = fitz.open(path)
-        try:
-            total = min(len(doc), cfg.page_cap)
-            for idx in range(total):
-                page = doc.load_page(idx)
-                raw = page.get_text() or ""
-                norm = _normalize_text(raw)
-                if _count_non_ws(norm) >= cfg.native_text_min_chars:
-                    page_texts.append(norm)
-                    pages.append(PageProvenance(
-                        page_index=idx, method="native_text", confidence="high",
-                    ))
-                    any_native = True
-                    continue
-                # Low/empty native text -> attempt OCR via rasterization.
-                if tesseract:
-                    try:
-                        mat = fitz.Matrix(cfg.ocr_zoom, cfg.ocr_zoom)
-                        pix = page.get_pixmap(matrix=mat)
-                        from PIL import Image  # type: ignore
-
-                        img = Image.frombytes(
-                            "RGB", (pix.width, pix.height), pix.samples
-                        )
-                        ocr = _ocr_pil_image(img, cfg.ocr_timeout)
-                    except Exception:
-                        ocr = None
-                    if ocr is not None:
-                        ocr_norm = _normalize_text(ocr)
-                        if _count_non_ws(ocr_norm) > 0:
-                            page_texts.append(ocr_norm)
-                            pages.append(PageProvenance(
-                                page_index=idx, method="ocr", confidence="low",
-                            ))
-                            any_ocr = True
-                            continue
-                    pages.append(PageProvenance(
-                        page_index=idx, method="unavailable",
-                        confidence="unavailable",
-                        note="ocr produced no text",
-                    ))
-                    needs_ocr = True
-                else:
-                    pages.append(PageProvenance(
-                        page_index=idx, method="unavailable",
-                        confidence="unavailable",
-                        note="no native text; Tesseract unavailable",
-                    ))
-                    needs_ocr = True
-        finally:
-            doc.close()
     except Exception as exc:
         return ExtractionResult(
             text="", pages=(), confidence="unavailable", needs_ocr=needs_ocr,
             source_kind="pdf",
             reason=f"PDF open/parse failed: {type(exc).__name__}",
         )
+
+    try:
+        total = min(len(doc), cfg.page_cap)
+        for idx in range(total):
+            page = doc.load_page(idx)
+            raw = page.get_text() or ""
+            norm = _normalize_text(raw)
+            if _count_non_ws(norm) >= cfg.native_text_min_chars:
+                page_texts.append(norm)
+                pages.append(PageProvenance(
+                    page_index=idx, method="native_text", confidence="high",
+                ))
+                any_native = True
+                continue
+            # Low/empty native text -> attempt OCR via rasterization.
+            if tesseract:
+                # Bounds the zip-bomb expansion path: pixmap allocation
+                # scales with the declared MediaBox x zoom, and pymupdf
+                # applies no default pixel cap. Refuse to rasterize pages
+                # that would exceed ocr_max_pixels; native-text extraction
+                # on other pages is unaffected.
+                mat = fitz.Matrix(cfg.ocr_zoom, cfg.ocr_zoom)
+                w = int(page.rect.width * cfg.ocr_zoom)
+                h = int(page.rect.height * cfg.ocr_zoom)
+                if w * h > cfg.ocr_max_pixels:
+                    pages.append(PageProvenance(
+                        page_index=idx, method="unavailable",
+                        confidence="unavailable",
+                        note="page exceeds OCR pixel cap",
+                    ))
+                    needs_ocr = True
+                    continue
+                try:
+                    pix = page.get_pixmap(matrix=mat)
+                    from PIL import Image  # type: ignore
+
+                    img = Image.frombytes(
+                        "RGB", (pix.width, pix.height), pix.samples
+                    )
+                    ocr = _ocr_pil_image(img, cfg.ocr_timeout)
+                except Exception:
+                    ocr = None
+                if ocr is not None:
+                    ocr_norm = _normalize_text(ocr)
+                    if _count_non_ws(ocr_norm) > 0:
+                        page_texts.append(ocr_norm)
+                        pages.append(PageProvenance(
+                            page_index=idx, method="ocr", confidence="low",
+                        ))
+                        any_ocr = True
+                        continue
+                pages.append(PageProvenance(
+                    page_index=idx, method="unavailable",
+                    confidence="unavailable",
+                    note="ocr produced no text",
+                ))
+                needs_ocr = True
+            else:
+                pages.append(PageProvenance(
+                    page_index=idx, method="unavailable",
+                    confidence="unavailable",
+                    note="no native text; Tesseract unavailable",
+                ))
+                needs_ocr = True
     finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
+        doc.close()
 
     joined = _normalize_text("\n\n".join(page_texts))
     return _finalize_pdf_result(joined, pages, needs_ocr, any_native, any_ocr)

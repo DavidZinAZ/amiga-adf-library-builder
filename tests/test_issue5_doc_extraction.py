@@ -29,6 +29,7 @@ from pathlib import Path
 
 import pytest
 from PIL import Image
+import fitz  # type: ignore  # noqa: E402  (used by the rasterization-bound regression tests below)
 
 # Force the worktree's source tree to win over the editable main-repo install.
 _WT = Path(__file__).resolve().parents[1] / "src"
@@ -405,3 +406,160 @@ def test_rtfm_config_carries_docs():
     # defaults when omitted
     cfg2 = rc.RtfmConfig.from_dict({"enabled": True})
     assert cfg2.docs.page_cap == RtfmDocsConfig().page_cap
+
+
+# ---------------------------------------------------------------------------
+# Regression: Issue #5 security defect — bounded PDF rasterization memory
+# (memory-exhaustion DoS via zip-bomb-style MediaBox when Tesseract present)
+# ---------------------------------------------------------------------------
+
+
+def _huge_mediabox_pdf_bytes() -> bytes:
+    """A tiny (<=32 MB) PDF declaring a 200000x200000 pt page at zoom 2.
+
+    Without the pixel cap this would attempt a 400000 x 400000 px bitmap
+    (~480 GB) in pymupdf's get_pixmap. With the cap the page must route to
+    `unavailable` WITHOUT ever calling get_pixmap.
+    """
+    doc = fitz.open()
+    page = doc.new_page(width=200000, height=200000)
+    # A single small text block, then a drawn white rect to ensure it is a
+    # real (non-trivial) page.
+    page.insert_text((72, 720), "BOOT", fontsize=12)
+    page.draw_rect(page.rect, color=(1, 1, 1), fill=(1, 1, 1))
+    buf = io.BytesIO()
+    doc.save(buf)
+    doc.close()
+    return buf.getvalue()
+
+
+def _large_native_pdf_bytes() -> bytes:
+    """A normal native-text PDF whose page fits comfortably under the cap.
+
+    The inserted text carries well over ``native_text_min_chars`` (32) so the
+    page is recognized as native text and extracted directly, proving the
+    pixel cap does NOT suppress legitimate extraction.
+    """
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_text(
+        (72, 720),
+        "GETTING STARTED\n\nInsert the disk and power on the machine, then follow the on-screen prompts to begin play.",
+        fontsize=12,
+    )
+    buf = io.BytesIO()
+    doc.save(buf)
+    doc.close()
+    return buf.getvalue()
+
+
+def test_ocr_max_pixels_default_is_conservative():
+    cfg = RtfmDocsConfig()
+    assert cfg.ocr_max_pixels == 4_000_000
+    # A default (zoom 2) 2000x2000 page is exactly at the cap; anything larger
+    # exceeds it. Guard uses strict `>`.
+    assert (2000 * 2000) == cfg.ocr_max_pixels
+    assert (2001 * 2001) > cfg.ocr_max_pixels
+
+
+def test_ocr_max_pixels_wired_through_from_dict():
+    cfg = RtfmDocsConfig.from_dict({"ocr_max_pixels": 1_000_000})
+    assert cfg.ocr_max_pixels == 1_000_000
+    # Invalid (non-int / <=0) falls back to the default, never a broken value.
+    assert RtfmDocsConfig.from_dict({"ocr_max_pixels": 0}).ocr_max_pixels == 4_000_000
+    assert RtfmDocsConfig.from_dict({"ocr_max_pixels": -5}).ocr_max_pixels == 4_000_000
+    assert RtfmDocsConfig.from_dict({"ocr_max_pixels": "nope"}).ocr_max_pixels == 4_000_000
+
+
+def test_huge_mediabox_pdf_routes_unavailable_no_rasterization(monkeypatch, tmp_path):
+    """THE regression test for the DoS defect.
+
+    Simulate the trigger (Tesseract present) and prove a huge-MediaBox PDF
+    routes to `unavailable` WITHOUT invoking get_pixmap (no OOM). The spy is
+    the authoritative check: if the bound is removed, get_pixmap is called on
+    the 400000x400000 page and this test fails (or exhausts memory).
+    """
+    pdf = tmp_path / "huge.pdf"
+    pdf.write_bytes(_huge_mediabox_pdf_bytes())
+    # Tiny on disk; the danger is the declared page size, not the file size.
+    assert pdf.stat().st_size <= 32 * 1024 * 1024
+
+    monkeypatch.setattr(rtfm_docs, "_tesseract_available", lambda: True)
+    get_pixmap_spy = {"calls": 0}
+
+    real_get_pixmap = fitz.Page.get_pixmap
+
+    def _spy(self, *args, **kwargs):
+        get_pixmap_spy["calls"] += 1
+        return real_get_pixmap(self, *args, **kwargs)
+
+    monkeypatch.setattr(fitz.Page, "get_pixmap", _spy)
+    monkeypatch.setattr(rtfm_docs, "_have_pymupdf", lambda: True)
+
+    res = extract_pdf_text(pdf, cfg=RtfmDocsConfig(ocr_max_pixels=4_000_000))
+
+    # The over-cap page must NOT be rasterized.
+    assert get_pixmap_spy["calls"] == 0, "get_pixmap called on over-cap page"
+    # It must route to unavailable, flagging OCR as needed.
+    assert res.confidence == "unavailable"
+    assert res.needs_ocr is True
+    assert all(p.method == "unavailable" for p in res.pages)
+    assert any(p.note == "page exceeds OCR pixel cap" for p in res.pages)
+    # No fabricated text.
+    assert res.text.strip() == ""
+
+
+def test_cap_suppresses_only_over_cap_pages_preserves_native(monkeypatch, tmp_path):
+    """The cap must NOT suppress legitimate extraction on a normal page."""
+    pdf = tmp_path / "normal.pdf"
+    pdf.write_bytes(_large_native_pdf_bytes())
+    monkeypatch.setattr(rtfm_docs, "_tesseract_available", lambda: True)
+    monkeypatch.setattr(rtfm_docs, "_have_pymupdf", lambda: True)
+
+    res = extract_pdf_text(pdf, cfg=RtfmDocsConfig(ocr_max_pixels=4_000_000))
+    # Normal page is well under the cap -> native text extracted normally.
+    assert res.confidence == "high"
+    assert "GETTING STARTED" in res.text
+    assert res.pages[0].method == "native_text"
+    assert res.needs_ocr is False
+
+
+def test_ocr_max_pixels_configurable_tightens_bound(monkeypatch, tmp_path):
+    """A tight cap must deflect a normal-sized scanned page without rasterizing.
+
+    The scanned page is 612x792 pt; at zoom 2 that is 1224x1584 = 1_939_584 px.
+    With the default cap (4_000_000) it would be rasterized (get_pixmap called);
+    with a tight cap (1_000_000) it must route to `unavailable` WITHOUT calling
+    get_pixmap. This proves the cap — not the absence of text — is what deflects.
+    """
+    pdf = tmp_path / "scanned.pdf"
+    # No native text -> would enter the OCR branch at the cap check.
+    pdf.write_bytes(_make_scanned_pdf_bytes())
+    monkeypatch.setattr(rtfm_docs, "_tesseract_available", lambda: True)
+    monkeypatch.setattr(rtfm_docs, "_have_pymupdf", lambda: True)
+
+    # Sanity: under the default cap the page WOULD be rasterized (spy fires).
+    spy_default = {"calls": 0}
+    real_get_pixmap = fitz.Page.get_pixmap
+
+    def _spy_default(self, *args, **kwargs):
+        spy_default["calls"] += 1
+        return real_get_pixmap(self, *args, **kwargs)
+
+    monkeypatch.setattr(fitz.Page, "get_pixmap", _spy_default)
+    res_default = extract_pdf_text(pdf, cfg=RtfmDocsConfig(ocr_max_pixels=4_000_000))
+    assert spy_default["calls"] >= 1, "default cap should permit rasterization"
+    assert res_default.needs_ocr is True
+
+    # Under a tight cap the same page must NOT be rasterized.
+    spy_tight = {"calls": 0}
+
+    def _spy_tight(self, *args, **kwargs):
+        spy_tight["calls"] += 1
+        return real_get_pixmap(self, *args, **kwargs)
+
+    monkeypatch.setattr(fitz.Page, "get_pixmap", _spy_tight)
+    res_tight = extract_pdf_text(pdf, cfg=RtfmDocsConfig(ocr_max_pixels=1_000_000))
+    assert spy_tight["calls"] == 0, "tight cap must skip rasterization"
+    assert res_tight.needs_ocr is True
+    assert any(p.note == "page exceeds OCR pixel cap" for p in res_tight.pages)
