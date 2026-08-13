@@ -17,6 +17,11 @@ dev = ["pytest>=8", "pillow>=10"]
 # absent (artwork/enrich raise a clear "Pillow unavailable" error instead of
 # faking output). Declare it so qualification and artwork users can install it.
 artwork = ["pillow>=10"]
+# Issue #5: optional OFFLINE PDF / scanned-image RTFM extraction. The core
+# library stays dependency-free; these are only needed to extract text from
+# PDF/image manuals. Behavior degrades gracefully (clear "unavailable", no
+# fabricated output) when any of these are missing or Tesseract is absent.
+rtfm-docs = ["pypdf>=4", "pymupdf>=1.23", "pillow>=10", "pytesseract>=0.3"]
 
 [project.scripts]
 amiga-adf-library-builder = "amiga_adf_library_builder.cli:main"

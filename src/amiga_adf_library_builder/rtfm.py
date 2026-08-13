@@ -76,6 +76,11 @@ from typing import Iterable, Optional
 # They are pure helpers with no network/state dependency.
 from .local_media import _relative_to_root, _sha256_file  # noqa: F401  (re-exported for tests)
 
+# Issue #5: PDF/image text extraction layer (optional dependency, offline only).
+# Imported lazily inside the load path so the core library stays importable
+# without pypdf/pymupdf/pillow/pytesseract installed.
+from .rtfm_docs import RtfmDocsConfig  # noqa: F401  (re-exported for tests)
+
 # --- Constants ---------------------------------------------------------------
 
 #: Official GTi v2 hard limit. NEVER emit a .rtfm larger than this; on overflow
@@ -177,6 +182,13 @@ CATEGORY_PRIMARY_MARKER: dict[str, str] = {
 RTFM_SUFFIX = ".rtfm"
 TXT_SUFFIXES: frozenset[str] = frozenset({".txt", ".text", ".md"})
 
+# Issue #5: scanned/digital manual sources (extracted offline, no AI).
+PDF_SUFFIXES: frozenset[str] = frozenset({".pdf"})
+IMAGE_SUFFIXES: frozenset[str] = frozenset({".jpg", ".jpeg", ".png"})
+#: Suffixes routed to the PDF extraction layer.
+#: Suffixes routed to the standalone-image extraction layer.
+DOC_SUFFIXES: frozenset[str] = PDF_SUFFIXES | IMAGE_SUFFIXES
+
 
 class RtfmError(Exception):
     """Base error for RTFM builder failures."""
@@ -205,6 +217,10 @@ class RtfmConfig:
     # Conservative review-on-overflow target (bytes). Clamped to <= MAX_RTFM_BYTES.
     max_bytes: int = DEFAULT_RTFM_REVIEW_TARGET
     recursive: bool = True
+    # Issue #5: optional PDF/image extraction knobs (read from ``[rtfm.docs]``).
+    # When the optional ``[rtfm-docs]`` dependencies are absent, extraction
+    # degrades gracefully (unavailable, no fabricated output) regardless of this.
+    docs: "RtfmDocsConfig" = field(default_factory=RtfmDocsConfig)
 
     @classmethod
     def from_dict(cls, data: Optional[dict]) -> "RtfmConfig":
@@ -248,6 +264,8 @@ class RtfmConfig:
 
         recursive = bool(raw.get("recursive", True))
 
+        docs = RtfmDocsConfig.from_dict(raw.get("docs"))
+
         return cls(
             enabled=enabled,
             template=template,
@@ -257,6 +275,7 @@ class RtfmConfig:
             online_enabled=online_enabled,
             max_bytes=max_bytes,
             recursive=recursive,
+            docs=docs,
         )
 
 
@@ -292,6 +311,15 @@ class RtfmProvenanceSource:
     match_confidence: float = 0.0
     match_kind: str = "none"
     match_evidence: list[str] = field(default_factory=list)
+    # Issue #5: PDF/image extraction provenance (optional).
+    # ``extraction_method`` mirrors ``kind``'s type tag when a doc source:
+    # e.g. "pdf:native_text" / "pdf:page_ocr" / "pdf:mixed" / "image:ocr" /
+    # "pdf:unavailable" / "image:unavailable". ``pages`` carries per-page
+    # method/confidence (deterministic). ``deduped_by`` names the higher
+    # fidelity source that suppressed this one (no duplicate RTFM content).
+    extraction_method: Optional[str] = None
+    pages: Optional[list[dict]] = None
+    deduped_by: Optional[str] = None
 
 
 @dataclass
@@ -435,7 +463,12 @@ def _confined_candidates(
         # Reject non-regular files (symlinks/devices/FIFOs/sockets).
         if not stat.S_ISREG(st.st_mode):
             continue
-        if real.suffix.lower() != RTFM_SUFFIX and real.suffix.lower() not in TXT_SUFFIXES:
+        suf = real.suffix.lower()
+        if (
+            suf != RTFM_SUFFIX
+            and suf not in TXT_SUFFIXES
+            and suf not in DOC_SUFFIXES
+        ):
             continue
         candidates.append(
             RtfmSource(
@@ -826,7 +859,9 @@ def _section_for_category(category: str) -> str:
     return CATEGORY_PRIMARY_MARKER[category]
 
 
-def _compose_sections(sources: list[RtfmSource], group) -> tuple[dict, list[RtfmProvenanceSource], Optional[list[str]], list[str]]:
+def _compose_sections(
+    sources: list[RtfmSource], group, cfg: "RtfmConfig | None" = None,
+) -> tuple[dict, list[RtfmProvenanceSource], Optional[list[str]], list[str]]:
     """Compose section bodies from matched sources (verbatim, deterministic).
 
     Returns (sections: {marker: body_text}, provenance_sources,
@@ -929,6 +964,136 @@ def _compose_sections(sources: list[RtfmSource], group) -> tuple[dict, list[Rtfm
                 match_confidence=sc.confidence,
                 match_kind=sc.kind,
                 match_evidence=list(sc.evidence),
+            )
+        )
+
+    # Issue #5: PDF/image sources -> offline extraction layer, then treat the
+    # extracted text as verbatim source lines through the SAME .txt path so
+    # matching/synthesis/condensation/export are unchanged.
+    #
+    # DUPLICATE SUPPRESSION: when the same manual also exists as a higher-
+    # fidelity source (.rtfm or .txt) among the matched sources for this group,
+    # the doc source is SUPPRESSED (recorded, not composed) so composition never
+    # emits duplicate RTFM content. We prefer .rtfm/.txt over extracted text.
+    # Deterministic: the rule depends only on the matched source set.
+    _higher_fidelity = [
+        s for s in sources
+        if s.path.suffix.lower() in TXT_SUFFIXES
+        or s.path.suffix.lower() == RTFM_SUFFIX
+    ]
+    _hf_keys = {_canonical_game_key(s) for s in _higher_fidelity}
+
+    # Default extraction config (safe defaults when caller omits cfg).
+    _docs_cfg = cfg.docs if cfg is not None else RtfmDocsConfig()
+
+    for src in [s for s in sources if s.path.suffix.lower() in DOC_SUFFIXES]:
+        suf = src.path.suffix.lower()
+        root_index = getattr(src, "root_index", 0)
+        sc = score_source_match(src, group)
+
+        # Suppress duplicate manual content in favor of a higher-fidelity source.
+        if _canonical_game_key(src) in _hf_keys:
+            deduped_by = next(
+                (s.path.name for s in _higher_fidelity
+                 if _canonical_game_key(s) == _canonical_game_key(src)),
+                None,
+            )
+            prov_sources.append(
+                RtfmProvenanceSource(
+                    category=src.category,
+                    root_index=root_index,
+                    source_rel=_relative_to_root(src.path, src.root),
+                    filename=src.path.name,
+                    kind="pdf" if suf in PDF_SUFFIXES else "image",
+                    sections=[],
+                    sha256=_sha256_file(src.path),
+                    size=src.path.stat().st_size,
+                    match_confidence=sc.confidence,
+                    match_kind=sc.kind,
+                    match_evidence=list(sc.evidence),
+                    extraction_method="deduped",
+                    deduped_by=deduped_by,
+                )
+            )
+            skipped_notes.append(
+                f"source skipped (duplicate manual; higher-fidelity "
+                f"'{deduped_by}' used): {src.path.name}"
+            )
+            continue
+
+        # Lazy import keeps the core import-free of the optional deps.
+        try:
+            from .rtfm_docs import extract_image_text, extract_pdf_text
+        except Exception as exc:  # pragma: no cover - import guard
+            skipped_notes.append(
+                f"source skipped (extraction layer unavailable): {src.path.name} ({exc})"
+            )
+            continue
+
+        try:
+            if suf in PDF_SUFFIXES:
+                res = extract_pdf_text(src.path, _docs_cfg)
+                kind_prefix = "pdf"
+            else:
+                res = extract_image_text(src.path, _docs_cfg)
+                kind_prefix = "image"
+        except Exception as exc:
+            skipped_notes.append(
+                f"source skipped (extraction failed, routed for review): "
+                f"{src.path.name} ({type(exc).__name__})"
+            )
+            continue
+
+        if res.empty or res.confidence == "unavailable":
+            # Empty/near-empty/unusable extraction MUST NOT produce fabricated
+            # RTFM content. Record provenance and route for review.
+            prov_sources.append(
+                RtfmProvenanceSource(
+                    category=src.category,
+                    root_index=root_index,
+                    source_rel=_relative_to_root(src.path, src.root),
+                    filename=src.path.name,
+                    kind="pdf" if suf in PDF_SUFFIXES else "image",
+                    sections=[],
+                    sha256=_sha256_file(src.path),
+                    size=src.path.stat().st_size,
+                    match_confidence=sc.confidence,
+                    match_kind=sc.kind,
+                    match_evidence=list(sc.evidence),
+                    extraction_method=f"{kind_prefix}:unavailable",
+                    pages=[p.__dict__ for p in res.pages],
+                )
+            )
+            skipped_notes.append(
+                f"source skipped (extraction unavailable"
+                f"{'; needs OCR' if res.needs_ocr else ''}): {src.path.name}"
+            )
+            continue
+
+        # Use the extracted text verbatim (same as .txt relocation).
+        body = res.text.strip()
+        if not body:
+            continue
+        marker = _section_for_category(src.category)
+        sections.setdefault(marker, []).append(body)
+        contributed = [marker]
+        # Build a descriptive kind e.g. "pdf:native_text" / "pdf:mixed".
+        method_kind = res.reason.replace("pdf:", "").replace("image:", "") or "extracted"
+        prov_sources.append(
+            RtfmProvenanceSource(
+                category=src.category,
+                root_index=root_index,
+                source_rel=_relative_to_root(src.path, src.root),
+                filename=src.path.name,
+                kind=f"{kind_prefix}:{method_kind}",
+                sections=contributed,
+                sha256=_sha256_file(src.path),
+                size=src.path.stat().st_size,
+                match_confidence=sc.confidence,
+                match_kind=sc.kind,
+                match_evidence=list(sc.evidence),
+                extraction_method=f"{kind_prefix}:{method_kind}",
+                pages=[p.__dict__ for p in res.pages],
             )
         )
 
@@ -1461,7 +1626,7 @@ def build_rtfm_for_group(
         safe_matched.append(s)
     matched = safe_matched
 
-    sections, prov_sources, passthrough_order, skipped_notes = _compose_sections(matched, group)
+    sections, prov_sources, passthrough_order, skipped_notes = _compose_sections(matched, group, cfg=cfg)
     result.sources = prov_sources
     result.notes.extend(skipped_notes)
 
