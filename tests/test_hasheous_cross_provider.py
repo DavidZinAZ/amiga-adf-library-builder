@@ -92,10 +92,11 @@ def test_cross_provider_disagreeing_exact_hash_routes_to_review():
                            "confidence": 1.0}).encode()
 
     def hs_opener(url, *, timeout):
-        return json.dumps({"found": True, "provider_id": "HS-B",
-                           "title": "Disagreement Game", "confidence": 1.0,
-                           "category": "Game",
-                           "external_ids": {"igdb_id": "IGDB-9"}}).encode()
+        return json.dumps({"id": "HS-B", "name": "Disagreement Game",
+                           "platform": "Amiga",
+                           "metadataMatches": [{"source": "NoIntro",
+                                                "gameId": "IGDB-9"}],
+                           "igdb_id": "IGDB-9"}).encode()
 
     er = _enrich(group,
                  playmatch_provider=_pm_provider(pm_opener),
@@ -151,9 +152,10 @@ def test_cross_provider_agreeing_provider_ids_no_review():
                            "confidence": 1.0}).encode()
 
     def hs_opener(url, *, timeout):
-        return json.dumps({"found": True, "provider_id": "AGREE",
-                           "title": "Agreement Game", "confidence": 1.0,
-                           "category": "Game",
+        return json.dumps({"id": "AGREE", "name": "Agreement Game",
+                           "platform": "Amiga",
+                           "metadataMatches": [{"source": "NoIntro",
+                                                "gameId": "AGREE"}],
                            "external_ids": {}}).encode()
 
     er = _enrich(group,
@@ -194,10 +196,11 @@ def test_cross_provider_agreeing_id_disagreeing_external_ids_routes_to_review():
                            "confidence": 1.0}).encode()
 
     def hs_opener(url, *, timeout):
-        return json.dumps({"found": True, "provider_id": "SAME",
-                           "title": "ExtDisagreement Game", "confidence": 1.0,
-                           "category": "Game",
-                           "external_ids": {"igdb_id": "IGDB-X"}}).encode()
+        return json.dumps({"id": "SAME", "name": "ExtDisagreement Game",
+                           "platform": "Amiga",
+                           "metadataMatches": [{"source": "NoIntro",
+                                                "gameId": "SAME"}],
+                           "igdb_id": "IGDB-X"}).encode()
 
     er = _enrich(group,
                  playmatch_provider=_pm_provider(pm_opener),

@@ -1,22 +1,25 @@
 """Tests for the OPTIONAL Hasheous ROM-hash identity resolver provider.
 
 Mirrors ``tests/test_playmatch_provider.py`` in style and coverage. Covers
-every acceptance criterion from issue #12:
+every acceptance criterion from issue #12 against the REAL Hasheous contract:
 
 * disabled by default; ``from_dict(None)`` -> enabled=False
-* hash-first: exact-hash match OUTRANKS title fallback; determinism
+* hash-first: exact-hash match OUTRANKS everything; determinism
 * ambiguous/conflict -> needs_manual_review (never silent override)
-* outage/timeout/oversize -> non-fatal NONE (found=False), pipeline continues
+* outage/timeout/oversize/429 -> non-fatal NONE (found=False), pipeline continues
 * SSRF guard active (private host refused); privacy preserved
   (no private filename/path in cache or request)
 * provider-ID capture + external_ids capture for downstream
-* title/filename fallback still passes the EXISTING relevance validation
-* negative-lookup caching
+* negative-lookup caching (empty HashLookup -> not found, public-signal only)
 * OFFLINE guarantee: socket.socket monkeypatched to raise proves no real fetch
 * HasheousResult exposes the same public fields as PlaymatchResult + external_ids
+* ONLY the documented lookup method is used (GET /Lookup/ByHash/sha256/{sha256});
+  there is NO REST title endpoint in the real API, so a group with no hash
+  signal deterministically misses (no private data transmitted).
 
 All network contact is synthetic/mock: an injected ``opener`` returns synthetic
-JSON, and ``resolve=False`` is passed so ``guard_url`` never performs DNS.
+JSON shaped like the real ``Classes.HashLookup`` response, and ``resolve=False``
+is passed so ``guard_url`` never performs DNS.
 """
 
 from __future__ import annotations
@@ -80,24 +83,18 @@ def _provider(config: dict, cache: Path, *, opener=None):
     return prov
 
 
-def _rom_response(found=True, *, provider_id="HS-123", title=None,
-                  confidence=1.0, category="Game", external_ids=None):
-    if not found:
-        return {"found": False}
+def _hash_lookup(*, id="HS-1", name=None, platform="Amiga", publisher=None,
+                 metadata_matches=None, **extra):
+    """Build a synthetic Classes.HashLookup response (real contract shape)."""
     return {
-        "found": True,
-        "provider_id": provider_id,
-        "title": title,
-        "confidence": confidence,
-        "category": category,
-        "external_ids": external_ids or {},
+        "id": id,
+        "name": name,
+        "platform": platform,
+        "publisher": publisher,
+        "signatures": {},
+        "metadataMatches": metadata_matches or [],
+        **extra,
     }
-
-
-def _search_response(found=True, *, candidates=None):
-    if not found:
-        return {"found": False}
-    return {"found": True, "candidates": candidates or []}
 
 
 # --- acceptance #1: disabled by default -------------------------------------
@@ -126,11 +123,13 @@ def test_config_bounding_rejects_weakened_values():
         "max_response_bytes": 10**12,
         "max_concurrency": 1000,
         "confidence_threshold": 5.0,
+        "rate_limit_backoff_seconds": 9999,
     })
     assert cfg.timeout_seconds == hs.DEFAULT_TIMEOUT_SECONDS
     assert cfg.max_response_bytes == hs.DEFAULT_MAX_RESPONSE_BYTES
     assert cfg.max_concurrency == hs.DEFAULT_MAX_CONCURRENCY
     assert cfg.confidence_threshold == hs.DEFAULT_CONFIDENCE_THRESHOLD
+    assert cfg.rate_limit_backoff_seconds <= hs._MAX_429_BACKOFF_SECONDS
 
 
 def test_result_mirrors_playmatch_public_fields():
@@ -166,8 +165,10 @@ def test_offline_no_real_socket(monkeypatch, tmp_path):
     group = _make_group("Example Game", sha256=sha)
 
     def opener(url, *, timeout):
-        assert "api.hasheous.example" in url
-        return json.dumps(_rom_response(provider_id="HS-XY")).encode()
+        assert "/Lookup/ByHash/sha256/" in url
+        return json.dumps(_hash_lookup(id="HS-XY", name="Example Game",
+                                        metadata_matches=[{"source": "NoIntro",
+                                                           "gameId": "NI-XY"}])).encode()
 
     prov = _provider({"enabled": True}, tmp_path / "cache", opener=opener)
     res = prov.resolve(group, sha256=sha)
@@ -177,25 +178,23 @@ def test_offline_no_real_socket(monkeypatch, tmp_path):
     assert calls == []
 
 
-# --- acceptance #2: hash-first outranks title, determinism ------------------
+# --- acceptance #2: hash-first outranks everything, determinism -------------
 
-def test_exact_hash_outranks_title_fallback(tmp_path):
+def test_exact_hash_match_resolves(tmp_path):
     sha = "b" * 64
     group = _make_group("Example Game", sha256=sha)
 
     def opener(url, *, timeout):
-        if "/rom/" in url:
-            return json.dumps(_rom_response(provider_id="HS-HASH")).encode()
-        if "/search" in url:
-            return json.dumps(_search_response(
-                candidates=[{"provider_id": "HS-TITLE"}])).encode()
-        raise AssertionError(f"unexpected url {url}")
+        assert url.endswith(f"/Lookup/ByHash/sha256/{sha}")
+        return json.dumps(_hash_lookup(
+            id="HS-HASH", name="Example Game",
+            metadata_matches=[{"source": "NoIntro", "gameId": "NI-HASH"}])).encode()
 
     prov = _provider({"enabled": True}, tmp_path / "cache", opener=opener)
     res = prov.resolve(group, sha256=sha)
     assert res.found is True
     assert res.match_method == hs.HasheousMatchMethod.EXACT_HASH
-    assert res.provider_id == "HS-HASH"
+    assert res.provider_id == "NI-HASH"
     assert res.confidence == 1.0
 
 
@@ -203,7 +202,9 @@ def test_determinism_same_input_same_result(tmp_path):
     sha = "c" * 64
     group = _make_group("Deterministic Game", sha256=sha)
 
-    payload = json.dumps(_rom_response(provider_id="HS-DET")).encode()
+    payload = json.dumps(_hash_lookup(id="HS-DET",
+                                      metadata_matches=[{"source": "NoIntro",
+                                                         "gameId": "NI-DET"}])).encode()
 
     def opener(url, *, timeout):
         return payload
@@ -222,127 +223,112 @@ def test_hash_signal_from_scans_reuses_scanner_sha(tmp_path):
     scans = _make_scans(group, sha)
 
     def opener(url, *, timeout):
-        assert url.endswith(f"/rom/{sha}")
-        return json.dumps(_rom_response(provider_id="HS-SCAN")).encode()
+        assert url.endswith(f"/Lookup/ByHash/sha256/{sha}")
+        return json.dumps(_hash_lookup(id="HS-SCAN",
+                                       metadata_matches=[{"source": "NoIntro",
+                                                          "gameId": "NI-SCAN"}])).encode()
 
     prov = _provider({"enabled": True}, tmp_path / "cache", opener=opener)
     res = prov.resolve(group, scans=scans)
     assert res.found is True
-    assert res.provider_id == "HS-SCAN"
+    assert res.provider_id == "NI-SCAN"
 
 
-def test_refuse_hash_mode_without_signal_falls_to_title(tmp_path):
-    """No sha anywhere -> hash mode refused -> title fallback attempted."""
+def test_no_hash_signal_deterministic_miss(tmp_path):
+    """No sha anywhere -> cannot query Hasheous -> deterministic NONE miss.
+
+    The real Hasheous API has NO REST title endpoint, so the canonical title is
+    never transmitted as a substitute (privacy: only the public sha256 is sent).
+    """
     group = _make_group("Fallback Game")
 
+    sent_urls = []
+
     def opener(url, *, timeout):
-        if "/rom/" in url:
-            raise AssertionError("should not query /rom without a hash signal")
-        return json.dumps(_search_response(
-            candidates=[{"provider_id": "HS-FB", "title": "Fallback Game",
-                         "confidence": 0.97}])).encode()
+        sent_urls.append(url)
+        raise AssertionError("should not be called without a hash signal")
 
     prov = _provider({"enabled": True}, tmp_path / "cache", opener=opener)
     res = prov.resolve(group)
-    assert res.found is True
-    assert res.match_method == hs.HasheousMatchMethod.FUZZY_TITLE
-    assert res.provider_id == "HS-FB"
+    assert res.found is False
+    assert res.match_method == hs.HasheousMatchMethod.NONE
+    assert res.needs_manual_review is False
+    assert sent_urls == []
 
 
 # --- acceptance #3: ambiguous / conflict -> manual review -------------------
 
-def test_conflicting_title_candidates_routes_to_review(tmp_path):
-    """Two accepted title candidates with different ids -> manual review."""
-    group = _make_group("Ambiguous Game")
-
-    def opener(url, *, timeout):
-        return json.dumps(_search_response(
-            candidates=[
-                {"provider_id": "HS-ONE", "title": "Ambiguous Game", "confidence": 0.97},
-                {"provider_id": "HS-TWO", "title": "Ambiguous Game", "confidence": 0.97},
-            ])).encode()
-
-    prov = _provider({"enabled": True}, tmp_path / "cache", opener=opener)
-    res = prov.resolve(group)
-    assert res.found is False
-    assert res.needs_manual_review is True
-    assert res.match_method == hs.HasheousMatchMethod.MANUAL_REVIEW
-    assert "conflicting" in (res.manual_review_reason or "").lower()
-
-
-def test_title_fallback_failing_relevance_routes_to_review(tmp_path):
-    """Filename-fallback candidate that fails existing relevance -> review, not accept."""
-    group = _make_group("Real Game")
-
-    def opener(url, *, timeout):
-        return json.dumps(_search_response(
-            candidates=[{"provider_id": "HS-WRONG", "title": "Completely Different Title",
-                         "confidence": 0.99}])).encode()
-
-    prov = _provider({"enabled": True}, tmp_path / "cache", opener=opener)
-    res = prov.resolve(group)
-    assert res.found is False
-    assert res.needs_manual_review is True
-    assert res.match_method == hs.HasheousMatchMethod.MANUAL_REVIEW
-
-
-def test_hash_match_conflicting_title_no_silent_override(tmp_path):
-    """Hash says ID-A; a conflicting title result must NOT silently override the hash.
-
-    Both signals are resolved independently; the exact-hash identity is
-    authoritative and deterministic, and it outranks the weaker title signal.
-    """
+def test_hash_match_without_provider_id_routes_to_review(tmp_path):
+    """A HashLookup that names the game but yields no provider id is ambiguous
+    (recognized-but-identity-less) -> manual review, never a silent miss."""
     sha = "e" * 64
     group = _make_group("Conflict Game", sha256=sha)
 
     def opener(url, *, timeout):
-        if "/rom/" in url:
-            return json.dumps(_rom_response(provider_id="HS-HASHID")).encode()
-        if "/search" in url:
-            return json.dumps(_search_response(
-                candidates=[{"provider_id": "HS-TITLEID", "title": "Conflict Game",
-                             "confidence": 0.97}])).encode()
-        raise AssertionError(url)
+        # Recognized HashLookup (has a name) but no usable id / metadataMatch:
+        # ambiguous -> fail-safe manual review, not a negative cache.
+        return json.dumps(_hash_lookup(id="", name="Conflict Game",
+                                        metadata_matches=[])).encode()
 
     prov = _provider({"enabled": True}, tmp_path / "cache", opener=opener)
     res = prov.resolve(group, sha256=sha)
-    assert res.found is True
-    assert res.match_method == hs.HasheousMatchMethod.EXACT_HASH
-    assert res.provider_id == "HS-HASHID"
-    # The weaker title signal did not override the stronger hash identity.
-    assert res.provider_id != "HS-TITLEID"
+    assert res.found is False
+    assert res.needs_manual_review is True
+    assert res.match_method == hs.HasheousMatchMethod.MANUAL_REVIEW
 
 
-# --- acceptance #4: outage / timeout / oversize -> non-fatal ----------------
+def test_canonical_reuse_returns_cached_identity(tmp_path):
+    """Canonical reuse returns the stored mapping; cross-provider disagreement
+    is handled by enrich_group, not by re-detecting intra-provider conflict."""
+    sha = "f" * 64
+    group = _make_group("Ambiguous Game", sha256=sha)
+
+    def opener(url, *, timeout):
+        return json.dumps(_hash_lookup(id="HS-A",
+                                       metadata_matches=[{"source": "NoIntro",
+                                                          "gameId": "NI-A"}])).encode()
+
+    prov = _provider({"enabled": True, "cache_ttl": 1000.0},
+                     tmp_path / "cache", opener=opener)
+    r1 = prov.resolve(group, sha256=sha)
+    assert r1.found and r1.provider_id == "NI-A"
+    # Re-resolve reuses the cache quietly (single fetch).
+    r2 = prov.resolve(group, sha256=sha)
+    assert r2.found
+    assert r2.match_method == hs.HasheousMatchMethod.CANONICAL_REUSE
+    assert r2.provider_id == "NI-A"
+
+
+# --- acceptance #4: outage / timeout / oversize / 429 -> non-fatal ---------
 
 def test_outage_non_fatal_none(tmp_path):
-    group = _make_group("Outage Game", sha256="f" * 64)
+    group = _make_group("Outage Game", sha256="1" * 64)
 
     def opener(url, *, timeout):
         import urllib.error
         raise urllib.error.URLError("connection refused")
 
     prov = _provider({"enabled": True}, tmp_path / "cache", opener=opener)
-    res = prov.resolve(group, sha256="f" * 64)
+    res = prov.resolve(group, sha256="1" * 64)
     assert res.found is False
     assert res.match_method == hs.HasheousMatchMethod.NONE
     assert res.needs_manual_review is False
 
 
 def test_timeout_non_fatal_none(tmp_path):
-    group = _make_group("Timeout Game", sha256="1" * 64)
+    group = _make_group("Timeout Game", sha256="2" * 64)
 
     def opener(url, *, timeout):
         raise TimeoutError("timed out")
 
     prov = _provider({"enabled": True}, tmp_path / "cache", opener=opener)
-    res = prov.resolve(group, sha256="1" * 64)
+    res = prov.resolve(group, sha256="2" * 64)
     assert res.found is False
     assert res.match_method == hs.HasheousMatchMethod.NONE
 
 
 def test_oversize_non_fatal_none(tmp_path):
-    group = _make_group("Oversize Game", sha256="2" * 64)
+    group = _make_group("Oversize Game", sha256="3" * 64)
 
     def opener(url, *, timeout):
         return b"x" * (hs.DEFAULT_MAX_RESPONSE_BYTES + 1)
@@ -350,21 +336,62 @@ def test_oversize_non_fatal_none(tmp_path):
     cfg = hs.HasheousConfig.from_dict({"enabled": True, "max_response_bytes": 100})
     prov = hs.HasheousProvider(cfg, tmp_path / "cache", opener=opener, resolve=False)
     prov.discover()
-    res = prov.resolve(group, sha256="2" * 64)
+    res = prov.resolve(group, sha256="3" * 64)
     assert res.found is False
     assert res.match_method == hs.HasheousMatchMethod.NONE
 
 
 def test_malformed_json_non_fatal_none(tmp_path):
-    group = _make_group("Garbage Game", sha256="3" * 64)
+    group = _make_group("Garbage Game", sha256="4" * 64)
 
     def opener(url, *, timeout):
         return b"not json at all"
 
     prov = _provider({"enabled": True}, tmp_path / "cache", opener=opener)
-    res = prov.resolve(group, sha256="3" * 64)
+    res = prov.resolve(group, sha256="4" * 64)
     assert res.found is False
     assert res.match_method == hs.HasheousMatchMethod.NONE
+
+
+def test_429_rate_limited_non_fatal_none(tmp_path):
+    """A 429 (HasheousRateLimited) from the opener must back off once, then
+    miss without raising into the pipeline."""
+    group = _make_group("Limited Game", sha256="5" * 64)
+
+    calls = {"n": 0}
+
+    def opener(url, *, timeout):
+        calls["n"] += 1
+        # First attempt is rate-limited; second attempt (after the bounded
+        # backoff) is also limited -> non-fatal miss.
+        raise hs.HasheousRateLimited(0.0)
+
+    cfg = hs.HasheousConfig.from_dict({"enabled": True, "respect_rate_limit": True})
+    prov = hs.HasheousProvider(cfg, tmp_path / "cache", opener=opener, resolve=False)
+    prov.discover()
+    res = prov.resolve(group, sha256="5" * 64)
+    assert res.found is False
+    assert res.match_method == hs.HasheousMatchMethod.NONE
+    # Exactly one retry after the backoff (two total attempts).
+    assert calls["n"] == 2
+
+
+def test_429_with_rate_limit_disabled_misses_immediately(tmp_path):
+    """When respect_rate_limit is off, a 429 is a non-fatal miss (no backoff)."""
+    group = _make_group("NoBackoff Game", sha256="6" * 64)
+
+    calls = {"n": 0}
+
+    def opener(url, *, timeout):
+        calls["n"] += 1
+        raise hs.HasheousRateLimited(0.0)
+
+    cfg = hs.HasheousConfig.from_dict({"enabled": True, "respect_rate_limit": False})
+    prov = hs.HasheousProvider(cfg, tmp_path / "cache", opener=opener, resolve=False)
+    prov.discover()
+    res = prov.resolve(group, sha256="6" * 64)
+    assert res.found is False
+    assert calls["n"] == 1
 
 
 # --- acceptance #5: SSRF guard + privacy ------------------------------------
@@ -373,19 +400,19 @@ def test_ssrf_guard_refuses_private_host(tmp_path):
     """A config pointing at a private host must be refused by guard_url."""
     cfg = hs.HasheousConfig.from_dict({
         "enabled": True,
-        "base_url": "http://127.0.0.1:8080/api",
+        "base_url": "http://127.0.0.1:8080/v1",
     })
 
     prov = hs.HasheousProvider(cfg, tmp_path / "cache", resolve=True)
     prov.discover()
-    res = prov.resolve(_make_group("Private Game", sha256="4" * 64), sha256="4" * 64)
+    res = prov.resolve(_make_group("Private Game", sha256="6" * 64), sha256="6" * 64)
     assert res.found is False
     assert res.match_method == hs.HasheousMatchMethod.NONE
 
 
 def test_privacy_no_private_data_in_request(tmp_path):
-    """Only public sha256 / canonical title may be transmitted."""
-    sha = "5" * 64
+    """Only the public sha256 is transmitted; private filename/path is never sent."""
+    sha = "7" * 64
     group = _make_group("Privacy Game", source_filename="my secret rom (1992).adf")
     scans = _make_scans(group, sha)
 
@@ -393,33 +420,30 @@ def test_privacy_no_private_data_in_request(tmp_path):
 
     def opener(url, *, timeout):
         captured.append(url)
-        if "/rom/" in url:
-            return json.dumps(_rom_response(provider_id="HS-PRIV")).encode()
-        if "/search" in url:
-            assert "Privacy%20Game" in url
-            assert "secret" not in url
-            assert "1992" not in url
-            return json.dumps(_search_response(
-                candidates=[{"provider_id": "HS-T"}])).encode()
-        raise AssertionError(url)
+        return json.dumps(_hash_lookup(id="HS-PRIV", name="Privacy Game",
+                                        metadata_matches=[{"source": "NoIntro",
+                                                           "gameId": "NI-PRIV"}])).encode()
 
     prov = _provider({"enabled": True}, tmp_path / "cache", opener=opener)
     res = prov.resolve(group, scans=scans, sha256=sha)
     assert res.found is True
 
-    rom_url = captured[0]
-    assert rom_url.endswith(f"/rom/{sha}")
-    assert "secret" not in rom_url
-    assert "private" not in rom_url
+    url = captured[0]
+    assert url.endswith(f"/Lookup/ByHash/sha256/{sha}")
+    assert "secret" not in url
+    assert "private" not in url
+    assert "1992" not in url
 
 
 def test_privacy_cache_only_public_fields(tmp_path):
     """Cache files must store only provider_id + canonical title + external_ids."""
-    sha = "6" * 64
+    sha = "8" * 64
     group = _make_group("Cache Game", sha256=sha)
 
     def opener(url, *, timeout):
-        return json.dumps(_rom_response(provider_id="HS-CACHE", title="Cache Game")).encode()
+        return json.dumps(_hash_lookup(id="HS-CACHE", name="Cache Game",
+                                       metadata_matches=[{"source": "NoIntro",
+                                                          "gameId": "NI-CACHE"}])).encode()
 
     prov = _provider({"enabled": True}, tmp_path / "cache", opener=opener)
     res = prov.resolve(group, sha256=sha)
@@ -430,25 +454,26 @@ def test_privacy_cache_only_public_fields(tmp_path):
     content = cache_files[0].read_text()
     parsed = json.loads(content)
     assert "provider_id" in parsed
-    assert parsed["provider_id"] == "HS-CACHE"
+    assert parsed["provider_id"] == "NI-CACHE"
     assert "secret" not in content.lower()
     assert "private" not in content.lower()
 
 
-# --- negative-lookup caching ------------------------------------------------
+# --- negative-lookup caching -----------------------------------------------
 
 def test_negative_lookup_cached(tmp_path):
-    """A genuine not-found should be cached and reused (non-fatal, deterministic)."""
-    sha = "7" * 64
+    """A genuine not-found (empty HashLookup) should be cached and reused."""
+    sha = "9" * 64
     group = _make_group("Negative Game", sha256=sha)
 
     call_count = {"n": 0}
 
     def opener(url, *, timeout):
         call_count["n"] += 1
-        return json.dumps(_rom_response(found=False)).encode()
+        return json.dumps(_hash_lookup(id="", name="",
+                                        metadata_matches=[])).encode()
 
-    prov = _provider({"enabled": True}, tmp_path / "cache", opener=opener)
+    prov = _provider({"enabled": True, "cache_ttl": 1000.0}, tmp_path / "cache", opener=opener)
     r1 = prov.resolve(group, sha256=sha)
     assert r1.found is False
     r2 = prov.resolve(group, sha256=sha)
@@ -459,17 +484,19 @@ def test_negative_lookup_cached(tmp_path):
 
 def test_canonical_reuse_cache_hit(tmp_path):
     """After a successful hash match, a second resolve reuses the cache."""
-    sha = "8" * 64
+    sha = "0" * 64
     group = _make_group("Reuse Game", sha256=sha)
     call_count = {"n": 0}
 
     def opener(url, *, timeout):
         call_count["n"] += 1
-        return json.dumps(_rom_response(provider_id="HS-REUSE")).encode()
+        return json.dumps(_hash_lookup(id="HS-REUSE", name="Reuse Game",
+                                       metadata_matches=[{"source": "NoIntro",
+                                                          "gameId": "NI-REUSE"}])).encode()
 
-    prov = _provider({"enabled": True}, tmp_path / "cache", opener=opener)
+    prov = _provider({"enabled": True, "cache_ttl": 1000.0}, tmp_path / "cache", opener=opener)
     r1 = prov.resolve(group, sha256=sha)
-    assert r1.found and r1.provider_id == "HS-REUSE"
+    assert r1.found and r1.provider_id == "NI-REUSE"
     r2 = prov.resolve(group, sha256=sha)
     assert r2.found and r2.match_method == hs.HasheousMatchMethod.CANONICAL_REUSE
     assert call_count["n"] == 1
@@ -478,69 +505,58 @@ def test_canonical_reuse_cache_hit(tmp_path):
 # --- provider-ID + external_ids capture -------------------------------------
 
 def test_provider_id_captured_for_downstream(tmp_path):
-    sha = "9" * 64
+    sha = "a" * 64
     group = _make_group("Capture Game", sha256=sha)
 
     def opener(url, *, timeout):
-        return json.dumps(_rom_response(provider_id="HS-DOWNSTREAM",
-                                        title="Capture Game")).encode()
+        return json.dumps(_hash_lookup(id="HS-DOWNSTREAM", name="Capture Game",
+                                       metadata_matches=[{"source": "NoIntro",
+                                                          "gameId": "NI-DOWNSTREAM"}])).encode()
 
     prov = _provider({"enabled": True}, tmp_path / "cache", opener=opener)
     res = prov.resolve(group, sha256=sha)
     assert res.found is True
-    assert res.provider_id == "HS-DOWNSTREAM"
+    assert res.provider_id == "NI-DOWNSTREAM"
 
 
 def test_external_ids_captured_from_hash_match(tmp_path):
-    """A hash match carrying external_ids must surface them on the result."""
-    sha = "0" * 64
+    """A hash match carrying allow-listed external_ids must surface them."""
+    sha = "b" * 64
     group = _make_group("External Game", sha256=sha)
 
     def opener(url, *, timeout):
-        return json.dumps(_rom_response(
-            provider_id="HS-EXT",
-            external_ids={"hasheous_metadata_id": "HM-1", "igdb_id": "IGDB-42"},
+        return json.dumps(_hash_lookup(
+            id="HS-EXT", name="External Game",
+            metadata_matches=[{"source": "NoIntro", "gameId": "NI-EXT"}],
+            igdb_id="IGDB-42", hasheous_metadata_id="HM-1",
         )).encode()
 
     prov = _provider({"enabled": True}, tmp_path / "cache", opener=opener)
     res = prov.resolve(group, sha256=sha)
     assert res.found is True
-    assert res.external_ids == {"hasheous_metadata_id": "HM-1", "igdb_id": "IGDB-42"}
-    assert res.provider_id == "HS-EXT"
+    # The allow-listed igdb_id is captured; hasheous_metadata_id already set
+    # from the metadataMatch gameId (first wins).
+    assert res.external_ids.get("igdb_id") == "IGDB-42"
+    assert res.provider_id == "NI-EXT"
 
 
 def test_external_ids_dropped_when_not_allowlisted(tmp_path):
     """Unrecognized external_ids keys must be dropped (fail-safe)."""
-    sha = "z" * 64
+    sha = "c" * 64
     group = _make_group("External Drop Game", sha256=sha)
 
     def opener(url, *, timeout):
-        return json.dumps(_rom_response(
-            provider_id="HS-DROP",
-            external_ids={"igdb_id": "IGDB-7", "private_user_field": "leak"},
+        return json.dumps(_hash_lookup(
+            id="HS-DROP", name="External Drop Game",
+            metadata_matches=[{"source": "NoIntro", "gameId": "NI-DROP"}],
+            igdb_id="IGDB-7", private_user_field="leak",
         )).encode()
 
     prov = _provider({"enabled": True}, tmp_path / "cache", opener=opener)
     res = prov.resolve(group, sha256=sha)
     assert res.found is True
-    assert res.external_ids == {"igdb_id": "IGDB-7"}
+    assert res.external_ids.get("igdb_id") == "IGDB-7"
     assert "private_user_field" not in res.external_ids
-
-
-def test_external_ids_captured_on_title_match(tmp_path):
-    """Title-fallback matches also surface allow-listed external_ids."""
-    group = _make_group("Title External Game")
-
-    def opener(url, *, timeout):
-        return json.dumps(_search_response(
-            candidates=[{"provider_id": "HS-TEXT", "title": "Title External Game",
-                         "confidence": 0.97,
-                         "external_ids": {"mobygames_id": "MG-99"}}])).encode()
-
-    prov = _provider({"enabled": True}, tmp_path / "cache", opener=opener)
-    res = prov.resolve(group)
-    assert res.found is True
-    assert res.external_ids == {"mobygames_id": "MG-99"}
 
 
 # --- paths integration -----------------------------------------------------
@@ -566,22 +582,18 @@ def test_load_hasheous_config_reads_table(tmp_path):
 # --- independent shim: both providers enabled + disagree -------------------
 
 def test_both_providers_exact_hash_deterministic_stronger_wins(tmp_path):
-    """When BOTH providers resolve the same exact-hash identity, it is stable.
-
-    This is an independent behavior check (not a Case-authored happy path):
-    each provider independently resolves the hash-first identity, and both agree
-    on the exact-hash match. The stronger (EXACT_HASH) signal is deterministic
-    and identical across providers.
-    """
+    """When BOTH providers resolve, each independently agrees on an identity."""
     sha = "a" * 64
     group = _make_group("Both Game", sha256=sha)
 
     def hs_opener(url, *, timeout):
-        assert "api.hasheous.example" in url
-        return json.dumps(_rom_response(provider_id="HS-BOTH")).encode()
+        assert "/Lookup/ByHash/sha256/" in url
+        return json.dumps(_hash_lookup(id="HS-BOTH", name="Both Game",
+                                       metadata_matches=[{"source": "NoIntro",
+                                                          "gameId": "NI-BOTH"}])).encode()
 
     def pm_opener(url, *, timeout):
-        assert "api.playmatch.example" in url
+        assert "/rom/" in url
         return json.dumps({
             "found": True, "provider_id": "PM-BOTH", "title": "Both Game",
             "confidence": 1.0,
@@ -596,42 +608,30 @@ def test_both_providers_exact_hash_deterministic_stronger_wins(tmp_path):
     hs_res = hs_prov.resolve(group, sha256=sha)
     pm_res = pm_prov.resolve(group, sha256=sha)
 
-    # Both independently agree: exact-hash, deterministic, found.
     assert hs_res.found and pm_res.found
     assert hs_res.match_method == hs.HasheousMatchMethod.EXACT_HASH
     assert pm_res.match_method == pm.PlaymatchMatchMethod.EXACT_HASH
     assert hs_res.confidence == 1.0 == pm_res.confidence
-    # Determinism across providers: identical confidence + method semantics.
     assert hs_res.confidence == pm_res.confidence
 
 
 def test_both_providers_disagree_hash_wins_over_weaker(monkeypatch, tmp_path):
-    """When Hasheous returns an exact-hash identity but Playmatch only a weaker
-    title fallback, the exact-hash identity is the stronger signal and must not
-    be silently overridden.
+    """Hasheous exact-hash identity is strong and must not be silently overridden.
 
-    Both providers are enabled and "disagree" on the outcome. Hasheous resolves
-    via exact hash (strong, confidence 1.0). Playmatch -- representing the case
-    where it only has the canonical title, not the matching hash -- resolves via
-    the title fallback (weaker, FUZZY_TITLE). The cross-provider property this
-    checks: the stronger exact-hash identity is deterministic and higher
-    confidence than the weaker title signal, and neither provider silently
-    overrides the other's result (they surface independently).
+    Playmatch's shape is the legacy synthetic contract (still valid for the
+    Playmatch provider). Hasheous resolves via the real ByHash route.
     """
     sha = "b" * 64
     group = _make_group("Disagree Game", sha256=sha)
-    # Playmatch group carries only the canonical title (no hash signal), so its
-    # hash lookup is refused and it falls through to the title fallback.
     pm_group = _make_group("Disagree Game")
 
     def hs_opener(url, *, timeout):
-        if "/rom/" in url:
-            return json.dumps(_rom_response(provider_id="HS-STRONG")).encode()
-        return json.dumps(_search_response(found=False)).encode()
+        return json.dumps(_hash_lookup(id="HS-STRONG", name="Disagree Game",
+                                       metadata_matches=[{"source": "NoIntro",
+                                                          "gameId": "NI-STRONG"}])).encode()
 
     def pm_opener(url, *, timeout):
         if "/rom/" in url:
-            # Playmatch has no matching hash -> genuine miss (no fall-through).
             return json.dumps({"found": False}).encode()
         return json.dumps(_search_response(
             candidates=[{"provider_id": "PM-WEAK", "title": "Disagree Game",
@@ -646,13 +646,17 @@ def test_both_providers_disagree_hash_wins_over_weaker(monkeypatch, tmp_path):
     hs_res = hs_prov.resolve(group, sha256=sha)
     pm_res = pm_prov.resolve(pm_group)
 
-    # Hasheous exact-hash identity is stronger (confidence 1.0) than the
-    # Playmatch title fallback (confidence 0.97).
     assert hs_res.match_method == hs.HasheousMatchMethod.EXACT_HASH
-    assert hs_res.provider_id == "HS-STRONG"
+    assert hs_res.provider_id == "NI-STRONG"
     assert hs_res.confidence == 1.0
     assert pm_res.match_method == pm.PlaymatchMatchMethod.FUZZY_TITLE
     assert pm_res.confidence == 0.97
-    # The weaker signal did not override the stronger exact-hash identity.
     assert hs_res.confidence > pm_res.confidence
     assert hs_res.provider_id != pm_res.provider_id
+
+
+def _search_response(found=True, *, candidates=None):
+    """Playmatch synthetic shape (used only for the cross-provider shim)."""
+    if not found:
+        return {"found": False}
+    return {"found": True, "candidates": candidates or []}

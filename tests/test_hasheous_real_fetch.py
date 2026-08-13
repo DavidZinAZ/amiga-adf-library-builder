@@ -10,6 +10,9 @@ synthetic ``resolve=False`` + injected-opener harness does NOT cover:
   real opener must stream and abort BEFORE the whole body buffers.
 * Defect 3 (MEDIUM): ambient proxy honored by default opener. The hardened
   opener must IGNORE ``HTTP_PROXY``/``HTTPS_PROXY``.
+* 429 (ToS rate limiter): the real opener must surface HTTP 429 as
+  ``HasheousRateLimited`` so the caller can apply a bounded Retry-After
+  backoff (never silently retrying without honoring it).
 
 Strategy: NO external network is touched. We run real localhost HTTP stubs and
 patch ``socket.getaddrinfo`` so a SENTINEL hostname resolves to a public-looking
@@ -19,7 +22,8 @@ RAISE on any other non-loopback connect. This proves the real fetch path runs
 while guaranteeing zero external egress.
 
 The harness is identical to ``tests/test_playmatch_real_fetch.py`` except the
-provider under test is swapped to ``HasheousProvider``.
+provider under test is ``HasheousProvider`` and the stub bodies are shaped like
+the real ``Classes.HashLookup`` response (no ``found`` boolean).
 """
 
 from __future__ import annotations
@@ -27,6 +31,7 @@ from __future__ import annotations
 import http.server
 import socket
 import threading
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -49,7 +54,7 @@ _PROXY_IP = "203.0.113.50"
 class _Handler(http.server.BaseHTTPRequestHandler):
     """Configurable stub: subclass sets ``body`` / ``status`` / ``location``."""
 
-    body = b'{"found": false}'
+    body = b'{"id": "", "name": "", "metadataMatches": []}'
     status = 200
     location = None
     # Per-server counters populated by the test.
@@ -229,7 +234,11 @@ def test_real_fetch_oversize_aborts_before_full_body(real_fetch_env, tmp_path):
     """A body larger than max_response_bytes must abort early, not buffer GBs."""
     env = real_fetch_env
     total = 2_000_000
-    env["handler_a"].body = b'{"found": true, "provider_id": "HS-BIG"}' + b"x" * (total - 40)
+    env["handler_a"].body = (
+        b'{"id": "HS-BIG", "name": "Real Game", '
+        b'"metadataMatches": [{"source": "NoIntro", "gameId": "NI-BIG"}]}'
+        + b"x" * (total - 90)
+    )
     env["handler_a"].status = 200
     env["handler_a"].bytes_written = 0
 
@@ -252,7 +261,8 @@ def test_real_fetch_success_within_bound(real_fetch_env, tmp_path):
     """A normal within-bound JSON response still resolves correctly."""
     env = real_fetch_env
     env["handler_a"].body = (
-        b'{"found": true, "provider_id": "HS-REAL", "title": "Real Game"}'
+        b'{"id": "HS-REAL", "name": "Real Game", '
+        b'"metadataMatches": [{"source": "NoIntro", "gameId": "NI-REAL"}]}'
     )
     env["handler_a"].status = 200
 
@@ -263,7 +273,25 @@ def test_real_fetch_success_within_bound(real_fetch_env, tmp_path):
 
     assert res.found is True
     assert res.match_method == hs.HasheousMatchMethod.EXACT_HASH
-    assert res.provider_id == "HS-REAL"
+    assert res.provider_id == "NI-REAL"
+
+
+def test_real_fetch_404_treated_as_transient_miss(real_fetch_env, tmp_path):
+    """A 404 (no HashLookup) is a transient miss (not negatively cached)."""
+    env = real_fetch_env
+    env["handler_a"].status = 404
+    env["handler_a"].body = b"Not Found"
+
+    base_url = f"http://{SENTINEL_HOST}:{env['port_a']}/v1"
+    group = _group("Missing Game", sha256="b" * 64)
+    prov = _real_provider(base_url, tmp_path / "cache")
+    res = prov.resolve(group, sha256="b" * 64)
+
+    assert res.found is False
+    assert res.match_method == hs.HasheousMatchMethod.NONE
+    # No negative cache file should be written for a transport 404.
+    cache_files = list((tmp_path / "cache").glob("hasheous-*.json"))
+    assert cache_files == []
 
 
 # --- Defect 3 (MEDIUM): ambient proxy ignored -------------------------------
@@ -271,21 +299,49 @@ def test_real_fetch_success_within_bound(real_fetch_env, tmp_path):
 def test_real_fetch_ignores_ambient_proxy(real_fetch_env, monkeypatch, tmp_path):
     """HTTP_PROXY/HTTPS_PROXY must not route the Hasheous request."""
     env = real_fetch_env
-    env["handler_a"].body = b'{"found": true, "provider_id": "HS-NOPROXY"}'
+    env["handler_a"].body = (
+        b'{"id": "HS-NOPROXY", "name": "Proxy Game", '
+        b'"metadataMatches": [{"source": "NoIntro", "gameId": "NI-NOPROXY"}]}'
+    )
     env["handler_a"].status = 200
 
     monkeypatch.setenv("HTTP_PROXY", f"http://{_PROXY_IP}:3128")
     monkeypatch.setenv("HTTPS_PROXY", f"http://{_PROXY_IP}:3128")
 
     base_url = f"http://{SENTINEL_HOST}:{env['port_a']}/v1"
-    group = _group("Proxy Game", sha256="b" * 64)
+    group = _group("Proxy Game", sha256="c" * 64)
     prov = _real_provider(base_url, tmp_path / "cache")
-    res = prov.resolve(group, sha256="b" * 64)
+    res = prov.resolve(group, sha256="c" * 64)
 
     assert res.found is True
-    assert res.provider_id == "HS-NOPROXY"
+    assert res.provider_id == "NI-NOPROXY"
     # The fake proxy IP must never have been a connect target.
     assert all(t[0] != _PROXY_IP for t in env["connect_targets"])
+
+
+# --- ToS rate limiter: 429 surfaced as HasheousRateLimited -------------------
+
+def test_real_fetch_429_raises_rate_limited(real_fetch_env, tmp_path):
+    """An HTTP 429 from the real fetch path must surface as HasheousRateLimited
+    (so the provider can honor Retry-After rather than silently hammering)."""
+    env = real_fetch_env
+    env["handler_a"].status = 429
+    env["handler_a"].body = b"rate limited"
+
+    base_url = f"http://{SENTINEL_HOST}:{env['port_a']}/v1"
+    cfg = hs.HasheousConfig.from_dict({"enabled": True, "base_url": base_url})
+    prov = hs.HasheousProvider(cfg, tmp_path / "cache")
+    prov.discover()
+    group = _group("Limited Game", sha256="d" * 64)
+
+    # _default_opener surfaces 429 as HasheousRateLimited; _json_get consumes it
+    # into a bounded single retry. We assert the low-level surfacing here.
+    with pytest.raises(hs.HasheousRateLimited):
+        hs._default_opener(
+            f"{base_url}/Lookup/ByHash/sha256/{'d' * 64}",
+            timeout=cfg.timeout_seconds,
+            max_bytes=cfg.max_response_bytes,
+        )
 
 
 # --- helpers ----------------------------------------------------------------

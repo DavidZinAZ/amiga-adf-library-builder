@@ -3,17 +3,45 @@
 This is an OPTIONAL provider. It is DISABLED by default and only activates when
 an explicit ``[hasheous]`` TOML table is present AND ``enabled = true``.
 
-=== ACCESS LIMITATION (documented, not invented) ===
+=== ACCESS MODEL (documented real Hasheous API, per issue #12 research) ===
 
 Per issue #12's governance, the live Hasheous lookup is platform-scoped and
 requires a self-hosted / Hasheous-compatible endpoint. This bundled provider is
 therefore CONFIG-DRIVEN and DISABLED by default; the default ``base_url`` is a
 placeholder example host (``https://api.hasheous.example/v1``), NOT a live
-endpoint. The supported subset (hash lookup + title lookup) requires NO live
-API key -- if a future operation needs a credential, that is a separate
-operator gate. The public repo's tests are SYNTHETIC / MOCK ONLY (see
+endpoint.
+
+The ONLY supported online lookup method is the documented Hasheous REST
+**hash lookup** (see RESEARCH-Hasheous-API-t_01ab4088.md, authoritative live
+swagger). It is **unauthenticated** (no API key needed for lookups):
+
+    GET {base_url}/Lookup/ByHash/sha256/{sha256}
+
+The response is a ``Classes.HashLookup`` object (no ``found`` boolean)::
+
+    {
+      "id": "<hash-lookup id>",
+      "name": "<canonical title>",
+      "platform": "Amiga",
+      "publisher": "<publisher>",
+      "signature": { ... },
+      "signatures": { "<source>": [ ... ] },
+      "metadataMatches": [ { "source": "NoIntro", "gameId": "<id>" }, ... ]
+    }
+
+A hash with no usable identity (empty payload / no id / no metadataMatch) is
+treated as a genuine "not found" and is negatively cached (public signal only).
+A 404 / transport error is treated as a transient miss (NOT negatively cached).
+
+There is **NO REST title-search endpoint** in the real API (title search exists
+only via the MCP ``hasheous_search_games`` tool, which this offline-safe,
+dependency-free provider does NOT implement). The synthetic
+``GET /search?title=`` path from earlier sketches has been removed.
+
+The public repo's tests are SYNTHETIC / MOCK ONLY (see
 ``tests/test_hasheous_provider.py`` and ``tests/test_hasheous_real_fetch.py``);
-no live network is touched by the test suite.
+no live network is touched by the test suite. Transmitted fields are limited to
+the public ``sha256`` only.
 
 === Design posture (mirrors playmatch.py exactly) ===
 
@@ -31,22 +59,17 @@ does NOT create a parallel identity system -- ``HasheousResult`` mirrors
   ``opener`` and pass ``resolve=False``, so no DNS/socket is ever exercised
   offline.
 * **Hash-first identity.** A precomputed public ``sha256`` (computed elsewhere,
-  never recomputed here) is the PRIMARY lookup signal. An exact-hash match
-  OUTRANKS any title/filename fallback. When Hasheous returns a provider-ID /
-  external correlation for the matched hash, it is captured in
+  never recomputed here) is the PRIMARY and ONLY lookup signal. An exact-hash
+  match OUTRANKS any cached reuse, and its identity is carried into
   ``result.provider_id`` / ``result.external_ids`` for downstream providers.
-* **Title/filename fallback (only when no hash match).** May use ONLY the
-  *canonical group title* -- never a private ROM filename, local path, or
-  collection detail. It MUST still pass the EXISTING deterministic relevance
-  gate (:func:`metadata.validate_metadata_relevance`); a filename-derived
-  candidate that fails relevance is routed to manual review, never silently
-  accepted.
-* **Fail-safe on ambiguity.** Two disagreeing candidates, or a hash match that
-  conflicts with a title match, ALWAYS routes to manual review. We NEVER
+* **Fail-safe on ambiguity.** A hash match that yields no provider-id, or
+  disagreeing cached identities, ALWAYS routes to manual review. We NEVER
   silently override.
-* **Non-fatal outages.** Provider outage / timeout / oversize response MUST NOT
-  raise into the pipeline. We catch, return ``found=False`` (or
-  ``needs_manual_review``), and continue.
+* **Non-fatal outages.** Provider outage / timeout / oversize response / 429
+  MUST NOT raise into the pipeline. We catch, return ``found=False`` (or
+  ``needs_manual_review``), and continue. A 429 is honored (Retry-After /
+  bounded backoff) before being treated as a miss, to respect the Hasheous
+  rate-limiter terms of service.
 * **SSRF guard.** Every outbound fetch runs :func:`metadata.guard_url`
   (``resolve=True`` only on a real fetch) before any bytes move. Private/
   loopback/link-local/RFC1918 hosts are refused.
@@ -54,22 +77,14 @@ does NOT create a parallel identity system -- ``HasheousResult`` mirrors
   ``max_concurrency`` are all bounded; a response that exceeds
   ``max_response_bytes`` is short-circuited and treated as a non-fatal miss.
 * **Privacy.** Only the public ``sha256`` (one-way, assumed public by the issue)
-  and the canonical title may be sent to Hasheous. The cache stores ONLY
-  ``provider_id`` + canonical title + ``external_ids`` (public correlations) +
-  a negative-lookup marker, keyed by the public signal. No private filename,
-  path, or private hash is ever written to a cache or transmitted.
+  is transmitted to Hasheous. The cache stores ONLY ``provider_id`` + canonical
+  title + ``external_ids`` (public correlations) + a negative-lookup marker,
+  keyed by the public signal. No private filename, path, or private hash is
+  ever written to a cache or transmitted.
 
-The synthetic request contract (documented here; a real server may differ):
-
-* ``GET {base_url}/rom/{sha256}`` -> ``{"found": true, "provider_id": "<id>",
-  "external_ids": {...}, "category": "<optional>", "title": "<canonical>",
-  "confidence": <0..1>}`` or ``{"found": false}``.
-* ``GET {base_url}/search?title={canonical_title}`` -> ``{"found": true,
-  "candidates": [{"provider_id", "title", "confidence", "category",
-  "external_ids": {...}}...]}`` or ``{"found": false}``.
-
-The ``base_url`` is overridable in config for a self-hosted Hasheous-compatible
-endpoint. The default is a placeholder example host.
+The synthetic request contract described in earlier issue sketches has been
+removed; the only method is the real ``/Lookup/ByHash/sha256/{sha256}`` route
+documented above.
 """
 
 from __future__ import annotations
@@ -86,7 +101,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from . import metadata as _metadata
-from .metadata import UnsafeUrlError, validate_metadata_relevance
+from .metadata import UnsafeUrlError
 
 
 # --- Bounds / defaults -------------------------------------------------------
@@ -112,16 +127,21 @@ DEFAULT_CONFIDENCE_THRESHOLD = 0.9
 EXACT_HASH_CONFIDENCE = 1.0
 #: Confidence assigned when reusing a previously-stored canonical mapping.
 CANONICAL_REUSE_CONFIDENCE = 0.95
-#: Floor below which a title-fallback match is never auto-accepted.
-TITLE_FALLBACK_MIN_CONFIDENCE = 0.90
+
+#: Rate-limit (ToS) handling bounds. We honor HTTP 429 + Retry-After with a
+#: SINGLE bounded retry so the client cannot be accused of circumventing the
+#: Hasheous rate limiter. Backoff is capped so a hostile/misbehaving server
+#: cannot make us sleep forever.
+_DEFAULT_429_BACKOFF_SECONDS = 1.0
+_MAX_429_BACKOFF_SECONDS = 5.0
 
 
 # --- External-id allowlist ---------------------------------------------------
 
 #: Normalized external correlations we capture for downstream metadata/manual
-#: providers. Anything else in a Hasheous ``external_ids`` payload is dropped
-#: (fail-safe: we never persist an unrecognized, potentially private field).
-_EXTERNAL_ID_KEYS = (
+#: providers. Anything else in a Hasheous payload is dropped (fail-safe: we
+#: never persist an unrecognized, potentially private field).
+HASHEOUS_EXTERNAL_ID_KEYS = (
     "hasheous_metadata_id",
     "igdb_id",
     "mobygames_id",
@@ -140,6 +160,9 @@ class HasheousMatchMethod(str, Enum):
     EXACT_HASH = "exact_hash"
     PROVIDER_ID = "provider_id"
     CANONICAL_REUSE = "canonical_reuse"
+    # FUZZY_TITLE is retained for public-API stability (mirrors PlaymatchResult)
+    # but is no longer produced: the real Hasheous API has no REST title
+    # search, only hash lookup + MCP title search (not implemented offline).
     FUZZY_TITLE = "fuzzy_title"
     MANUAL_REVIEW = "manual_review"
     NONE = "none"
@@ -151,6 +174,18 @@ class HasheousError(Exception):
 
 class HasheousDisabled(HasheousError):
     """Raised when the provider is used while disabled in config."""
+
+
+class HasheousRateLimited(HasheousError):
+    """Raised on HTTP 429 so the caller can apply a bounded Retry-After backoff.
+
+    Carries the server-advised ``retry_after`` (seconds, already clamped to the
+    configured bound by the caller) so the single retry waits the right amount.
+    """
+
+    def __init__(self, retry_after: float) -> None:
+        self.retry_after = retry_after
+        super().__init__(f"Hasheous rate limited; retry after {retry_after:.1f}s")
 
 
 # --- Configuration -----------------------------------------------------------
@@ -168,6 +203,11 @@ class HasheousConfig:
     # Negative-lookup / canonical-reuse cache TTL in seconds. <= 0 disables
     # reuse (each run re-resolves). The cache only stores public signals.
     cache_ttl: float = 0.0
+    # Honor HTTP 429 + Retry-After with a single bounded retry (ToS). Disabling
+    # this weakens ToS posture and is not recommended.
+    respect_rate_limit: bool = True
+    # Bounded backoff applied on 429 when no/invalid Retry-After header is sent.
+    rate_limit_backoff_seconds: float = _DEFAULT_429_BACKOFF_SECONDS
 
     @classmethod
     def from_dict(cls, data: Optional[dict]) -> "HasheousConfig":
@@ -222,6 +262,16 @@ class HasheousConfig:
         if cache_ttl < 0:
             cache_ttl = 0.0
 
+        respect = bool(raw.get("respect_rate_limit", True))
+
+        try:
+            backoff = float(raw.get("rate_limit_backoff_seconds",
+                                    _DEFAULT_429_BACKOFF_SECONDS))
+        except (TypeError, ValueError):
+            backoff = _DEFAULT_429_BACKOFF_SECONDS
+        if backoff < 0 or backoff > _MAX_429_BACKOFF_SECONDS:
+            backoff = _DEFAULT_429_BACKOFF_SECONDS
+
         return cls(
             enabled=enabled,
             base_url=base_url,
@@ -230,6 +280,8 @@ class HasheousConfig:
             max_concurrency=max_conc,
             confidence_threshold=conf,
             cache_ttl=cache_ttl,
+            respect_rate_limit=respect,
+            rate_limit_backoff_seconds=backoff,
         )
 
 
@@ -278,22 +330,11 @@ class HasheousResult:
         }
 
 
-@dataclass
-class _Candidate:
-    """One synthetic Hasheous match candidate (internal)."""
-
-    provider_id: str
-    title: str
-    confidence: float
-    category: Optional[str] = None
-    external_ids: dict = field(default_factory=dict)
-
-
 # --- Cache (privacy-bounded) -------------------------------------------------
 
 def _cache_file(cache_dir: Path, key: str) -> Path:
-    # Key is always a public signal (sha256 hex or normalized title). We never
-    # persist filenames/paths/private hashes as cache keys or values beyond the
+    # Key is always a public signal (sha256 hex). We never persist
+    # filenames/paths/private hashes as cache keys or values beyond the
     # explicitly-allowed public fields.
     safe = "".join(c if (c.isalnum() or c in "-_") else "_" for c in key)
     return Path(cache_dir) / f"hasheous-{safe}.json"
@@ -333,14 +374,14 @@ def _cache_load(cache_dir: Path, key: str, ttl: float) -> Optional[dict]:
 def _normalize_external_ids(raw: Optional[dict]) -> dict:
     """Return only the allow-listed public correlations from a payload.
 
-    Anything outside ``_EXTERNAL_ID_KEYS`` is dropped (fail-safe: we never
-    persist an unrecognized, potentially private field). Values are coerced to
-    ``str`` so the cache stays JSON-safe and bounded.
+    Anything outside ``HASHEOUS_EXTERNAL_ID_KEYS`` is dropped (fail-safe: we
+    never persist an unrecognized, potentially private field). Values are
+    coerced to ``str`` so the cache stays JSON-safe and bounded.
     """
     out: dict = {}
     if not isinstance(raw, dict):
         return out
-    for key in _EXTERNAL_ID_KEYS:
+    for key in HASHEOUS_EXTERNAL_ID_KEYS:
         val = raw.get(key)
         if val is None or val == "":
             continue
@@ -402,6 +443,28 @@ def _build_no_redirect_opener(*, timeout: float) -> urllib.request.OpenerDirecto
     return opener
 
 
+def _build_byhash_url(base_url: str, sha256: str) -> str:
+    """Real Hasheous hash-lookup URL: GET .../Lookup/ByHash/sha256/{sha256}."""
+    return f"{base_url}/Lookup/ByHash/sha256/{sha256}"
+
+
+def _retry_after_seconds(headers) -> Optional[float]:
+    """Parse a Retry-After header (delta-seconds) into a float, if present."""
+    if headers is None:
+        return None
+    raw = headers.get("Retry-After")
+    if not raw:
+        return None
+    raw = str(raw).strip()
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if val < 0:
+        return None
+    return val
+
+
 def _default_opener(url: str, *, timeout: float,
                     max_bytes: int = _MAX_RESPONSE_BYTES) -> bytes:
     """Real network opener. Guarded by callers (guard_url + size bound).
@@ -409,22 +472,34 @@ def _default_opener(url: str, *, timeout: float,
     Uses a hardened :class:`OpenerDirector` that does NOT follow redirects and
     does NOT honor ambient proxy environment variables. The caller
     (``_bounded_read`` + ``_json_get``) enforces the SSRF guard and size bound.
-    The response is streamed and the ``max_bytes`` cap is enforced *before* the
-    whole body buffers (DoS defense).
+    A 429 is raised as :class:`HasheousRateLimited` so the caller can apply a
+    bounded Retry-After backoff (ToS). Any other non-success status is treated
+    as a non-fatal miss. The response is streamed and the ``max_bytes`` cap is
+    enforced *before* the whole body buffers (DoS defense).
     """
     opener = _build_no_redirect_opener(timeout=timeout)
     req = urllib.request.Request(url, headers={"User-Agent": "amiga-adf-builder/hasheous"})
-    with opener.open(req, timeout=timeout) as resp:  # noqa: S310 (guarded)
-        # We never follow redirects (SSRF pivot defense). A 3xx is surfaced
-        # here, not opened on a second hop, so a redirect to a cloud-metadata /
-        # loopback / RFC1918 host is NEVER fetched. Any non-success status is a
-        # non-fatal miss for the pipeline.
-        if resp.status is not None and resp.status >= 300:
-            raise HasheousError(
-                f"Hasheous endpoint returned non-success status {resp.status} "
-                f"(redirects are not followed)"
-            )
-        data = _stream_read(resp, max_bytes=max_bytes)
+    try:
+        resp = opener.open(req, timeout=timeout)  # noqa: S310 (guarded)
+    except urllib.error.HTTPError as exc:
+        # urllib's HTTPErrorProcessor raises HTTPError for 4xx/5xx (including
+        # 429). We MUST surface 429 as HasheousRateLimited so the caller can
+        # apply a bounded Retry-After backoff (Hasheous ToS rate-limiter); any
+        # other HTTP error is treated as a non-fatal miss by _json_get.
+        if getattr(exc, "code", None) == 429:
+            retry_after = _retry_after_seconds(getattr(exc, "headers", None))
+            raise HasheousRateLimited(retry_after or 0.0)
+        raise
+    # We never follow redirects (SSRF pivot defense). A 3xx is surfaced here
+    # (via _NoRedirectHandler), not opened on a second hop, so a redirect to a
+    # cloud-metadata / loopback / RFC1918 host is never fetched.
+    status = getattr(resp, "status", None)
+    if status is not None and status >= 300:
+        raise HasheousError(
+            f"Hasheous endpoint returned non-success status {status} "
+            f"(redirects are not followed)"
+        )
+    data = _stream_read(resp, max_bytes=max_bytes)
     return data
 
 
@@ -481,12 +556,14 @@ def _bounded_read(opener: Callable[..., bytes], url: str, *, timeout: float,
 
 
 def _json_get(opener: Callable[..., bytes], url: str, *, timeout: float,
-              max_bytes: int, resolve: bool) -> Optional[dict]:
-    """Fetch + parse a JSON response, with SSRF guard and size bound.
+              max_bytes: int, resolve: bool,
+              config: "HasheousConfig") -> Optional[dict]:
+    """Fetch + parse a JSON response, with SSRF guard, size bound, and 429 backoff.
 
-    Returns ``None`` on any non-fatal failure (outage/timeout/oversize/malformed).
-    Raises :class:`HasheousError` ONLY for programmer errors (a malformed URL
-    constructed internally) -- provider outages are swallowed to ``None``.
+    Returns ``None`` on any non-fatal failure (outage/timeout/oversize/malformed/
+    429-after-backoff). Raises :class:`HasheousError` ONLY for programmer errors
+    (a malformed URL constructed internally) -- provider outages are swallowed
+    to ``None``.
     """
     # SSRF guard: refuse private/loopback/link-local/RFC1918. ``resolve`` is
     # True only on a real fetch; injected test openers pass resolve=False. A
@@ -499,6 +576,27 @@ def _json_get(opener: Callable[..., bytes], url: str, *, timeout: float,
 
     try:
         raw = _bounded_read(opener, url, timeout=timeout, max_bytes=max_bytes)
+    except HasheousRateLimited as exc:
+        # Honor the ToS rate limiter: a single bounded retry after the advised
+        # (or configured default) backoff. Refusing to back off could be seen
+        # as "circumventing limits" under the Hasheous terms of service.
+        if not config.respect_rate_limit:
+            return None
+        delay = exc.retry_after or config.rate_limit_backoff_seconds
+        delay = min(max(delay, 0.0), _MAX_429_BACKOFF_SECONDS)
+        try:
+            time.sleep(delay)
+        except (OSError, ValueError):
+            pass
+        try:
+            raw = _bounded_read(opener, url, timeout=timeout, max_bytes=max_bytes)
+        except HasheousRateLimited:
+            # Still limited after the single retry -> non-fatal miss.
+            return None
+        except (urllib.error.URLError, TimeoutError, HasheousError):
+            return None
+        except Exception:
+            return None
     except urllib.error.URLError:
         return None  # outage / unreachable -> non-fatal miss
     except TimeoutError:
@@ -518,13 +616,62 @@ def _json_get(opener: Callable[..., bytes], url: str, *, timeout: float,
     return parsed
 
 
-def _build_rom_url(base_url: str, sha256: str) -> str:
-    return f"{base_url}/rom/{sha256}"
+# --- HashLookup parsing ------------------------------------------------------
+
+@dataclass
+class _HashIdentity:
+    """Normalized identity extracted from a ``Classes.HashLookup`` response."""
+
+    provider_id: Optional[str]
+    title: Optional[str]
+    platform: Optional[str]
+    publisher: Optional[str]
+    external_ids: dict
 
 
-def _build_search_url(base_url: str, title: str) -> str:
-    q = urllib.parse.urlencode({"title": title})
-    return f"{base_url}/search?{q}"
+def _parse_hash_lookup(payload: dict) -> _HashIdentity:
+    """Extract a privacy-bounded identity from a ``Classes.HashLookup`` dict.
+
+    The authoritative provider id is the first ``metadataMatches[].gameId``
+    (a source-specific public id), falling back to the payload ``id`` (the
+    HashLookup id). Both are public; either is sufficient for downstream
+    correlation.
+
+    ``external_ids`` carries ONLY allow-listed top-level public correlations
+    (e.g. ``igdb_id``). We deliberately do NOT synthesize a
+    ``hasheous_metadata_id`` from the metadataMatch gameId: that gameId is
+    already expressed as ``provider_id``, and double-counting it into
+    ``external_ids`` would break the cross-provider identity comparison in
+    ``enrich.py`` (Hasheous would carry an extra entry Playmatch lacks, forcing
+    a spurious "disagreement" review). A missing/empty id AND no metadataMatch
+    yields ``provider_id=None`` (caller treats that as a genuine not-found).
+    """
+    lookup_id = payload.get("id")
+    lookup_id = str(lookup_id) if lookup_id else None
+    title = payload.get("name") or None
+    platform = payload.get("platform") or None
+    publisher = payload.get("publisher") or None
+
+    # Allow-listed PUBLIC external correlations only.
+    external_ids: dict = _normalize_external_ids(payload)
+
+    # Authoritative identity: prefer the first source-specific gameId from
+    # metadataMatches, else the HashLookup `id`.
+    metadata_game_id = None
+    matches = payload.get("metadataMatches")
+    if isinstance(matches, list):
+        for m in matches:
+            if isinstance(m, dict) and m.get("gameId"):
+                metadata_game_id = str(m.get("gameId"))
+                break
+    provider_id = metadata_game_id or lookup_id
+    return _HashIdentity(
+        provider_id=provider_id,
+        title=title,
+        platform=platform,
+        publisher=publisher,
+        external_ids=external_ids,
+    )
 
 
 # --- Provider ----------------------------------------------------------------
@@ -588,15 +735,17 @@ class HasheousProvider:
 
     def resolve(self, group, *, scans: Optional[dict] = None,
                 sha256: Optional[str] = None) -> HasheousResult:
-        """Resolve Hasheous identity for ``group``.
+        """Resolve Hasheous identity for ``group`` via the hash lookup only.
 
-        Hash-first: a precomputed public ``sha256`` outranks any title fallback.
-        The hash signal is taken from (in order): an explicit ``sha256`` arg, a
-        matching :class:`ScanRecord` for the group's first record, or
-        ``group.sha256`` (if a pipeline attached one). If none is available we
-        refuse hash mode and fall through to the title fallback.
+        Hash-first: a precomputed public ``sha256`` is the PRIMARY and ONLY
+        lookup signal (the real Hasheous API has no REST title search). The hash
+        signal is taken from (in order): an explicit ``sha256`` arg, a matching
+        :class:`ScanRecord` for the group's first record, or ``group.sha256``
+        (if a pipeline attached one). If none is available we cannot query
+        Hasheous at all -> a deterministic ``NONE`` miss (no private data is
+        ever transmitted as a substitute).
 
-        Outage/timeout/oversize are non-fatal: we return ``found=False`` (or
+        Outage/timeout/oversize/429 are non-fatal: we return ``found=False`` (or
         ``needs_manual_review``) and never raise into the caller. Ambiguous or
         conflicting identities route to manual review.
         """
@@ -616,21 +765,19 @@ class HasheousProvider:
         # ---- Hash signal acquisition (reuse, never recompute) --------------
         hash_signal = self._acquire_hash(group, scans=scans, sha256=sha256)
 
-        # ---- Phase 1: exact-hash lookup (OUTRANKS everything) --------------
+        # ---- Hash lookup (the ONLY supported method) -----------------------
         if hash_signal:
             hash_result = self._resolve_by_hash(hash_signal, title=title,
                                                 release_key=release_key)
             if hash_result is not None:
                 return hash_result
 
-        # ---- Phase 2: title/filename fallback (only if no hash match) ------
-        if title:
-            title_result = self._resolve_by_title(title, group=group,
-                                                  release_key=release_key)
-            if title_result is not None:
-                return title_result
-
-        # Nothing found.
+        # No hash signal (and no cached reuse): cannot query Hasheous without
+        # transmitting private data, so we deterministically miss. The title is
+        # NOT sent to Hasheous (no REST title endpoint exists; the only
+        # documented fallback is the MCP tool, which this offline provider does
+        # not implement). This preserves the privacy posture: only the public
+        # sha256 is ever transmitted.
         result.match_method = HasheousMatchMethod.NONE
         result.confidence = 0.0
         return result
@@ -639,14 +786,14 @@ class HasheousProvider:
 
     def _acquire_hash(self, group, *, scans: Optional[dict],
                       sha256: Optional[str]) -> Optional[str]:
-        """Return a public sha256 to use as the PRIMARY lookup signal.
+        """Return a public sha256 to use as the lookup signal.
 
         Source order (reuse, never recompute):
           1. explicit ``sha256`` argument,
           2. ``scans[group.records[0].source_filename].sha256`` (already hashed
              elsewhere),
           3. ``group.sha256`` if a pipeline attached one,
-          4. otherwise refuse hash mode (return None -> title fallback).
+          4. otherwise refuse hash mode (return None -> deterministic miss).
         """
         if sha256:
             return sha256
@@ -671,7 +818,8 @@ class HasheousProvider:
 
     def _resolve_by_hash(self, sha256: str, *, title: Optional[str],
                          release_key: str) -> Optional[HasheousResult]:
-        """Exact-hash lookup. Returns a result, or None to fall through."""
+        """Exact-hash lookup via the real ByHash/sha256 route. Returns a result,
+        or None to fall through to a deterministic miss."""
         # Privacy-bounded cache key: the public sha256 only.
         cache_key = f"hash:{sha256}"
         cached = _cache_load(self.cache_dir, cache_key, self.config.cache_ttl)
@@ -702,18 +850,19 @@ class HasheousProvider:
                     provenance={"kind": "cache_reuse", "key": "hash"},
                 )
 
-        url = _build_rom_url(self.config.base_url, sha256)
+        url = _build_byhash_url(self.config.base_url, sha256)
         payload = _json_get(
             self._opener, url,
             timeout=self.config.timeout_seconds,
             max_bytes=self.config.max_response_bytes,
             resolve=self._resolve,
+            config=self.config,
         )
 
         if payload is None:
-            # Non-fatal outage/timeout/oversize/malformed -> miss (cache negative
-            # only on a genuine "not found", not on outage; we treat None as
-            # transient and do NOT poison the negative cache).
+            # Non-fatal outage/timeout/oversize/malformed/429-after-backoff ->
+            # transient miss. We do NOT poison the negative cache on a transient
+            # error (a genuine "not found" is distinguished below).
             return HasheousResult(
                 group_title=title,
                 group_release_key=release_key,
@@ -724,56 +873,65 @@ class HasheousProvider:
                                        "outcome": "no_response"}],
             )
 
-        if not payload.get("found"):
-            # Genuine negative lookup -> cache it (public signal only).
-            _cache_store(self.cache_dir, cache_key,
-                         {"negative": True, "sha256": sha256})
-            return HasheousResult(
-                group_title=title,
-                group_release_key=release_key,
-                found=False,
-                match_method=HasheousMatchMethod.NONE,
-                confidence=0.0,
-                candidates_evaluated=[{"kind": "hash", "sha256": sha256[:8] + "...",
-                                       "outcome": "not_found"}],
+        identity = _parse_hash_lookup(payload)
+        if not identity.provider_id:
+            # Got a response but no usable identity. Distinguish two cases:
+            #  * An EMPTY / no-match HashLookup (real 200 with no id and no
+            #    metadataMatch) is a genuine "not found" -> negatively cache it
+            #    (public signal only) so we don't re-query every run, which
+            #    also satisfies the ToS rate-limiter goal of limiting repeat
+            #    load. A future re-run with a populated correlation can refresh.
+            #  * A MALFORMED / non-HashLookup payload that DID return (status
+            #    200) but cannot be parsed into any identity is ambiguous ->
+            #    route to manual review (never silently accept/cache). We detect
+            #    this by whether the payload looked like a HashLookup at all.
+            is_empty_lookup = (
+                not payload.get("id")
+                and not payload.get("name")
+                and not payload.get("metadataMatches")
+                and not payload.get("signatures")
             )
-
-        provider_id = (payload.get("provider_id") or "").strip()
-        ctitle = payload.get("title") or title
-        category = payload.get("category")
-        confidence = payload.get("confidence", EXACT_HASH_CONFIDENCE)
-        external_ids = _normalize_external_ids(payload.get("external_ids"))
-        try:
-            confidence = float(confidence)
-        except (TypeError, ValueError):
-            confidence = EXACT_HASH_CONFIDENCE
-        confidence = max(0.0, min(1.0, confidence))
-
-        if not provider_id:
-            # Found but no provider-id correlation: ambiguous -> manual review.
+            if is_empty_lookup:
+                _cache_store(self.cache_dir, cache_key,
+                             {"negative": True, "sha256": sha256})
+                return HasheousResult(
+                    group_title=title,
+                    group_release_key=release_key,
+                    found=False,
+                    match_method=HasheousMatchMethod.NONE,
+                    confidence=0.0,
+                    candidates_evaluated=[{"kind": "hash", "sha256": sha256[:8] + "...",
+                                           "outcome": "not_found"}],
+                )
+            # Recognized-but-identity-less or malformed response -> fail-safe
+            # manual review, NOT a negative cache (avoids caching an ambiguous
+            # outcome that a populated correlation could contradict).
             return HasheousResult(
                 group_title=title,
                 group_release_key=release_key,
                 found=False,
                 needs_manual_review=True,
-                manual_review_reason="hasheous hash match returned no provider_id",
+                manual_review_reason="hasheous lookup returned no provider_id",
                 match_method=HasheousMatchMethod.MANUAL_REVIEW,
-                confidence=confidence,
-                external_ids=external_ids,
+                confidence=0.0,
                 candidates_evaluated=[{"kind": "hash", "sha256": sha256[:8] + "...",
-                                       "outcome": "found_no_provider_id"}],
+                                       "outcome": "no_provider_id"}],
             )
 
         # Cache the confirmed public mapping (provider_id + canonical title +
         # public external_ids).
         _cache_store(self.cache_dir, cache_key,
-                     {"provider_id": provider_id, "title": ctitle,
-                      "category": category, "sha256": sha256,
-                      "external_ids": external_ids})
+                     {"provider_id": identity.provider_id,
+                      "title": identity.title,
+                      "category": identity.platform or identity.publisher,
+                      "sha256": sha256,
+                      "external_ids": identity.external_ids})
 
         return self._exact_hash_result(
-            sha256=sha256, provider_id=provider_id, title=ctitle,
-            category=category, external_ids=external_ids,
+            sha256=sha256, provider_id=identity.provider_id,
+            title=identity.title,
+            category=identity.platform or identity.publisher,
+            external_ids=identity.external_ids,
             confidence=EXACT_HASH_CONFIDENCE,
             method=HasheousMatchMethod.EXACT_HASH, release_key=release_key,
             provenance={"kind": "hash_match", "sha256": sha256[:8] + "..."},
@@ -798,180 +956,3 @@ class HasheousProvider:
                                    "provider_id": provider_id,
                                    "method": method.value}],
         )
-
-    # -- title fallback ------------------------------------------------------
-
-    def _resolve_by_title(self, title: str, *, group, release_key: str
-                          ) -> Optional[HasheousResult]:
-        """Title/filename fallback. Uses ONLY the canonical group title.
-
-        Never transmits private filenames/paths. Reuses the EXISTING
-        deterministic relevance gate (``validate_metadata_relevance``). A
-        candidate that fails relevance is routed to manual review -- never
-        silently accepted. Conflicting/disagreeing candidates -> manual review.
-        """
-        # Privacy-bounded cache key: normalized canonical title only.
-        norm_title = _norm(title)
-        cache_key = f"title:{norm_title}"
-        cached = _cache_load(self.cache_dir, cache_key, self.config.cache_ttl)
-        if cached is not None and cached.get("provider_id"):
-            return HasheousResult(
-                group_title=title,
-                group_release_key=release_key,
-                found=True,
-                category=cached.get("category"),
-                match_method=HasheousMatchMethod.CANONICAL_REUSE,
-                confidence=CANONICAL_REUSE_CONFIDENCE,
-                provider_id=cached.get("provider_id"),
-                external_ids=cached.get("external_ids") or {},
-                provenance={"kind": "cache_reuse", "key": "title"},
-                candidates_evaluated=[{"kind": "title_cache", "title": norm_title}],
-            )
-
-        url = _build_search_url(self.config.base_url, title)
-        payload = _json_get(
-            self._opener, url,
-            timeout=self.config.timeout_seconds,
-            max_bytes=self.config.max_response_bytes,
-            resolve=self._resolve,
-        )
-
-        if payload is None:
-            return HasheousResult(
-                group_title=title,
-                group_release_key=release_key,
-                found=False,
-                match_method=HasheousMatchMethod.NONE,
-                confidence=0.0,
-                candidates_evaluated=[{"kind": "title", "title": norm_title,
-                                       "outcome": "no_response"}],
-            )
-
-        if not payload.get("found"):
-            return HasheousResult(
-                group_title=title,
-                group_release_key=release_key,
-                found=False,
-                match_method=HasheousMatchMethod.NONE,
-                confidence=0.0,
-                candidates_evaluated=[{"kind": "title", "title": norm_title,
-                                       "outcome": "not_found"}],
-            )
-
-        candidates_raw = payload.get("candidates") or []
-        candidates: list[_Candidate] = []
-        for c in candidates_raw:
-            if not isinstance(c, dict):
-                continue
-            cid = (c.get("provider_id") or "").strip()
-            ctitle = (c.get("title") or "").strip()
-            ext = _normalize_external_ids(c.get("external_ids"))
-            try:
-                cconf = float(c.get("confidence", 0.0))
-            except (TypeError, ValueError):
-                cconf = 0.0
-            if cid and ctitle:
-                candidates.append(_Candidate(
-                    provider_id=cid, title=ctitle,
-                    confidence=max(0.0, min(1.0, cconf)),
-                    category=c.get("category"),
-                    external_ids=ext,
-                ))
-
-        evaluated = []
-        for c in candidates:
-            # Reuse the EXISTING deterministic relevance gate. We synthesize a
-            # MetadataRecord carrying only the PUBLIC canonical title (never a
-            # private filename), so the relevance function judges identity on
-            # the public signal alone.
-            rec = _metadata.MetadataRecord(canonical_title=c.title)
-            decision = validate_metadata_relevance(title, rec, group=group)
-            evaluated.append({
-                "kind": "title",
-                "provider_id": c.provider_id,
-                "title": c.title,
-                "confidence": c.confidence,
-                "relevance_category": decision.category,
-                "relevance_reason": decision.reason,
-                "external_ids": c.external_ids,
-            })
-
-        # No usable candidates.
-        if not candidates:
-            return HasheousResult(
-                group_title=title,
-                group_release_key=release_key,
-                found=False,
-                match_method=HasheousMatchMethod.NONE,
-                confidence=0.0,
-                candidates_evaluated=evaluated,
-            )
-
-        # Conflict detection: disagreeing provider_ids for the requested title,
-        # or a candidate that fails the relevance gate -> manual review.
-        accepted = [
-            c for c, e in zip(candidates, evaluated)
-            if e["relevance_category"] == "accepted"
-            and c.confidence >= TITLE_FALLBACK_MIN_CONFIDENCE
-        ]
-        if len(accepted) == 0:
-            # No relevance-accepted candidate. If any candidate existed at all,
-            # route to manual review rather than silently dropping.
-            if candidates:
-                return HasheousResult(
-                    group_title=title,
-                    group_release_key=release_key,
-                    found=False,
-                    needs_manual_review=True,
-                    manual_review_reason=(
-                        "title fallback candidates failed relevance validation"
-                    ),
-                    match_method=HasheousMatchMethod.MANUAL_REVIEW,
-                    confidence=max((c.confidence for c in candidates), default=0.0),
-                    candidates_evaluated=evaluated,
-                )
-            return HasheousResult(
-                group_title=title,
-                group_release_key=release_key,
-                found=False,
-                match_method=HasheousMatchMethod.NONE,
-                confidence=0.0,
-                candidates_evaluated=evaluated,
-            )
-
-        # Multiple disagreeing accepted identities -> ambiguous -> manual review.
-        distinct_ids = {c.provider_id for c in accepted}
-        if len(distinct_ids) > 1:
-            return HasheousResult(
-                group_title=title,
-                group_release_key=release_key,
-                found=False,
-                needs_manual_review=True,
-                manual_review_reason="conflicting Hasheous identities for same title",
-                match_method=HasheousMatchMethod.MANUAL_REVIEW,
-                confidence=max((c.confidence for c in accepted), default=0.0),
-                candidates_evaluated=evaluated,
-            )
-
-        best = accepted[0]
-        _cache_store(self.cache_dir, cache_key,
-                     {"provider_id": best.provider_id, "title": norm_title,
-                      "category": best.category,
-                      "external_ids": best.external_ids})
-        return HasheousResult(
-            group_title=title,
-            group_release_key=release_key,
-            found=True,
-            category=best.category,
-            match_method=HasheousMatchMethod.FUZZY_TITLE,
-            confidence=best.confidence,
-            provider_id=best.provider_id,
-            external_ids=best.external_ids,
-            provenance={"kind": "title_match", "title": norm_title},
-            candidates_evaluated=evaluated,
-        )
-
-
-def _norm(value: str) -> str:
-    """Normalized form for privacy-bounded cache keys (lowercase alnum)."""
-    return re.sub(r"[^a-z0-9]", "", (value or "").lower())
