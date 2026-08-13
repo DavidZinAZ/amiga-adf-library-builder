@@ -15,6 +15,8 @@ from typing import Optional
 
 from . import artwork as artwork_mod
 from .metadata import MetadataRecord, cache_key, guard_url, lookup_metadata
+from .playmatch import PlaymatchMatchMethod
+from .hasheous import HasheousMatchMethod
 from .models import ReleaseGroup, ScanRecord
 from .naming import release_basename
 from .nfo_render import render_gotek_nfo
@@ -36,6 +38,11 @@ class EnrichResult:
     provider: str = ""
     artwork_missing: bool = False
     events: list = field(default_factory=list)
+    # Cross-provider fail-safe flag. Set True when two enabled hash-first identity
+    # providers (Playmatch + Hasheous) resolve the SAME sha256 to DISAGREEING
+    # exact-hash identities; the group is routed to manual review rather than
+    # silently accepting a winner. Additive; defaults False for all existing paths.
+    needs_manual_review: bool = False
 
 
 class EnrichCategory(str, Enum):
@@ -559,21 +566,32 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
     # returned provider_id is captured for downstream correlation. Failures are
     # fully non-fatal (the provider already degrades to a NONE result); we only
     # record structured diagnostics and never let it break the run.
+    # Cross-provider fail-safe bookkeeping. We DEFER committing each provider's
+    # "success" event/note until after BOTH providers have resolved, so a
+    # disagreeing authoritative exact-hash identity for the same ROM hash can be
+    # routed to manual review instead of silently accepted (issue #11/#12
+    # hash-first fail-safe posture). The non-found / manual-review / miss paths
+    # below stay fully immediate and unchanged.
+    _pm_success_event: Optional[EnrichEvent] = None
+    _pm_success_note: Optional[str] = None
+    _hs_success_event: Optional[EnrichEvent] = None
+    _hs_success_note: Optional[str] = None
+
     playmatch_result = None
     if playmatch_provider is not None:
         try:
             playmatch_result = playmatch_provider.resolve(group, scans=scans)
             if playmatch_result is not None:
                 if playmatch_result.found:
-                    events.append(EnrichEvent(
+                    _pm_success_event = EnrichEvent(
                         category=EnrichCategory.PLAYMATCH,
                         detail=(f"resolved via {playmatch_result.match_method.value} "
                                 f"conf={playmatch_result.confidence:.2f} "
                                 f"provider_id={playmatch_result.provider_id}"),
                         ok=True,
-                    ))
+                    )
                     if playmatch_result.provider_id:
-                        notes.append(
+                        _pm_success_note = (
                             f"playmatch provider_id: {playmatch_result.provider_id}"
                         )
                 elif playmatch_result.needs_manual_review:
@@ -612,7 +630,7 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
             hasheous_result = hasheous_provider.resolve(group, scans=scans)
             if hasheous_result is not None:
                 if hasheous_result.found:
-                    events.append(EnrichEvent(
+                    _hs_success_event = EnrichEvent(
                         category=EnrichCategory.HASHEOUS,
                         detail=(
                             f"resolved via {hasheous_result.match_method.value} "
@@ -622,9 +640,9 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                                if hasheous_result.external_ids else "")
                         ),
                         ok=True,
-                    ))
+                    )
                     if hasheous_result.provider_id:
-                        notes.append(
+                        _hs_success_note = (
                             f"hasheous provider_id: {hasheous_result.provider_id}"
                         )
                 elif hasheous_result.needs_manual_review:
@@ -649,6 +667,71 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                 detail=f"hasheous resolve raised: {exc}",
                 ok=False, error=str(exc),
             ))
+
+    # --- Cross-provider exact-hash fail-safe (issue #11/#12 hash-first posture) ---
+    # When BOTH hash-first providers are enabled and each resolves the SAME
+    # sha256 to an EXACT-HASH identity (match_method == EXACT_HASH, conf 1.0),
+    # and those authoritative identities DISAGREE, the combined result MUST
+    # fail-safe: route to manual review and SUPPRESS both per-provider success
+    # records so no conflicting provider_id is ever presented as an accepted
+    # identity. We NEVER pick a winner.
+    #   * Exact-hash AGREEMENT (same identity) -> record both normally (unchanged).
+    #   * Only one provider is exact-hash (the other is a miss / needs_review /
+    #     title fallback) -> do NOT force review; preserve hash-first precedence
+    #     (exact-hash outranks title; CANONICAL_REUSE 0.95 < EXACT_HASH 1.0).
+    #   * Single-provider conflicts are handled by each provider's own
+    #     needs_manual_review path above and remain untouched.
+    needs_manual_review = False
+    if (playmatch_provider is not None and hasheous_provider is not None
+            and playmatch_result is not None and hasheous_result is not None
+            and playmatch_result.found and hasheous_result.found
+            and playmatch_result.match_method == PlaymatchMatchMethod.EXACT_HASH
+            and hasheous_result.match_method == HasheousMatchMethod.EXACT_HASH):
+        def _authoritative_ids(result):
+            ids: set = set()
+            if result.provider_id:
+                ids.add(("provider_id", result.provider_id))
+            # PlaymatchResult carries no external_ids; HasheousResult does.
+            ext = getattr(result, "external_ids", None) or {}
+            for k, v in ext.items():
+                if v is not None:
+                    ids.add(("external_ids", f"{k}={v}"))
+            return ids
+
+        if _authoritative_ids(playmatch_result) != _authoritative_ids(hasheous_result):
+            needs_manual_review = True
+            events.append(EnrichEvent(
+                category=EnrichCategory.PLAYMATCH_REVIEW,
+                detail=(f"cross-provider exact-hash disagreement: playmatch="
+                        f"{playmatch_result.provider_id} vs hasheous="
+                        f"{hasheous_result.provider_id}; routed to manual review"),
+                ok=False, error="cross-provider exact-hash identity conflict",
+            ))
+            events.append(EnrichEvent(
+                category=EnrichCategory.HASHEOUS_REVIEW,
+                detail=(f"cross-provider exact-hash disagreement: playmatch="
+                        f"{playmatch_result.provider_id} vs hasheous="
+                        f"{hasheous_result.provider_id}; routed to manual review"),
+                ok=False, error="cross-provider exact-hash identity conflict",
+            ))
+            notes.append(
+                "cross-provider exact-hash identity conflict: routed to manual review"
+            )
+            # Suppress both per-provider success records so no conflicting id is
+            # presented as an accepted identity.
+            _pm_success_event = None
+            _pm_success_note = None
+            _hs_success_event = None
+            _hs_success_note = None
+
+    if _pm_success_event is not None:
+        events.append(_pm_success_event)
+        if _pm_success_note is not None:
+            notes.append(_pm_success_note)
+    if _hs_success_event is not None:
+        events.append(_hs_success_event)
+        if _hs_success_note is not None:
+            notes.append(_hs_success_note)
 
     master = _find_existing_master(group, artwork_original_dir)
     # Provider order #2: configured local-media libraries. Only consulted when no
