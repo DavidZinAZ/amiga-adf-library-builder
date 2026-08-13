@@ -84,3 +84,31 @@ enabled = false
 # confidence_threshold = 0.9
 # cache_ttl = 0  # seconds; <= 0 disables canonical-reuse cache
 
+# --- Hasheous ROM-hash identity resolver (OPTIONAL, DISABLED by default) -----
+# Opt-in correlation to a Hasheous ROM-hash service. Hash-first: a precomputed
+# public SHA-256 (already computed by the intake scanner) is the PRIMARY lookup
+# signal; an exact-hash match OUTRANKS any title fallback. A returned provider
+# correlation id AND normalized external correlations (e.g. igdb_id) are
+# captured for downstream providers. The service receives ONLY the public
+# SHA-256 and the canonical title -- never private ROM filenames, local paths,
+# or collection details. Disabled unless enabled = true. Self-host by pointing
+# base_url at your own Hasheous-compatible instance.
+#
+# ACCESS LIMITATION (per issue #12 governance):
+#   (1) the live Hasheous lookup is platform-scoped and requires a self-hosted /
+#       Hasheous-compatible endpoint. This bundled provider is CONFIG-DRIVEN
+#       and DISABLED by DEFAULT; the default base_url is a placeholder example
+#       host, NOT a live endpoint.
+#   (2) NO live API key is required for the supported subset (hash + title
+#       lookup). If a future operation needs a credential, that is a separate
+#       operator gate.
+#   (3) the public repo's tests are SYNTHETIC / MOCK ONLY -- no live network.
+[hasheous]
+enabled = false
+# base_url = "https://api.hasheous.example/v1"
+# timeout_seconds = 10.0
+# max_response_bytes = 1000000
+# max_concurrency = 1
+# confidence_threshold = 0.9
+# cache_ttl = 0  # seconds; <= 0 disables canonical-reuse cache
+

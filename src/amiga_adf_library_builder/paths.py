@@ -376,6 +376,32 @@ def load_playmatch_config(config: Optional[str] = None) -> dict:
     return dict(pm)
 
 
+def load_hasheous_config(config: Optional[str] = None) -> dict:
+    """Return the ``[hasheous]`` TOML table from the resolved config file.
+
+    Mirrors :func:`load_playmatch_config` EXACTLY: same precedence chain
+    (explicit ``config`` > env > XDG > system), returns ``{}`` when no config
+    file is found or no ``[hasheous]`` table is present. ``hasheous.py``
+    provides the typed :class:`~amiga_adf_library_builder.hasheous.HasheousConfig`
+    and the provider; this helper is the paths-layer entry point so the
+    precedence logic stays in one module.
+
+    The Hasheous provider is OPTIONAL and DISABLED by default; ``{}`` (no
+    table) means disabled, so nothing in the pipeline changes. The live Hasheous
+    lookup is platform-scoped and requires a self-hosted/compatible endpoint;
+    the bundled provider is config-driven and disabled by default (see issue
+    #12 governance).
+    """
+    path = _discover_config_file(config)
+    if path is None:
+        return {}
+    data = _read_config_file(path)
+    hs = data.get("hasheous")
+    if not isinstance(hs, dict):
+        return {}
+    return dict(hs)
+
+
 def load_rtfm_config(config: Optional[str] = None) -> dict:
     """Return the ``[rtfm]`` TOML table from the resolved config file.
 

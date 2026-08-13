@@ -59,6 +59,7 @@ def run_pipeline(
     local_media_config_path: Optional[str] = None,
     rtfm_config_path: Optional[str] = None,
     playmatch_config_path: Optional[str] = None,
+    hasheous_config_path: Optional[str] = None,
 ) -> dict:
     """Execute phases 2-4, 5 (optional), and 6. Returns a result summary dict.
 
@@ -146,6 +147,29 @@ def run_pipeline(
                 playmatch_provider.discover()
         except Exception:  # provider failure must not break the pipeline
             playmatch_provider = None
+    # Optional Hasheous ROM-hash identity resolver. OPTIONAL and DISABLED by
+    # default; only built when a [hasheous] config is present AND enabled. It
+    # mirrors the Playmatch wiring exactly (reuses the scanner-computed sha256,
+    # degrades to None on construction failure so the pipeline continues
+    # unchanged, non-fatal on outage/timeout/oversize). The Hasheous provider is
+    # invoked ALONGSIDE the PlaymatchProvider; both resolve the same hash-first
+    # identity layer. Exact-hash identity outranks any weaker signal.
+    hasheous_provider = None
+    if hasheous_config_path:
+        try:
+            from . import hasheous as hs
+            from .paths import load_hasheous_config
+
+            hs_cfg = hs.HasheousConfig.from_dict(
+                load_hasheous_config(hasheous_config_path)
+            )
+            if hs_cfg.enabled:
+                hasheous_provider = hs.HasheousProvider(
+                    hs_cfg, cfg.metadata_cache_dir
+                )
+                hasheous_provider.discover()
+        except Exception:  # provider failure must not break the pipeline
+            hasheous_provider = None
     enrich_results = enrich.enrich_all(
         groups,
         nfo_dir=nfo_dir,
@@ -158,6 +182,7 @@ def run_pipeline(
         refresh=refresh_metadata,
         local_media_provider=local_media_provider,
         playmatch_provider=playmatch_provider,
+        hasheous_provider=hasheous_provider,
     )
 
     # Phase 4b: RTFM deterministic manual sidecar build (M1; offline, NO-AI).
