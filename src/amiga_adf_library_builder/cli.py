@@ -512,6 +512,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             upstream_task_closed=bool(args.export_gate_acknowledged),
             local_media_config_path=getattr(args, "config", None),
             rtfm_config_path=getattr(args, "config", None),
+            playmatch_config_path=getattr(args, "config", None),
         )
         return _emit(
             result,
@@ -543,6 +544,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 verified_artwork_height=artwork_mod.ARTWORK_MAX_H,
                 local_media_config_path=getattr(args, "config", None),
                 rtfm_config_path=getattr(args, "config", None),
+                playmatch_config_path=getattr(args, "config", None),
             )
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)

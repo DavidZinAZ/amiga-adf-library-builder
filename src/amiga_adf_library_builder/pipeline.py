@@ -58,6 +58,7 @@ def run_pipeline(
     verified_artwork_height: Optional[int] = VERIFIED_ARTWORK_HEIGHT,
     local_media_config_path: Optional[str] = None,
     rtfm_config_path: Optional[str] = None,
+    playmatch_config_path: Optional[str] = None,
 ) -> dict:
     """Execute phases 2-4, 5 (optional), and 6. Returns a result summary dict.
 
@@ -124,6 +125,27 @@ def run_pipeline(
                 local_media_provider.discover()
         except Exception:  # provider failure must not break the pipeline
             local_media_provider = None
+    # Optional Playmatch ROM-hash identity resolver. OPTIONAL and DISABLED by
+    # default; only built when a [playmatch] config is present AND enabled. The
+    # provider is non-fatal on outage/timeout/oversize (degrades to None so the
+    # pipeline continues unchanged). Hash-first: it reuses the sha256 already
+    # computed by the scanner (passed via scans) and never refetches.
+    playmatch_provider = None
+    if playmatch_config_path:
+        try:
+            from . import playmatch as pm
+            from .paths import load_playmatch_config
+
+            pm_cfg = pm.PlaymatchConfig.from_dict(
+                load_playmatch_config(playmatch_config_path)
+            )
+            if pm_cfg.enabled:
+                playmatch_provider = pm.PlaymatchProvider(
+                    pm_cfg, cfg.metadata_cache_dir
+                )
+                playmatch_provider.discover()
+        except Exception:  # provider failure must not break the pipeline
+            playmatch_provider = None
     enrich_results = enrich.enrich_all(
         groups,
         nfo_dir=nfo_dir,
@@ -135,6 +157,7 @@ def run_pipeline(
         online=online,
         refresh=refresh_metadata,
         local_media_provider=local_media_provider,
+        playmatch_provider=playmatch_provider,
     )
 
     # Phase 4b: RTFM deterministic manual sidecar build (M1; offline, NO-AI).

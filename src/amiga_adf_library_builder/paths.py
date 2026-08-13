@@ -353,6 +353,29 @@ def load_local_media_config(config: Optional[str] = None) -> dict:
     return dict(lm)
 
 
+def load_playmatch_config(config: Optional[str] = None) -> dict:
+    """Return the ``[playmatch]`` TOML table from the resolved config file.
+
+    Mirrors :func:`load_local_media_config` EXACTLY: same precedence chain
+    (explicit ``config`` > env > XDG > system), returns ``{}`` when no config
+    file is found or no ``[playmatch]`` table is present. ``playmatch.py``
+    provides the typed :class:`~amiga_adf_library_builder.playmatch.PlaymatchConfig`
+    and the provider; this helper is the paths-layer entry point so the
+    precedence logic stays in one module.
+
+    The Playmatch provider is OPTIONAL and DISABLED by default; ``{}`` (no
+    table) means disabled, so nothing in the pipeline changes.
+    """
+    path = _discover_config_file(config)
+    if path is None:
+        return {}
+    data = _read_config_file(path)
+    pm = data.get("playmatch")
+    if not isinstance(pm, dict):
+        return {}
+    return dict(pm)
+
+
 def load_rtfm_config(config: Optional[str] = None) -> dict:
     """Return the ``[rtfm]`` TOML table from the resolved config file.
 

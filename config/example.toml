@@ -67,3 +67,20 @@ cheats = ["/path/to/cheats"]
 # DEFERRED in M1. Parsed and ignored. Online must stay disabled.
 enabled = false
 
+# --- Playmatch ROM-hash identity resolver (OPTIONAL, DISABLED by default) -----
+# Opt-in correlation to a Playmatch ROM-hash service. Hash-first: a precomputed
+# public SHA-256 (already computed by the intake scanner) is the PRIMARY lookup
+# signal; an exact-hash match OUTRANKS any title fallback. A returned provider
+# correlation id is captured for downstream providers. The service receives ONLY
+# the public SHA-256 and the canonical title -- never private ROM filenames,
+# local paths, or collection details. Disabled unless enabled = true. Self-host
+# by pointing base_url at your own instance.
+[playmatch]
+enabled = false
+# base_url = "https://api.playmatch.example/v1"
+# timeout_seconds = 10.0
+# max_response_bytes = 1000000
+# max_concurrency = 1
+# confidence_threshold = 0.9
+# cache_ttl = 0  # seconds; <= 0 disables canonical-reuse cache
+

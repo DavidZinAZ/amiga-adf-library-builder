@@ -65,6 +65,9 @@ class EnrichCategory(str, Enum):
     ROUTE_REVIEW = "route_review"
     METADATA_RELEVANCE_REJECTED = "metadata_relevance_rejected"
     METADATA_RELEVANCE_REVIEW = "metadata_relevance_review"
+    PLAYMATCH = "playmatch"
+    PLAYMATCH_MISS = "playmatch_miss"
+    PLAYMATCH_REVIEW = "playmatch_review"
 
 
 @dataclass
@@ -431,7 +434,7 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                  artwork_original_dir: Path, artwork_processed_dir: Path,
                  metadata_cache_dir: Optional[Path] = None, curated_metadata_dir: Optional[Path] = None,
                  online: bool = False, refresh: bool = False,
-                 local_media_provider=None) -> EnrichResult:
+                 local_media_provider=None, playmatch_provider=None) -> EnrichResult:
     metadata_cache_dir = Path(metadata_cache_dir or (Path(nfo_dir).parent / "metadata-cache"))
     curated_metadata_dir = Path(curated_metadata_dir or (Path(nfo_dir).parent / "metadata-curated"))
     notes: list[str] = []
@@ -547,6 +550,49 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
         else:  # metadata / reference
             metadata = metadata or MetadataRecord(canonical_title=lookup_title or group.title or "Unknown")
             metadata.source_url = url
+    # Optional Playmatch ROM-hash identity resolver. Hash-first; reuses the
+    # scanner-computed sha256 (passed via `scans`) and never refetches. A
+    # returned provider_id is captured for downstream correlation. Failures are
+    # fully non-fatal (the provider already degrades to a NONE result); we only
+    # record structured diagnostics and never let it break the run.
+    playmatch_result = None
+    if playmatch_provider is not None:
+        try:
+            playmatch_result = playmatch_provider.resolve(group, scans=scans)
+            if playmatch_result is not None:
+                if playmatch_result.found:
+                    events.append(EnrichEvent(
+                        category=EnrichCategory.PLAYMATCH,
+                        detail=(f"resolved via {playmatch_result.match_method.value} "
+                                f"conf={playmatch_result.confidence:.2f} "
+                                f"provider_id={playmatch_result.provider_id}"),
+                        ok=True,
+                    ))
+                    if playmatch_result.provider_id:
+                        notes.append(
+                            f"playmatch provider_id: {playmatch_result.provider_id}"
+                        )
+                elif playmatch_result.needs_manual_review:
+                    events.append(EnrichEvent(
+                        category=EnrichCategory.PLAYMATCH_REVIEW,
+                        detail=(f"playmatch needs manual review: "
+                                f"{playmatch_result.manual_review_reason}"),
+                        ok=False, error=playmatch_result.manual_review_reason,
+                    ))
+                    notes.append("playmatch: routed to manual review")
+                else:
+                    events.append(EnrichEvent(
+                        category=EnrichCategory.PLAYMATCH_MISS,
+                        detail="playmatch: no identity match",
+                        cache="miss",
+                    ))
+        except Exception as exc:  # defensive: never break enrich
+            events.append(EnrichEvent(
+                category=EnrichCategory.PLAYMATCH_MISS,
+                detail=f"playmatch resolve raised: {exc}",
+                ok=False, error=str(exc),
+            ))
+
     master = _find_existing_master(group, artwork_original_dir)
     # Provider order #2: configured local-media libraries. Only consulted when no
     # approved local-artwork master already exists. The provider copies a
@@ -677,7 +723,7 @@ def enrich_all(groups: list[ReleaseGroup], *, nfo_dir: Path, scans: list[ScanRec
                metadata_cache_dir: Optional[Path] = None,
                curated_metadata_dir: Optional[Path] = None,
                online: bool = False, refresh: bool = False,
-               local_media_provider=None) -> list[EnrichResult]:
+               local_media_provider=None, playmatch_provider=None) -> list[EnrichResult]:
     scan_map = {s.filename: s for s in scans}
     metadata_cache_dir = Path(metadata_cache_dir or (Path(nfo_dir).parent / "metadata-cache"))
     curated_metadata_dir = Path(curated_metadata_dir or (Path(nfo_dir).parent / "metadata-curated"))
@@ -688,6 +734,7 @@ def enrich_all(groups: list[ReleaseGroup], *, nfo_dir: Path, scans: list[ScanRec
                      metadata_cache_dir=metadata_cache_dir,
                      curated_metadata_dir=curated_metadata_dir,
                      online=online, refresh=refresh,
-                     local_media_provider=local_media_provider)
+                     local_media_provider=local_media_provider,
+                     playmatch_provider=playmatch_provider)
         for group in groups
     ]
