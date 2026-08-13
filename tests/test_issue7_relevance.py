@@ -82,6 +82,40 @@ def test_different_game_with_platform_mismatch_is_rejected():
     assert decision.reason in ("different_game", "low_title_similarity")
 
 
+def test_amiga_sequel_lookalike_is_rejected_as_different_game():
+    # Issue #7 contract: a high-similarity *different* game (one title is the
+    # other extended by a sequel/term/edition tail) must be rejected as a
+    # different game even though it reports the Amiga platform. This is the
+    # regression case that previously slipped through the generic accept gate.
+    rec = _record("Sonic the Hedgehog 2",
+                  "Sonic the Hedgehog 2 is a platform game.",
+                  platforms=["Amiga"])
+    decision = validate_metadata_relevance("Sonic the Hedgehog", rec)
+    assert decision.category == "rejected"
+    assert decision.reason == "different_game"
+
+
+def test_amiga_edition_tail_lookalike_is_rejected_as_different_game():
+    # Same class with a different tail shape ("Lemmings 2" vs "Lemmings").
+    rec = _record("Lemmings 2",
+                  "Lemmings 2 is a puzzle game.",
+                  platforms=["Amiga"])
+    decision = validate_metadata_relevance("Lemmings", rec)
+    assert decision.category == "rejected"
+    assert decision.reason == "different_game"
+
+
+def test_exact_amiga_title_still_accepted():
+    # Regression: an exact canonical title must still be accepted (the
+    # different_game guard must not fire on identity matches).
+    rec = _record("Lemmings",
+                  "Lemmings is a puzzle game for the Amiga.",
+                  platforms=["Amiga"])
+    decision = validate_metadata_relevance("Lemmings", rec)
+    assert decision.category == "accepted"
+    assert decision.reason == "exact_match"
+
+
 def test_disambiguation_page_is_not_accepted():
     rec = _record("Example Dragon", "Example Dragon may refer to several different games in the series.",
                   platforms=["Amiga"])

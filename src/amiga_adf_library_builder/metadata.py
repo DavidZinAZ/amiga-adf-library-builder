@@ -372,6 +372,21 @@ def validate_metadata_relevance(requested_title: str, record: "MetadataRecord",
             evidence=evidence, reason="exact_match",
         )
 
+    # --- Different-game lookalike guard (issue #7) ---
+    # A high-ratio candidate that is NOT an exact identity but is merely the
+    # requested title extended by extra characters (a sequel number/word, an
+    # edition/version tail) is a *different* game. At ratio >= accept threshold
+    # the only way one normalized title extends another is such a tail, so
+    # rejecting is safe and exact titles still pass via the identity branch.
+    if (ratio >= _RELEVANCE_ACCEPT_RATIO and not exact_identity
+            and (candidate.startswith(target) and candidate != target
+                 or target.startswith(candidate) and target != candidate)):
+        evidence.append("different_game_substring")
+        return RelevanceDecision(
+            category="rejected", confidence=min(0.45, ratio),
+            evidence=evidence, reason="different_game",
+        )
+
     if ratio >= _RELEVANCE_ACCEPT_RATIO and (amiga_present or not record.platforms):
         return RelevanceDecision(
             category="accepted", confidence=max(0.90, ratio),
