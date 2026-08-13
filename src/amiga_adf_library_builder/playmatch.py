@@ -281,12 +281,112 @@ def _cache_load(cache_dir: Path, key: str, ttl: float) -> Optional[dict]:
 
 # --- Fetch plumbing (stdlib only) --------------------------------------------
 
-def _default_opener(url: str, *, timeout: float) -> bytes:
-    """Real network opener. Guarded by callers (guard_url + size bound)."""
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse to follow redirects.
+
+    A 3xx response is surfaced to the caller (``http_error_302`` returns the
+    redirect response object) rather than being silently re-fetched. The
+    caller inspects ``response.geturl()`` / status to decide; for Playmatch we
+    treat any redirect as a non-fatal miss so a rogue 30x to a cloud-metadata /
+    loopback / RFC1918 host is NEVER fetched on the second hop. This keeps the
+    central ``metadata.guard_url`` SSRF guard authoritative for every byte
+    actually fetched.
+    """
+
+    def http_error_302(self, req, fp, code, msg, headers):
+        return self._refuse(req, fp, code, msg, headers)
+
+    def http_error_303(self, req, fp, code, msg, headers):
+        return self._refuse(req, fp, code, msg, headers)
+
+    def http_error_307(self, req, fp, code, msg, headers):
+        return self._refuse(req, fp, code, msg, headers)
+
+    def http_error_308(self, req, fp, code, msg, headers):
+        return self._refuse(req, fp, code, msg, headers)
+
+    def _refuse(self, req, fp, code, msg, headers):
+        # Surface the redirect response WITHOUT following it. Returning the
+        # current response object means no second hop is ever opened, so a 30x
+        # to a cloud-metadata / loopback / RFC1918 host is never fetched. The
+        # caller (``_json_get``) treats the non-200 as a non-fatal miss. We
+        # deliberately do NOT call the base redirect-following routine.
+        return fp
+
+
+def _build_no_redirect_opener(*, timeout: float) -> urllib.request.OpenerDirector:
+    """Build a hardened opener with explicit, minimal handlers.
+
+    * No ``HTTPRedirectHandler`` (the default chain auto-follows 3xx): we
+      supply :class:`_NoRedirectHandler` which surfaces redirects instead.
+    * ``ProxyHandler({})`` clears any ambient ``HTTP_PROXY`` / ``HTTPS_PROXY``
+      so the request never leaves through an unapproved egress path.
+    * Standard error handling / response processing only.
+    """
+    opener = urllib.request.OpenerDirector()
+    opener.add_handler(_NoRedirectHandler())
+    opener.add_handler(urllib.request.ProxyHandler({}))
+    opener.add_handler(urllib.request.HTTPHandler())
+    opener.add_handler(urllib.request.HTTPSHandler())
+    opener.add_handler(urllib.request.HTTPDefaultErrorHandler())
+    opener.add_handler(urllib.request.HTTPErrorProcessor())
+    return opener
+
+
+def _default_opener(url: str, *, timeout: float,
+                    max_bytes: int = _MAX_RESPONSE_BYTES) -> bytes:
+    """Real network opener. Guarded by callers (guard_url + size bound).
+
+    Uses a hardened :class:`OpenerDirector` that does NOT follow redirects and
+    does NOT honor ambient proxy environment variables. The caller
+    (``_bounded_read`` + ``_json_get``) enforces the SSRF guard and size bound.
+    The response is streamed and the ``max_bytes`` cap is enforced *before* the
+    whole body buffers (Defect 2 / DoS).
+    """
+    opener = _build_no_redirect_opener(timeout=timeout)
     req = urllib.request.Request(url, headers={"User-Agent": "amiga-adf-builder/playmatch"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 (guarded)
-        data = resp.read()
+    with opener.open(req, timeout=timeout) as resp:  # noqa: S310 (guarded)
+        # We never follow redirects (SSRF pivot defense, Defect 1). A 3xx is
+        # surfaced here, not opened on a second hop, so a redirect to a
+        # cloud-metadata / loopback / RFC1918 host is NEVER fetched. Any
+        # non-success status is a non-fatal miss for the pipeline.
+        if resp.status is not None and resp.status >= 300:
+            raise PlaymatchError(
+                f"Playmatch endpoint returned non-success status {resp.status} "
+                f"(redirects are not followed)"
+            )
+        data = _stream_read(resp, max_bytes=max_bytes)
     return data
+
+
+def _stream_read(resp, *, max_bytes: int) -> bytes:
+    """Read ``resp`` in bounded chunks, aborting before the body buffers.
+
+    Mirrors ``metadata._text_get``'s capped read but enforces the bound on the
+    accumulated length: the instant accumulated bytes would exceed
+    ``max_bytes``, raise :class:`PlaymatchError` so a multi-GB response cannot
+    exhaust process memory before the check runs.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    # Cap each read so the per-call allocation stays bounded even if the
+    # caller passes a very large max_bytes.
+    chunk_size = min(64 * 1024, max(max_bytes, 1))
+    while True:
+        try:
+            chunk = resp.read(chunk_size)
+        except (OSError, urllib.error.URLError) as exc:
+            raise PlaymatchError(f"Playmatch response read failed: {exc}") from exc
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise PlaymatchError(
+                f"Playmatch response exceeded max_response_bytes "
+                f"({total} > {max_bytes})"
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def _bounded_read(opener: Callable[..., bytes], url: str, *, timeout: float,
@@ -295,8 +395,13 @@ def _bounded_read(opener: Callable[..., bytes], url: str, *, timeout: float,
 
     ``opener`` has the signature ``opener(url, *, timeout) -> bytes``. Real
     fetches also require ``guard_url(url, resolve=True)`` to have been called
-    first. A response larger than ``max_bytes`` raises ``PlaymatchError`` so
-    the caller can treat it as a non-fatal miss.
+    first. A response larger than ``max_bytes`` raises :class:`PlaymatchError`
+    so the caller can treat it as a non-fatal miss.
+
+    The real opener (:func:`_default_opener`) already streams with a hard cap
+    (``_MAX_RESPONSE_BYTES``) so a multi-GB body cannot buffer before the
+    bound is enforced. Injected byte-openers (tests) return a prebuilt blob and
+    are size-checked here as a defense-in-depth backstop.
     """
     data = opener(url, timeout=timeout)
     if len(data) > max_bytes:
@@ -380,10 +485,20 @@ class PlaymatchProvider:
             raise PlaymatchDisabled("playmatch provider is disabled in config")
         self.config = config
         self.cache_dir = Path(cache_dir)
-        # Real fetch path uses _default_opener with resolve=True. Tests inject a
-        # fake opener and pass resolve=False so no DNS/socket is touched.
-        self._opener = opener or _default_opener
-        self._resolve = resolve if opener is None else False
+        if opener is not None:
+            # Injected (test) opener: no DNS/socket touched; resolve stays False.
+            self._opener = opener
+            self._resolve = False
+        else:
+            # Real fetch path. Wrap _default_opener so the configured response
+            # size bound is enforced *while streaming* (Defect 2): the cap is
+            # applied to the actual socket read, not only to the injected
+            # max_bytes backstop in _bounded_read. resolve=True so guard_url
+            # performs DNS validation on the original URL.
+            self._opener = lambda url, *, timeout: _default_opener(
+                url, timeout=timeout, max_bytes=self.config.max_response_bytes
+            )
+            self._resolve = True
         self._discovered = False
 
     # -- discovery (config sanity) -------------------------------------------
