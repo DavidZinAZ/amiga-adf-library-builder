@@ -855,7 +855,24 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
         ),
         encoding="utf-8",
     )
-    return EnrichResult(nfo_path, master, processed, processed is not None, notes, metadata_path, provider, processed is None, events)
+
+    # Combine every manual-review routing signal into a single flag for the
+    # returned EnrichResult (acceptance check #10). The cross-provider
+    # exact-hash fail-safe above already sets `needs_manual_review` True on
+    # disagreement; per-provider `needs_manual_review` results and any
+    # routing-to-review events must surface here too, so callers get one
+    # reliable signal. No event category/detail/ok/note is altered.
+    needs_manual_review = (
+        needs_manual_review
+        or (playmatch_result is not None and playmatch_result.needs_manual_review)
+        or (hasheous_result is not None and hasheous_result.needs_manual_review)
+        or any(e.category in (
+            EnrichCategory.PLAYMATCH_REVIEW,
+            EnrichCategory.HASHEOUS_REVIEW,
+            EnrichCategory.LOCAL_MEDIA_REVIEW,
+        ) for e in events)
+    )
+    return EnrichResult(nfo_path, master, processed, processed is not None, notes, metadata_path, provider, processed is None, events, needs_manual_review=needs_manual_review)
 
 
 def enrich_all(groups: list[ReleaseGroup], *, nfo_dir: Path, scans: list[ScanRecord],

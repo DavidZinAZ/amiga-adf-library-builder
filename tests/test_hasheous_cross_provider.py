@@ -127,6 +127,14 @@ def test_cross_provider_disagreeing_exact_hash_routes_to_review():
     assert not success_categories, \
         f"conflicting per-provider success events must be suppressed, got {success_categories}"
 
+    # (c) acceptance check #10 residual: the cross-provider fail-safe MUST be
+    # reflected on the returned EnrichResult so callers share one reliable
+    # signal (the local failure that motivated the 2nd remediation).
+    assert er.needs_manual_review is True, (
+        "cross-provider exact-hash disagreement must set "
+        "EnrichResult.needs_manual_review True"
+    )
+
 
 # --- positive: agreeing identities do NOT trigger the review path -----------
 
@@ -163,6 +171,12 @@ def test_cross_provider_agreeing_provider_ids_no_review():
                                             en.EnrichCategory.HASHEOUS)}
     assert success_categories == {en.EnrichCategory.PLAYMATCH,
                                   en.EnrichCategory.HASHEOUS}
+
+    # Agreeing identities stay on the happy path: no manual-review flag.
+    assert er.needs_manual_review is False, (
+        "agreeing provider_ids must NOT set "
+        "EnrichResult.needs_manual_review"
+    )
 
 
 # --- agreement on provider_id but disagreement on normalized external_ids ----
