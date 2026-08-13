@@ -63,6 +63,8 @@ class EnrichCategory(str, Enum):
     LOCAL_MEDIA_REVIEW = "local_media_review"
     ROUTE_QUARANTINE = "route_quarantine"
     ROUTE_REVIEW = "route_review"
+    METADATA_RELEVANCE_REJECTED = "metadata_relevance_rejected"
+    METADATA_RELEVANCE_REVIEW = "metadata_relevance_review"
 
 
 @dataclass
@@ -172,6 +174,9 @@ def _build_provenance_record(group: ReleaseGroup, scans: dict[str, ScanRecord],
             "artwork_url": metadata.artwork_url or None,
             "artwork_source_url": metadata.artwork_source_url or None,
             "artwork_provider": metadata.artwork_provider or None,
+            "relevance_category": metadata.relevance_category or None,
+            "relevance_confidence": (metadata.relevance_confidence or 0.0) if metadata.relevance_category else None,
+            "relevance_evidence": (metadata.relevance_evidence or []) if metadata.relevance_category else [],
         }
 
     return {
@@ -291,6 +296,12 @@ def build_provenance_text(group: ReleaseGroup, scans: dict[str, ScanRecord],
         lines.append(f"- Retrieved: {metadata.retrieved_at}")
         lines.append(f"- Match confidence: {metadata.confidence:.2f}")
         lines.append(f"- Query: {metadata.query}")
+        if metadata.relevance_category:
+            ev = "; ".join(metadata.relevance_evidence or [])
+            lines.append(
+                f"- Relevance: {metadata.relevance_category} "
+                f"(conf {metadata.relevance_confidence:.2f}) [{ev}]"
+            )
         if metadata.artwork_url:
             lines.append(f"- Artwork image: {metadata.artwork_url}")
             lines.append(f"- Artwork page: {metadata.artwork_source_url or metadata.source_url or 'not supplied'}")
@@ -443,10 +454,29 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
             detail=f"query={lookup_title!r}", cache=("refresh" if refresh else "miss"),
         ))
         try:
-            metadata, provider = lookup_metadata(
+            metadata, provider, relevance_events = lookup_metadata(
                 lookup_title, cache_dir=metadata_cache_dir,
-                curated_dir=curated_metadata_dir, refresh=refresh,
+                curated_dir=curated_metadata_dir, refresh=refresh, group=group,
             )
+            # Surface online relevance fall-through decisions as structured
+            # diagnostics (bounded: one event per rejected/reviewed candidate).
+            for rev in relevance_events:
+                if rev["category"] == "rejected":
+                    events.append(EnrichEvent(
+                        category=EnrichCategory.METADATA_RELEVANCE_REJECTED,
+                        detail=(f"{rev['provider']} candidate {rev['canonical_title']!r} "
+                                f"rejected: {rev['reason']} (conf {rev['confidence']:.2f})"),
+                        url=(metadata.source_url if metadata else None),
+                        ok=False, error=rev["reason"],
+                    ))
+                elif rev["category"] == "review":
+                    events.append(EnrichEvent(
+                        category=EnrichCategory.METADATA_RELEVANCE_REVIEW,
+                        detail=(f"{rev['provider']} candidate {rev['canonical_title']!r} "
+                                f"routed to review: {rev['reason']} (conf {rev['confidence']:.2f})"),
+                        url=(metadata.source_url if metadata else None),
+                        ok=False, error=rev["reason"],
+                    ))
             if metadata:
                 notes.append(f"metadata lookup: {provider}")
                 events.append(EnrichEvent(

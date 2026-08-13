@@ -48,7 +48,7 @@ def test_curated_record_is_cached(tmp_path: Path):
         "provider": "curated",
         "confidence": 1.0,
     }))
-    record, provider = lookup_metadata("Example Castle Quest", cache_dir=cache, curated_dir=curated, opener=_opener)
+    record, provider, _ = lookup_metadata("Example Castle Quest", cache_dir=cache, curated_dir=curated, opener=_opener)
     assert record is not None
     assert provider.startswith("curated")
     assert (cache / "example-castle-quest.json").exists()
@@ -103,7 +103,7 @@ def test_curated_record_uses_amiga_specific_artwork_page_when_wikipedia_has_no_i
         html = b'<meta property="og:image" content="https://www.lemonamiga.com/media/covers/joan-front.jpg">'
         r = R(html); r.url = url; return r
 
-    record, provider = lookup_metadata("Example Castle Quest", cache_dir=cache, curated_dir=curated, opener=opener)
+    record, provider, _ = lookup_metadata("Example Castle Quest", cache_dir=cache, curated_dir=curated, opener=opener)
     assert record is not None
     assert record.artwork_url.endswith("joan-front.jpg")
     assert record.artwork_source_url.endswith("example-castle-quest")

@@ -147,6 +147,9 @@ class MetadataRecord:
     retrieved_at: str = ""
     confidence: float = 0.0
     query: str = ""
+    relevance_category: str = ""      # accepted | rejected | review (online candidates)
+    relevance_confidence: float = 0.0
+    relevance_evidence: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -238,6 +241,153 @@ def _text_get(url: str, *, timeout: float = 20.0,
 
 def _norm(value: str) -> str:
     return re.sub(r"[^a-z0-9]", "", value.lower())
+
+
+# Threshold band for the deterministic relevance validator below.
+_RELEVANCE_ACCEPT_RATIO = 0.90    # >= this -> accept (identity-equivalent title)
+_RELEVANCE_REJECT_RATIO = 0.60    # <  this -> reject (clearly different subject)
+# Middle band (0.60 <= ratio < 0.90) routes to review unless a strong
+# person/disambiguation signal is present (then reject).
+
+# Phrasing that marks a Wikipedia/encyclopedia page as a biography rather than a game.
+# Deliberately STRONG/non-generic: common game-description phrasing such as
+# "is a"/"developed by" is excluded so legitimate game pages are not mis-flagged.
+_PERSON_PHRASES = (
+    "composer", "musician", "biography", "born", "novelist", "wrote",
+    "the son of", "the daughter of", "singer", "filmmaker", "painter",
+)
+# Phrasing that marks a generic series/franchise/disambiguation page.
+_DISAMBIGUATION_PHRASES = (
+    "may refer to", "can refer to", "refers to", "disambiguation", "franchise",
+    "series of", "series is", "this article is about", "this page is about",
+)
+
+
+@dataclass
+class RelevanceDecision:
+    """Deterministic verdict on whether an online metadata candidate is about
+    the requested game (no AI/LLM, no randomness)."""
+
+    category: str                       # accepted | rejected | review
+    confidence: float                   # deterministic 0.0..1.0
+    evidence: list[str]                 # human-readable deterministic reasons
+    reason: str = ""                    # short machine category
+
+    def __post_init__(self) -> None:
+        self.confidence = round(float(self.confidence), 4)
+
+
+def validate_metadata_relevance(requested_title: str, record: "MetadataRecord",
+                                *, group=None) -> "RelevanceDecision":
+    """Decide whether ``record`` is actually about ``requested_title``.
+
+    Deterministic: identical inputs always yield an identical
+    :class:`RelevanceDecision`. Used ONLY for ONLINE-derived candidates before
+    they are cached/accepted. Curated and cached records are authoritative and
+    never pass through this function.
+
+    Signals (combined; none required in isolation):
+      * normalized canonical-title identity/ratio vs the requested title;
+      * Amiga platform presence (strong accept signal);
+      * release-year mismatch (when the group supplies a year);
+      * publisher/developer mismatch (weak negative);
+      * biography phrasing -> rejected (reason ``person_page``);
+      * series/disambiguation phrasing -> rejected/review (reason
+        ``series_disambiguation``);
+      * a near-miss but different game -> rejected (reason ``different_game``).
+    """
+    evidence: list[str] = []
+    target = _norm(requested_title)
+    candidate = _norm(record.canonical_title or requested_title)
+    ratio = SequenceMatcher(None, target, candidate).ratio() if (target or candidate) else 0.0
+
+    # --- Strong positive: canonical identity (possibly with edition suffix) ---
+    exact_identity = (target != "" and candidate != "" and (
+        candidate == target
+        or candidate.startswith(target + " ")
+        or target.startswith(candidate + " ")
+    ))
+
+    # --- Person / biography signal ---
+    hay_text = (record.canonical_title + " " + (record.description or "")).lower()
+    no_amiga_platform = record.platforms and not any(
+        "amiga" in (p or "").lower() for p in record.platforms
+    )
+    is_person = (no_amiga_platform and any(phrase in hay_text for phrase in _PERSON_PHRASES)) or (
+        not record.platforms and any(phrase in hay_text for phrase in _PERSON_PHRASES)
+    )
+    if is_person:
+        evidence.append("entity_type_person")
+        return RelevanceDecision(
+            category="rejected", confidence=0.10,
+            evidence=evidence, reason="person_page",
+        )
+
+    # --- Series / disambiguation signal ---
+    is_disambiguation = any(phrase in hay_text for phrase in _DISAMBIGUATION_PHRASES)
+    if is_disambiguation:
+        evidence.append("disambiguation_page")
+        # A generic franchise page for a specific-game query is rejected (falls
+        # through to offline/local, never cached). If the normalized title is
+        # itself identical to the game, route to review instead of hard-reject.
+        if exact_identity:
+            return RelevanceDecision(
+                category="review", confidence=0.55,
+                evidence=evidence, reason="series_disambiguation",
+            )
+        return RelevanceDecision(
+            category="rejected", confidence=0.30,
+            evidence=evidence, reason="series_disambiguation",
+        )
+
+    # --- Platform evidence ---
+    amiga_present = any("amiga" in (p or "").lower() for p in record.platforms)
+    if amiga_present:
+        evidence.append("platform_amiga_match")
+
+    # --- Year mismatch (only when the requested group supplies a year) ---
+    requested_year = ""
+    if group is not None:
+        requested_year = (getattr(group, "year", "") or "") or ""
+    record_year = (record.year or "").strip()
+    if requested_year and record_year and requested_year != record_year:
+        evidence.append(f"year_mismatch:{requested_year}!={record_year}")
+
+    # --- Title similarity / identity ---
+    if exact_identity:
+        evidence.append("exact_canonical_title")
+    else:
+        evidence.append(f"title_similarity:{ratio:.2f}")
+
+    # --- Build the decision from the combined evidence ---
+    year_mismatch = any(e.startswith("year_mismatch:") for e in evidence)
+    has_platform_negative = no_amiga_platform and not amiga_present
+
+    if exact_identity and (amiga_present or not record.platforms) and not year_mismatch:
+        return RelevanceDecision(
+            category="accepted", confidence=max(0.90, ratio),
+            evidence=evidence, reason="exact_match",
+        )
+
+    if ratio >= _RELEVANCE_ACCEPT_RATIO and (amiga_present or not record.platforms):
+        return RelevanceDecision(
+            category="accepted", confidence=max(0.90, ratio),
+            evidence=evidence, reason="high_title_similarity",
+        )
+
+    if ratio < _RELEVANCE_REJECT_RATIO or (ratio < 0.8 and has_platform_negative):
+        reason = "different_game" if not has_platform_negative else "low_title_similarity"
+        return RelevanceDecision(
+            category="rejected", confidence=min(0.45, ratio),
+            evidence=evidence, reason=reason,
+        )
+
+    # Middle band: ambiguous near-miss. Route to review (fall through to
+    # offline/local; never cached, never returned as accepted).
+    return RelevanceDecision(
+        category="review", confidence=ratio,
+        evidence=evidence, reason="ambiguous_midband",
+    )
 
 
 class _ImagePageParser(HTMLParser):
@@ -434,7 +584,9 @@ def _discover_curated_artwork(record: MetadataRecord, title: str, *, timeout: fl
 
 def lookup_metadata(title: str, *, cache_dir: Path, curated_dir: Path,
                     refresh: bool = False, timeout: float = 20.0,
-                    opener: Optional[Callable[..., Any]] = None) -> tuple[Optional[MetadataRecord], str]:
+                    group: Any = None,
+                    opener: Optional[Callable[..., Any]] = None
+                    ) -> tuple[Optional[MetadataRecord], str, list[dict]]:
     curated = load_curated(curated_dir, title)
     if curated:
         # Preserve curated identity/facts. Wikipedia may supplement only missing
@@ -453,18 +605,50 @@ def lookup_metadata(title: str, *, cache_dir: Path, curated_dir: Path,
         if not curated.artwork_url:
             _discover_curated_artwork(curated, title, timeout=timeout, opener=opener)
         save_cached(cache_dir, title, curated)
-        return curated, curated.provider or "curated"
+        return curated, curated.provider or "curated", []
     if not refresh:
         cached = load_cached(cache_dir, title)
-        if cached: return cached, "cache"
-    record: Optional[MetadataRecord] = None
+        if cached: return cached, "cache", []
+    # ONLINE candidates are validated for relevance before caching/accepting.
+    # A rejected/review candidate is NEVER cached and NEVER returned; it falls
+    # through to the next provider, then to offline/local. Curated and cached
+    # paths above stay authoritative and skip validation.
+    relevance_events: list[dict] = []
+    accepted: Optional[MetadataRecord] = None
+
+    def _try_provider(label: str,
+                      lookup) -> None:
+        nonlocal accepted
+        candidate = None
+        try:
+            candidate = lookup()
+        except Exception:
+            candidate = None
+        if candidate is None:
+            return
+        decision = validate_metadata_relevance(title, candidate, group=group)
+        relevance_events.append({
+            "provider": label,
+            "canonical_title": candidate.canonical_title,
+            "category": decision.category,
+            "confidence": decision.confidence,
+            "reason": decision.reason,
+            "evidence": list(decision.evidence),
+        })
+        if decision.category == "accepted":
+            candidate.relevance_category = "accepted"
+            candidate.relevance_confidence = decision.confidence
+            candidate.relevance_evidence = list(decision.evidence)
+            accepted = candidate
+
     rawg_key = os.environ.get("RAWG_API_KEY", "").strip()
     if rawg_key:
-        try: record = rawg_lookup(title, api_key=rawg_key, timeout=timeout, opener=opener)
-        except Exception: record = None
-    if record is None:
-        record = wikipedia_lookup(title, timeout=timeout, opener=opener)
-    if record:
-        save_cached(cache_dir, title, record)
-        return record, record.provider
-    return None, "not-found"
+        _try_provider("rawg",
+                      lambda: rawg_lookup(title, api_key=rawg_key, timeout=timeout, opener=opener))
+    if accepted is None:
+        _try_provider("wikipedia",
+                      lambda: wikipedia_lookup(title, timeout=timeout, opener=opener))
+    if accepted is not None:
+        save_cached(cache_dir, title, accepted)
+        return accepted, accepted.provider, relevance_events
+    return None, "not-found", relevance_events
