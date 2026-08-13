@@ -16,7 +16,9 @@ import pytest
 from amiga_adf_library_builder.metadata import (
     MetadataRecord,
     RelevanceDecision,
+    load_cached,
     lookup_metadata,
+    save_cached,
     validate_metadata_relevance,
     wikipedia_lookup,
 )
@@ -345,3 +347,24 @@ def test_enrich_emits_relevance_rejected_event(tmp_path: Path):
     # rejected candidate, and the offline metadata_path is not populated.
     assert res.metadata_path is None
     assert not (tmp_path / "mc" / "example-galaxy-raiders.json").exists()
+
+
+def test_accepted_relevance_persists_round_trip(tmp_path: Path):
+    # An accepted online record's relevance verdict must survive a cache
+    # write -> reload cycle (to_dict persists it; from_dict must restore it),
+    # so the audit trail is preserved across runs.
+    cache = tmp_path / "cache"
+    rec = _record("Example Solar Miner",
+                  "Example Solar Miner is a strategy video game for the Amiga.",
+                  platforms=["Amiga"])
+    decision = validate_metadata_relevance("Example Solar Miner", rec)
+    rec.relevance_category = decision.category
+    rec.relevance_confidence = decision.confidence
+    rec.relevance_evidence = list(decision.evidence)
+    save_cached(cache, "Example Solar Miner", rec)
+
+    loaded = load_cached(cache, "Example Solar Miner")
+    assert loaded is not None
+    assert loaded.relevance_category == "accepted"
+    assert loaded.relevance_confidence == decision.confidence
+    assert "exact_canonical_title" in loaded.relevance_evidence

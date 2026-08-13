@@ -169,6 +169,9 @@ class MetadataRecord:
             provider=str(data.get("provider") or ""), provider_id=str(data.get("provider_id") or ""),
             retrieved_at=str(data.get("retrieved_at") or ""), confidence=float(data.get("confidence") or 0.0),
             query=str(data.get("query") or ""),
+            relevance_category=str(data.get("relevance_category") or ""),
+            relevance_confidence=float(data.get("relevance_confidence") or 0.0),
+            relevance_evidence=list(data.get("relevance_evidence") or []),
         )
 
 
