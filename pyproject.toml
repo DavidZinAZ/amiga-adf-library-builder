@@ -23,6 +23,13 @@ artwork = ["pillow>=10"]
 # fabricated output) when any of these are missing or Tesseract is absent.
 rtfm-docs = ["pypdf>=4", "pymupdf>=1.23", "pillow>=10", "pytesseract>=0.3"]
 
+# Issue #15: optional PySide6 GUI (Windows presentation layer over the shared
+# core). Core deps stay empty; the GUI is an additive optional extra so the
+# MIT-licensed CLI/core remain dependency-free. PySide6 is LGPL (license-
+# compatible); PyQt6 is deliberately avoided (GPLv3 would force GPL on an MIT
+# project).
+gui = ["PySide6>=6.7", "cryptography>=42.0", "tomli-w>=1.0"]
+
 [project.scripts]
 amiga-adf-library-builder = "amiga_adf_library_builder.cli:main"
 
