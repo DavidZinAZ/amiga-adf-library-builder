@@ -1,0 +1,64 @@
+name: QA Windows real execution (Issue #15)
+
+# Independent QA real-Windows qualification for the Issue #15 standalone GUI.
+# Builds the onedir artifact on windows-latest (reusing Dixie's driver) and then
+# EXECUTES it + the GUI code on the Windows runtime to produce the operator's
+# non-negotiable real-Windows evidence: clean launch with no separately-installed
+# Python, portable layout under a path containing SPACES, theme switch, Help/About,
+# settings persistence, diagnostics/log access, and an actionable failure path on
+# invalid input (no raw traceback). Screenshots + a JSON report are uploaded.
+#
+# Triggered by push to feat/issue15-windows-gui (operator push gate already cleared)
+# and manually via workflow_dispatch.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feat/issue15-windows-gui
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  qa-windows-real:
+    name: Real Windows GUI qualification
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build + QA dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[gui]" pyinstaller pillow
+
+      - name: Build onedir portable app (real artifact)
+        run: python tools/build_windows.py --target onedir --clean
+
+      - name: Run real-Windows qualification driver
+        env:
+          QT_QPA_PLATFORM: offscreen
+          QA_GUI_BASE: "C:\\Users\\runneradmin\\Test Dir With Spaces\\lib"
+          QA_EXE: "dist/AmigaADFLibraryBuilder/AmigaADFLibraryBuilder.exe"
+          QA_REPORT_DIR: "qa-windows-artifacts"
+        run: python tools/qa_windows_real_exec.py
+
+      - name: Upload QA artifacts (report + screenshots + logs)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-windows-real-exec
+          path: |
+            qa-windows-artifacts/
+            C:\Users\runneradmin\Test Dir With Spaces\lib\logs\
+          if-no-files-found: warn

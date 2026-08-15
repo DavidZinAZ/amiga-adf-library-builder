@@ -1,0 +1,85 @@
+name: Build Windows GUI
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feat/issue15-windows-gui
+  pull_request:
+    branches:
+      - feat/issue15-windows-gui
+
+jobs:
+  build-windows:
+    name: Build Windows standalone (PyInstaller)
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[gui]"
+          python -m pip install pyinstaller
+
+      - name: Verify entry point imports
+        # Cheap Linux/Windows-portable sanity gate: the PyInstaller hook
+        # target must import cleanly.
+        run: |
+          python -c "import amiga_adf_library_builder.gui.app as a; assert callable(a.run)"
+
+      - name: Build onedir portable app
+        run: |
+          python tools/build_windows.py --target onedir --clean
+
+      - name: Build onefile portable exe
+        run: |
+          python tools/build_windows.py --target onefile
+
+      - name: GUI smoke test (offscreen)
+        # Build-time sanity gate: the GUI module must import and construct
+        # under a headless Qt platform. This does NOT launch the full windowed
+        # app on Windows runners; that real-execution step lives in the QA
+        # qualification workflow. Here we only prove the frozen tree imports.
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python - <<'PY'
+          import sys
+          from amiga_adf_library_builder.gui.app import GuiApp
+          # Construct without showing; verifies QApplication + portable paths
+          # resolve headless. No runtime secrets are created.
+          app = GuiApp()
+          print("GuiApp constructed OK; window:", type(app.window()).__name__)
+          sys.exit(0)
+          PY
+
+      - name: Package onedir artifact
+        run: |
+          cd dist
+          7z a -r ../amiga-adf-gui-portable.zip AmigaADFLibraryBuilder
+
+      - name: Upload onedir portable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: amiga-adf-gui-portable
+          path: amiga-adf-gui-portable.zip
+          if-no-files-found: error
+
+      - name: Upload onefile artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: amiga-adf-gui-onefile
+          path: dist/amiga-adf-gui.exe
+          if-no-files-found: error
