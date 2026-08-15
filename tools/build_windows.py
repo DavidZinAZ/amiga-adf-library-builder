@@ -46,7 +46,10 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PKG_SRC = REPO_ROOT / "src" / "amiga_adf_library_builder"
 SPEC_DEFAULT = REPO_ROOT / "AmigaADFGui.spec"
-LAUNCHER_REL = Path("build") / "app_launcher.py"
+# Bootstrap is written to the repo root, NOT under build/ -- PyInstaller's
+# --clean wipes build/ at startup, which would delete a launcher placed there
+# (and then fail with "script ... not found").
+LAUNCHER_REL = Path("app_launcher.py")
 
 # --- constants --------------------------------------------------------------
 QT_HIDDEN_IMPORTS = [
