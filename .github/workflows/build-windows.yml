@@ -5,9 +5,11 @@ on:
   push:
     branches:
       - feat/issue15-windows-gui
+      - feat/issue17-folder-persistence
   pull_request:
     branches:
       - feat/issue15-windows-gui
+      - feat/issue17-folder-persistence
 
 jobs:
   build-windows:

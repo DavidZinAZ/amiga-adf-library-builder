@@ -16,6 +16,7 @@ on:
   push:
     branches:
       - feat/issue15-windows-gui
+      - feat/issue17-folder-persistence
 
 permissions:
   contents: read
