@@ -15,6 +15,7 @@ in the UI or written to logs.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import QEvent, Qt
@@ -481,6 +482,34 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Log directory", str(path))
 
     # --- state <-> widgets ----------------------------------------------------
+    def _persist_defaults(self) -> bool:
+        """Persist current widget values as non-sensitive defaults (Issue #17).
+
+        Single persist path shared by the run and close call sites -- no
+        duplicated key lists. Reads the widgets (not a prior run's GuiState),
+        so closing WITHOUT having started a run still saves the folder
+        selections. A settings-write failure is logged, never raised: it must
+        not block or crash window close. Returns True on success.
+        """
+        try:
+            state = self._state_from_widgets()
+            self._settings_store.update(
+                default_library_root=state.library_root,
+                default_original_dir=state.original_dir,
+                default_staging_dir=state.staging_dir,
+                default_output_dir=state.output_dir,
+                online=state.online,
+                refresh_metadata=state.refresh_metadata,
+                require_artwork=state.require_artwork,
+                verify_only=state.verify_only,
+                export_gate_acknowledged=state.export_gate_acknowledged,
+                advanced_mode=self._cb_advanced.isChecked(),
+            )
+            return True
+        except Exception as exc:  # pragma: no cover - filesystem failure path
+            logger.debug("settings persist failed (non-fatal): %s", exc)
+            return False
+
     def _state_from_widgets(self) -> GuiState:
         state = GuiState(
             library_root=self._le_library_root.text().strip(),
@@ -499,14 +528,30 @@ class MainWindow(QMainWindow):
 
     def _apply_settings_to_widgets(self) -> None:
         s = self._settings
-        if s.default_library_root:
-            self._le_library_root.setText(s.default_library_root)
-        if s.default_original_dir:
-            self._le_original_dir.setText(s.default_original_dir)
-        if s.default_staging_dir:
-            self._le_staging_dir.setText(s.default_staging_dir)
-        if s.default_output_dir:
-            self._le_output_dir.setText(s.default_output_dir)
+        # (Issue #17) Persisted folder paths that do not exist on THIS machine
+        # (e.g. a USB stick mounted at a different drive letter) are still
+        # restored into the fields, but the user is told so visibly instead of
+        # silently. No modal, no clearing, no crash.
+        folder_fields = (
+            (self._le_library_root, s.default_library_root),
+            (self._le_original_dir, s.default_original_dir),
+            (self._le_staging_dir, s.default_staging_dir),
+            (self._le_output_dir, s.default_output_dir),
+        )
+        missing: list[str] = []
+        for line_edit, value in folder_fields:
+            if not value:
+                continue
+            line_edit.setText(value)
+            if not Path(value).exists():
+                missing.append(value)
+        if missing:
+            message = (
+                "Persisted path(s) not found on this machine: "
+                + "; ".join(missing)
+            )
+            logger.debug("%s (fields kept; reselect if needed)", message)
+            self._status_label.setText(message)
         self._cb_online.setChecked(s.online)
         self._cb_refresh.setChecked(s.refresh_metadata)
         self._cb_artwork.setChecked(s.require_artwork)
@@ -520,21 +565,7 @@ class MainWindow(QMainWindow):
         try:
             state = self._state_from_widgets()
             # Persist non-sensitive defaults for next launch (no secrets here).
-            try:
-                self._settings_store.update(
-                    default_library_root=state.library_root,
-                    default_original_dir=state.original_dir,
-                    default_staging_dir=state.staging_dir,
-                    default_output_dir=state.output_dir,
-                    online=state.online,
-                    refresh_metadata=state.refresh_metadata,
-                    require_artwork=state.require_artwork,
-                    verify_only=state.verify_only,
-                    export_gate_acknowledged=state.export_gate_acknowledged,
-                    advanced_mode=self._cb_advanced.isChecked(),
-                )
-            except Exception:
-                pass
+            self._persist_defaults()
 
             from .worker import PipelineWorker
 
@@ -590,6 +621,10 @@ class MainWindow(QMainWindow):
 
     # --- close ----------------------------------------------------------------
     def closeEvent(self, event: QEvent) -> None:
+        # (Issue #17) Persist current folder/option defaults on normal exit so a
+        # session that never started a run still survives the close/reopen cycle.
+        # Never blocks or crashes the close (see _persist_defaults).
+        self._persist_defaults()
         if self._cancel_event is not None:
             self._cancel_event.set()
         super().closeEvent(event)
