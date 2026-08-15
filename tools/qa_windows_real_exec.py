@@ -216,6 +216,58 @@ def main() -> int:
         except Exception as exc:
             _step("screenshot", False, f"grab failed: {exc}")
 
+        # --- close WITHOUT run -> reopen -> widget-level restore ----------
+        # The literal Issue #17 repro on the real runtime: select folders (>=1
+        # containing a SPACE), close the app via its NORMAL close path
+        # (closeEvent -> _persist_defaults -> SettingsStore.save), reopen a
+        # fresh instance on the same settings file, and assert at WIDGET level
+        # that all four folder fields came back. No pipeline run in between.
+        # In-process graceful close is the same closeEvent/_persist_defaults
+        # code path the packaged exe executes on shutdown; the packaged-exe
+        # smoke launch above already proves bundle integrity. A hard
+        # terminate() is deliberately NOT used for the close here.
+        cw_dirs = {
+            "library_root": base_dir / "cw" / "library root",
+            "original_dir": base_dir / "cw" / "original",
+            "staging_dir": base_dir / "cw" / "staging",
+            "output_dir": base_dir / "cw" / "output",
+        }
+        for d in cw_dirs.values():
+            d.mkdir(parents=True, exist_ok=True)
+        mw._le_library_root.setText(str(cw_dirs["library_root"]))
+        mw._le_original_dir.setText(str(cw_dirs["original_dir"]))
+        mw._le_staging_dir.setText(str(cw_dirs["staging_dir"]))
+        mw._le_output_dir.setText(str(cw_dirs["output_dir"]))
+        mw.show()  # window is visible before the normal close
+        mw.close()  # NORMAL close path: closeEvent -> _persist_defaults
+        # Reopen: a FRESH MainWindow on the same settings file (the one the
+        # close just wrote). Ctor loads the store and applies it to widgets.
+        mw2 = MainWindow(
+            portable_paths=pp,
+            settings_store=SettingsStore(pp.settings_file()),
+        )
+        restored = {
+            "library_root": mw2._le_library_root.text(),
+            "original_dir": mw2._le_original_dir.text(),
+            "staging_dir": mw2._le_staging_dir.text(),
+            "output_dir": mw2._le_output_dir.text(),
+        }
+        expected_cw = {k: str(v) for k, v in cw_dirs.items()}
+        match = restored == expected_cw
+        _step(
+            "close_without_run_restore",
+            match,
+            f"close_without_run_exercised={match} "
+            f"library_root={restored['library_root']!r} "
+            f"original_dir={restored['original_dir']!r} "
+            f"staging_dir={restored['staging_dir']!r} "
+            f"output_dir={restored['output_dir']!r}",
+        )
+        if match:
+            REPORT["close_without_run_exercised"] = True
+        mw2.close()
+        mw2 = None
+
         mw.close()
         if QApplication.instance():
             QApplication.instance().quit()
@@ -241,6 +293,7 @@ def main() -> int:
     hard_fail = any(not s["ok"] for s in REPORT["steps"]
                     if s["step"] in ("exe_launch_clean", "exe_portable_layout_spaces",
                                      "exe_self_contained", "settings_persist",
+                                     "close_without_run_restore",
                                      "help_about_available", "no_crash_on_invalid_input",
                                      "no_secret_leak_in_logs"))
     return 1 if hard_fail else 0
