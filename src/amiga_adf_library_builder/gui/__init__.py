@@ -24,7 +24,7 @@ from .providers import (
     ProviderRegistry,
     default_registry,
 )
-from .secrets import SecretStore
+from .secrets import SecretStore, get_gui_redactor, install_gui_redaction
 from .settings import Settings, SettingsStore
 from .state import GuiState, build_path_config_from_gui_state, build_pipeline_kwargs
 
@@ -36,6 +36,8 @@ __all__ = [
     "ProviderRegistry",
     "default_registry",
     "SecretStore",
+    "install_gui_redaction",
+    "get_gui_redactor",
     "Settings",
     "SettingsStore",
     "GuiState",

@@ -36,6 +36,11 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 _VAULT_MAGIC = b"ADF-VAULT\x00"
 _VAULT_VERSION = 1
 
+#: PBKDF2-HMAC-SHA256 iteration count for vault key derivation. Kept as a single
+#: documented module-level constant so the derivation cost is explicit and
+#: reviewable (F6). 200k iterations is the OWASP-aligned floor for PBKDF2-SHA256.
+_VAULT_PBKDF2_ITERATIONS = 200_000
+
 #: Character set for generated master passwords.
 _MASTER_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
 
@@ -89,12 +94,17 @@ class PortableVaultBackend(SecretBackend):
 
     name = "portable-vault"
 
-    def __init__(self, vault_path: Path, *, iterations: int = 200_000) -> None:
+    def __init__(self, vault_path: Path, *, iterations: int = _VAULT_PBKDF2_ITERATIONS) -> None:
         self._path = Path(vault_path)
         self._iterations = iterations
         self._aesgcm: Optional[AESGCM] = None
         self._active_salt: Optional[bytes] = None
         self._lock = threading.RLock()
+
+    @property
+    def vault_path(self) -> Path:
+        """The on-disk vault file path (read-only accessor for UI/diagnostics)."""
+        return self._path
 
     # --- availability ---------------------------------------------------------
     def is_available(self) -> bool:
@@ -441,13 +451,33 @@ class SecretStore:
 
 
 class RedactingFilter(logging.Filter):
-    """Logging filter that masks secret-shaped values before they are emitted.
+    """Logging filter that masks known secret values before a record is emitted.
 
-    It inspects ``record.msg`` and any ``record.args`` (``%``-style) and replaces
-    secret-shaped substrings with ``REDACTED``. Values are matched by key=value
-    pairs (for sensitive param names) or by matching known secret strings passed
-    via :meth:`add_secret` (the GUI adds resolved secret values here just before
-    a risky log call, then removes them).
+    The filter masks TWO narrow, well-defined shapes only:
+
+    1. ``key=value`` pairs where the key contains a sensitive fragment
+       (``token``, ``api_key``, ``secret``, ``password``, ``bearer``,
+       ``authorization``, etc. -- see :attr:`SENSITIVE_KEY_FRAGMENTS`). The
+       *value* is replaced with ``REDACTED``; the key is preserved so logs stay
+       debuggable.
+    2. ``Authorization: Bearer <token>`` / ``Bearer <token>`` headers -- the
+       token is replaced with ``REDACTED``.
+
+    Additionally, an EXACT secret string registered via :meth:`add_secret` (e.g.
+    a resolved provider token) is masked wherever it appears. Exact secrets must
+    be registered explicitly; this filter does NOT guess "secret-shaped" values
+    on its own, and it does NOT mask arbitrary high-entropy strings, UUIDs, or
+    free-form text. For defense-in-depth on secrets that are not already key=value
+    or Bearer-shaped, callers should register the resolved value with
+    :meth:`add_secret` just before a risky log call and :meth:`remove_secret`
+    afterwards.
+
+    IMPORTANT (Python logging semantics): a ``logging.Filter`` attached to a
+    *logger* is only evaluated for records emitted directly by that logger. It is
+    NOT applied to records propagated up to a parent/root logger from a child
+    logger. To redact records emitted by any submodule logger (e.g.
+    ``amiga_adf_library_builder.playmatch``), this filter must be attached to the
+    *handler*(s) on the root logger -- which :func:`install_gui_redaction` does.
     """
 
     SENSITIVE_KEY_FRAGMENTS = (
@@ -514,3 +544,79 @@ class RedactingFilter(logging.Filter):
             record.msg = redacted
             record.args = ()
         return True
+
+
+# --- process-wide redaction installer (F1 / F7) -------------------------------
+
+#: The single process-wide :class:`RedactingFilter` instance. Wired into the root
+#: logger's handler(s) by :func:`install_gui_redaction` so that exact-secret
+#: registration (F5) from any module is honored by every handler.
+_GUI_REDACTOR: "Optional[RedactingFilter]" = None
+
+
+def get_gui_redactor() -> "Optional[RedactingFilter]":
+    """Return the process-wide redactor instance (or ``None`` if not installed).
+
+    Callers that register exact secrets at save time (F5) use this so the SAME
+    instance is mutated that the handlers consult during emission.
+    """
+    return _GUI_REDACTOR
+
+
+def install_gui_redaction() -> RedactingFilter:
+    """Install a single :class:`RedactingFilter` over the root logger's handlers.
+
+    This is the effective redaction control for the GUI. Because Python logging
+    evaluates *handler* filters for every record that reaches a handler -- from
+    the emitting logger itself or any child logger propagated up -- attaching the
+    filter at the root handler level redacts secrets emitted by the core submodule
+    loggers (e.g. ``amiga_adf_library_builder.playmatch``) as well as the GUI's
+    own loggers.
+
+    The filter is attached idempotently: if an equivalent
+    :class:`RedactingFilter` is already installed on the root logger (as a logger
+    filter) or on any of its handlers, the existing instance is returned and
+    reused rather than stacked. This makes it safe to call from
+    ``GuiApp.__init__`` and to guard-call from ``MainWindow.__init__`` without
+    double-filtering across multiple windows (F7).
+
+    Returns the (possibly pre-existing) redactor instance.
+    """
+    global _GUI_REDACTOR
+
+    # Reuse an already-installed instance if one exists.
+    if _GUI_REDACTOR is not None:
+        existing = _GUI_REDACTOR
+    else:
+        existing = next(
+            (
+                f
+                for f in logging.getLogger().filters
+                if isinstance(f, RedactingFilter)
+            ),
+            None,
+        )
+
+    if existing is not None:
+        _GUI_REDACTOR = existing
+        # Ensure every current root handler also carries it (idempotent).
+        root = logging.getLogger()
+        for handler in root.handlers:
+            if not any(isinstance(f, RedactingFilter) for f in handler.filters):
+                handler.addFilter(existing)
+        return existing
+
+    redactor = RedactingFilter()
+    _GUI_REDACTOR = redactor
+    root = logging.getLogger()
+    # (a) logger-level filter: redacts records emitted directly by the root logger
+    #     (harmless if none) and keeps a single discoverable instance on the
+    #     logger for process-wide exact-secret registration (F5).
+    if not any(isinstance(f, RedactingFilter) for f in root.filters):
+        root.addFilter(redactor)
+    # (b) THE EFFECTIVE CONTROL: attach to every current root handler so records
+    #     from child submodule loggers are redacted during propagation.
+    for handler in root.handlers:
+        if not any(isinstance(f, RedactingFilter) for f in handler.filters):
+            handler.addFilter(redactor)
+    return redactor

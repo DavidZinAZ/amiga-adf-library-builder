@@ -21,7 +21,7 @@ from PySide6.QtWidgets import QApplication
 
 from .layout import PortablePaths
 from .main_window import MainWindow
-from .secrets import PortableVaultBackend, SecretStore
+from .secrets import SecretStore, install_gui_redaction
 from .settings import SettingsStore
 
 
@@ -40,6 +40,10 @@ class GuiApp:
         QApplication.setAttribute(Qt_AA_UseHighDpiPixmaps(), True)  # type: ignore[arg-type]
 
         self._app = QApplication([])
+        # F7: install process-wide secret redaction (root-handler filter) before
+        # any window or core logger emits a record. Idempotent, so an
+        # additional guard-call from MainWindow.__init__ is safe.
+        install_gui_redaction()
         self._paths = PortablePaths(base_dir=base_dir)
         self._settings_store = SettingsStore(self._paths.settings_file())
         self._secret_store = SecretStore.with_vault(

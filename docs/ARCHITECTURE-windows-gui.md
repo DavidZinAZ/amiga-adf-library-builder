@@ -108,13 +108,85 @@ config import/export can never leak credentials. Round-trips via `tomli_w` /
     `win_dpapi_available()` (Windows + DPAPI extension). It is never the only
     path; the portable vault and env backends remain available everywhere.
 * `SecretStore` is the GUI frontend; it exposes key-level ops and never returns
-  a value suitable for logging. `RedactingFilter` (a `logging.Filter`) masks any
-  secret-shaped value that reaches the logging system (key=value pairs, Bearer
-  tokens, and exact registered secrets). **No secret is written to logs,
-  diagnostics, exports, or UI error strings.**
+  a value suitable for logging. `RedactingFilter` (a `logging.Filter`) masks
+  known secret values that reach the logging system: `key=value` sensitive pairs,
+  `Bearer`/`Authorization` headers, and exact secret strings registered via
+  `RedactingFilter.add_secret` (the GUI registers a resolved token at save time
+  and removes it afterwards). **No secret is written to logs, diagnostics,
+  exports, or UI error strings.** See §4.4 for the redaction mechanism.
 
 The `cli.py` error path already redacts via `logging_utils.redact`; the GUI adds
 the `RedactingFilter` at the application level as defense-in-depth.
+
+### 4.1 Vault master-password policy (F2 / F6)
+
+The portable vault is AES-GCM with a master password derived via
+PBKDF2-HMAC-SHA256 at a **documented module-level constant**
+`_VAULT_PBKDF2_ITERATIONS = 200_000` (OWASP-aligned floor). The master password
+is **never persisted**; only the unlocked in-memory state is kept for the
+session.
+
+The GUI unlocks the vault through a `MasterPasswordDialog`:
+
+* **New vault (no vault file):** *Set* mode — `set` + `confirm` password fields.
+* **Existing vault:** *Unlock* mode — single password field.
+
+Both modes display an explicit, non-dismissable warning: **"The master password
+is unrecoverable. If lost, the stored credentials cannot be recovered — store it
+in a password manager."** There is no recovery path; a mistyped master password
+on first save silently creates a vault encrypted under the wrong key, so the
+confirm field is mandatory in Set mode.
+
+`SecretStore.unlock(password)` / `change_password(...)` are wired into the GUI.
+On a first credential write while the vault is locked, the GUI prompts for the
+master password, unlocks, then saves. A `try/except SecretError` around the
+credential write surfaces a clear `QMessageBox` ("Vault is locked — set a master
+password first") instead of an uncaught exception.
+
+### 4.2 Credential affordance honesty — MVP deferral (F3)
+
+The "Set credentials" flow is **fully functional**: the entered token is stored
+securely in the AES vault and is never shown in the UI, config, or logs.
+
+**However, the bridge from the GUI vault to the core run engine is DEFERRED for
+MVP.** The GUI does **not** yet export `AMIGA_ADF_SECRET_*` environment variables
+or write a provider-config TOML that the pipeline actually consumes. Provider
+enable/base-URL toggles are **in-memory session UI state only** — they are NOT
+persisted and are NOT consumed by the run engine.
+
+This is a deliberate fail-closed posture: it keeps the vault subsystem complete
+and honest (the token is stored, not leaked) while avoiding a misleading
+external-transmission affordance. The UI tooltip/help states this explicitly
+("stored securely in the local vault; pipeline/provider wiring is planned
+(coming soon)"). Future work will wire the vault to the run engine.
+
+### 4.3 Secret backend posture — vault is the desktop default (F4)
+
+The interactive GUI **always** defaults to `PortableVaultBackend` (architecture
+decision #5). The `EnvSecretBackend` is **never auto-selected** for the desktop
+GUI: it writes/reads process-global `AMIGA_ADF_SECRET_*` environment variables,
+which can surface in `os.environ` dumps, crash reporters, or `/proc/<pid>/environ`.
+It is reserved for **CI/headless** runs only, where the process boundary is
+trusted and ephemeral. A guard/test asserts the GUI's default `SecretStore`
+backend is `PortableVaultBackend`, never `EnvSecretBackend`.
+
+### 4.4 Redaction coverage — handler-level, covers all submodule loggers (F1 / F5 / F7)
+
+`install_gui_redaction()` (called once from `GuiApp.__init__`, and idempotently
+guard-called from `MainWindow.__init__`) installs a single process-wide
+`RedactingFilter`. **Python logging semantics note:** a `logging.Filter`
+attached to a *logger* is evaluated only for records emitted by that logger,
+not for records propagated up from a child logger. To redact secrets emitted by
+the core submodule loggers (e.g. `amiga_adf_library_builder.playmatch`), the
+filter is therefore attached to the **root logger's handler(s)** — the effective
+control. Idempotency (F7) prevents stacking across multiple windows.
+
+Exact-secret redaction (F5) is activated at save time: the resolved value is
+registered via `RedactingFilter.add_secret(value)` and removed via
+`remove_secret(value)` after the save, so positionally-formatted secrets are
+masked by the root-handler filter. The `RedactingFilter` docstring is precise
+about what it masks (key=value pairs, Bearer headers, and explicitly registered
+exact secrets) and does **not** claim to mask arbitrary "secret-shaped" values.
 
 ---
 

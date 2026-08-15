@@ -15,7 +15,6 @@ in the UI or written to logs.
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import QEvent, Qt
@@ -47,12 +46,88 @@ from PySide6.QtWidgets import (
 from . import __version__ as gui_version
 from .layout import PortablePaths
 from .providers import Provider, ProviderRegistry, default_registry
-from .secrets import RedactingFilter, SecretStore
+from .secrets import SecretError, SecretStore, install_gui_redaction
 from .settings import Settings, SettingsStore
 from .state import GuiState
 from .themes import apply_theme, available_themes
 
 logger = logging.getLogger("amiga_adf_gui")
+
+
+class MasterPasswordDialog(QDialog):
+    """Master-password dialog for the AES-GCM vault (F2 / F6).
+
+    Modes:
+      * ``unlock``  -- single password field; confirms the vault can be opened.
+      * ``set``     -- set + confirm fields; used when no vault file exists yet.
+
+    The dialog NEVER reveals the master password and NEVER persists it. The
+    calling code keeps the unlocked state in memory for the session only
+    (F2). A prominent warning communicates that the master password is
+    unrecoverable once set (F6).
+    """
+
+    def __init__(
+        self,
+        mode: str = "unlock",
+        vault_exists: bool = True,
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        if mode not in ("unlock", "set"):
+            raise ValueError(f"unknown master-password dialog mode: {mode!r}")
+        self._mode = mode
+        self._vault_exists = vault_exists
+        self.setWindowTitle(
+            "Set vault master password" if mode == "set" else "Unlock secret vault"
+        )
+        self._build()
+
+    def _build(self) -> None:
+        layout = QVBoxLayout(self)
+        warn = QLabel(
+            "The master password is unrecoverable. If lost, the stored "
+            "credentials cannot be recovered — store it in a password manager."
+        )
+        warn.setWordWrap(True)
+        layout.addWidget(warn)
+
+        form = QFormLayout()
+        self._pw = QLineEdit(self)
+        self._pw.setEchoMode(QLineEdit.EchoMode.Password)
+        self._pw.setPlaceholderText("master password")
+        form.addRow("Master password", self._pw)
+
+        if self._mode == "set":
+            self._confirm = QLineEdit(self)
+            self._confirm.setEchoMode(QLineEdit.EchoMode.Password)
+            self._confirm.setPlaceholderText("re-enter master password")
+            form.addRow("Confirm", self._confirm)
+        else:
+            self._confirm = None
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        # Keep the password out of tooltips/status; just the generic label.
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _on_accept(self) -> None:
+        if self._mode == "set":
+            if not self._pw.text():
+                QMessageBox.warning(self, "Master password", "Enter a master password.")
+                return
+            if self._pw.text() != self._confirm.text():
+                QMessageBox.warning(self, "Master password", "Passwords do not match.")
+                return
+        self.accept()
+
+    @property
+    def password(self) -> str:
+        return self._pw.text()
 
 
 class MainWindow(QMainWindow):
@@ -82,11 +157,11 @@ class MainWindow(QMainWindow):
         self._registry = provider_registry or default_registry()
         self._config_path = config_path
 
-        # Install the redacting log filter once for this process so any secret
-        # that reaches logging is masked.
-        self._redactor = RedactingFilter()
-        logging.getLogger("amiga_adf_library_builder").addFilter(self._redactor)
-        logging.getLogger("amiga_adf_gui").addFilter(self._redactor)
+        # Install the redacting log filter process-wide (F1 / F7). This attaches
+        # the SAME RedactingFilter to the root logger's handlers so records from
+        # ANY submodule logger (e.g. amiga_adf_library_builder.playmatch) are
+        # redacted during propagation. Idempotent: safe to call again.
+        self._redactor = install_gui_redaction()
 
         self._build_widgets()
         self._apply_settings_to_widgets()
@@ -235,6 +310,11 @@ class MainWindow(QMainWindow):
             form.addRow(field.label, le)
         if provider.metadata.requires_secret or provider.metadata.auth_required != "none":
             secret_btn = QPushButton("Set credentials…")
+            secret_btn.setToolTip(
+                "Stores the token securely in the local AES vault. "
+                "Pipeline/provider wiring is planned (coming soon); the token "
+                "is not yet passed to the run engine."
+            )
             secret_btn.clicked.connect(
                 lambda _checked=False, p=provider: self._edit_credentials(p)
             )
@@ -257,12 +337,51 @@ class MainWindow(QMainWindow):
 
     # --- interaction ----------------------------------------------------------
     def _pick_dir(self, line_edit: QLineEdit) -> None:
-        start = line_edit.text() or str(Path.home())
+        # F8: start the picker at the app config dir (portable layout), not at
+        # the user/home directory. Falls back to the last-used value if present.
+        start = line_edit.text() or str(self._paths.config_dir)
         chosen = QFileDialog.getExistingDirectory(self, "Select directory", start)
         if chosen:
             line_edit.setText(chosen)
 
-    def _edit_credentials(self, provider: Provider) -> None:
+    def _ensure_vault_unlocked(self) -> bool:
+        """Ensure the secret vault is unlocked; prompt for the master password.
+
+        Returns True if the vault is (now) unlocked, False if the operator
+        cancelled. On a brand-new vault (no file) this offers a SET flow; on an
+        existing vault it offers an UNLOCK flow (F2).
+        """
+        backend = self._secret_store.default_backend
+        if getattr(backend, "is_unlocked", False):
+            return True
+        from .secrets import PortableVaultBackend
+
+        if not isinstance(backend, PortableVaultBackend):
+            return False
+        vault_exists = backend.vault_path.is_file()
+        mode = "set" if not vault_exists else "unlock"
+        dlg = MasterPasswordDialog(mode=mode, vault_exists=vault_exists, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return False
+        try:
+            if mode == "set":
+                # Initialize the new vault under the chosen master password.
+                backend.unlock(dlg.password)
+            else:
+                self._secret_store.unlock(dlg.password)
+        except SecretError as exc:
+            QMessageBox.critical(
+                self, "Vault error", f"Could not open the vault: {exc}"
+            )
+            return False
+        return bool(getattr(backend, "is_unlocked", False))
+
+    def _prompt_credentials(self, provider: Provider) -> "Optional[str]":
+        """Show the credentials dialog and return the entered token, or None.
+
+        Kept as a separate method so the token-prompt concern is isolated and
+        the save/unlock flow in :meth:`_edit_credentials` stays testable.
+        """
         dlg = QDialog(self)
         dlg.setWindowTitle(f"{provider.metadata.name} credentials")
         layout = QVBoxLayout(dlg)
@@ -271,17 +390,52 @@ class MainWindow(QMainWindow):
         token_le.setPlaceholderText("secret token (stored in vault, never shown)")
         layout.addWidget(QLabel("Token (kept in the secret store, not in config):"))
         layout.addWidget(token_le)
+        # F3: honest affordance. The token is stored securely in the vault; the
+        # bridge from the vault to the core run engine is deferred (MVP).
+        note = QLabel(
+            "Stored securely in the local vault. Pipeline/provider wiring is "
+            "planned (coming soon); the token is not yet passed to the run engine."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
         buttons.accepted.connect(dlg.accept)
         buttons.rejected.connect(dlg.reject)
         layout.addWidget(buttons)
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            token = token_le.text()
-            if token:
-                provider.add_credentials(self._secret_store, token=token)
-                self._status_label.setText(f"{provider.metadata.name} credentials saved.")
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return token_le.text() or None
+
+    def _edit_credentials(self, provider: Provider) -> None:
+        token = self._prompt_credentials(provider)
+        if not token:
+            return
+        # F2: the vault must be unlocked before any write; prompt if needed.
+        if not self._ensure_vault_unlocked():
+            return
+        # F5: register the exact resolved value so it is redacted at save time,
+        # then drop it after the write (the root-handler filter does the masking).
+        redactor = self._redactor
+        try:
+            redactor.add_secret(token)
+            provider.add_credentials(self._secret_store, token=token)
+        except SecretError as exc:
+            # Fail-closed and clear: never let an uncaught SecretError escape the
+            # slot. Surface an actionable message instead.
+            QMessageBox.critical(
+                self,
+                "Vault is locked",
+                "Vault is locked — set a master password first, then try again.",
+            )
+            logger.warning("credential save failed: %s", exc)
+            return
+        finally:
+            redactor.remove_secret(token)
+        self._status_label.setText(
+            f"{provider.metadata.name} credentials saved to the vault."
+        )
 
     def _test_provider(self, provider: Provider) -> None:
         status = provider.test_connection()
