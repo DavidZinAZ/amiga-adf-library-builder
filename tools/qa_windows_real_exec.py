@@ -78,7 +78,7 @@ def main() -> int:
             _step("exe_launch_clean", alive,
                   f"exe={exe.name} pid={proc.pid if alive else 'exited'}")
             # Portable layout created under the SPACES base?
-            created = [d.name for d in ("config", "data", "logs", "cache")
+            created = [d for d in ("config", "data", "logs", "cache")
                        if (base_dir / d).is_dir()]
             _step("exe_portable_layout_spaces",
                   set(created) >= {"config", "logs", "cache"},
