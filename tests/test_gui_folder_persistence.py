@@ -126,8 +126,18 @@ def test_run_and_close_call_sites_write_identical_settings(qt_offscreen):
     mw.close()
     table_b = _read_gui_table(settings_path)
 
+    # ``window_geometry`` tracks the WINDOW's presentation state, not the
+    # widget state (the offscreen platform clamps a shown window to its
+    # minimum height), so it is exempt from strict byte-parity; both call
+    # sites must still have written a valid payload (Issue #18).
     for key in SETTINGS_KEYS:
+        if key == "window_geometry":
+            continue
         assert table_a[key] == table_b[key], f"parity broken on {key!r}"
+    for table in (table_a, table_b):
+        assert table["window_geometry"], (
+            "window_geometry must be persisted by both call sites (Issue #18)"
+        )
 
 
 def test_missing_persisted_path_still_shown_and_flagged(qt_offscreen):
