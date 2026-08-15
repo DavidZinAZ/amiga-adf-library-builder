@@ -12,9 +12,10 @@ import os
 import sys
 
 # --- build parameters (mirrored from tools/build_windows.py) ---------------
-# SPECPATH is injected by PyInstaller and equals this spec's directory
-# (the repo root). Paths are resolved from it so the spec is portable.
-SPECDIR = os.path.dirname(SPECPATH)
+# SPECPATH is injected by PyInstaller and equals this spec's OWN directory
+# (the repo root). Use it directly as the base for resolving sub-paths so the
+# spec is portable across machines / OSes (no baked-in absolute paths).
+SPECDIR = SPECPATH
 TARGET = "onedir"                 # "onedir" | "onefile"
 APP_NAME = "AmigaADFLibraryBuilder"                 # shipped exe base name (no .exe suffix)
 SCRIPT = os.path.join(SPECDIR, 'app_launcher.py')   # bootstrap -> gui.app:run
