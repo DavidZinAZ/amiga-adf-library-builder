@@ -46,6 +46,9 @@ Thumbs.db
 # Local scratch
 .task/
 
+# Kanban worker worktrees (never commit)
+.worktrees/
+
 # User-generated library/configuration data (never commit)
 config/manual-approvals/
 config/metadata-curated/
