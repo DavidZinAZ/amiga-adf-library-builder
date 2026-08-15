@@ -318,7 +318,11 @@ def main() -> int:
         print("Install it with: pip install pyinstaller", file=sys.stderr)
         return 2
 
-    pyi_run(pyi_cmd)
+    # PyInstaller.__main__.run() expects argv *after* the program name
+    # (i.e. sys.argv[1:]). ``pyi_cmd`` keeps a leading "pyinstaller" token only
+    # so ``--print-cmd`` prints the natural command; drop it here so the loader
+    # does not try to freeze a file literally named "pyinstaller".
+    pyi_run(pyi_cmd[1:])
     return 0
 
 
