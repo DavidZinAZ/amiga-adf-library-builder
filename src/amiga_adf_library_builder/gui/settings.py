@@ -39,6 +39,8 @@ SETTINGS_KEYS = (
     "export_gate_acknowledged",
     "advanced_mode",
     "window_geometry",
+    # (Issue #21) Diagnostics: show the live processing log. Default ON.
+    "show_live_log",
 )
 
 
@@ -58,6 +60,9 @@ class Settings:
     export_gate_acknowledged: bool = False
     advanced_mode: bool = False
     window_geometry: str = ""
+    # (Issue #21) Show the live processing log in Diagnostics. Default ON;
+    # old settings files without this key load with this safe default.
+    show_live_log: bool = True
     presets: dict[str, "Preset"] = field(default_factory=dict)
 
     def as_dict(self) -> dict:
@@ -74,6 +79,7 @@ class Settings:
             "export_gate_acknowledged": self.export_gate_acknowledged,
             "advanced_mode": self.advanced_mode,
             "window_geometry": self.window_geometry,
+            "show_live_log": self.show_live_log,
         }
         if self.presets:
             out["presets"] = {name: p.as_dict() for name, p in self.presets.items()}
@@ -97,6 +103,8 @@ class Settings:
         s.export_gate_acknowledged = bool(gui.get("export_gate_acknowledged", False))
         s.advanced_mode = bool(gui.get("advanced_mode", False))
         s.window_geometry = str(gui.get("window_geometry", ""))
+        # (Issue #21) Missing key (old profile) -> safe default True.
+        s.show_live_log = bool(gui.get("show_live_log", True))
         raw_presets = gui.get("presets")
         if isinstance(raw_presets, dict):
             for name, val in raw_presets.items():

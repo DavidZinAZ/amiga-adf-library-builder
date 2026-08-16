@@ -169,6 +169,8 @@ def test_settings_keys_unchanged():
         "export_gate_acknowledged",
         "advanced_mode",
         "window_geometry",
+        # Issue #21: live Diagnostics log toggle (added after GH-22).
+        "show_live_log",
     )
     # The dataclass still exposes the same attribute names (used by the
     # GUI and the real-Windows QA driver).

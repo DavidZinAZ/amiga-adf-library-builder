@@ -46,6 +46,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .. import activity_log
+from ..logging_utils import redact
 from . import __version__ as gui_version
 from .layout import PortablePaths
 from .providers import Provider, ProviderRegistry, default_registry
@@ -284,6 +286,9 @@ class MainWindow(QMainWindow):
         self._build_widgets()
         self._apply_settings_to_widgets()
         self._build_menu()
+        # (Issue #21) run state for the live Diagnostics log.
+        self._run_in_progress = False
+        self._run_mode = "build"
         self._worker = None
         self._cancel_event = None
         # (Issue #18) Re-apply the maximized flag now that the window is fully
@@ -536,12 +541,95 @@ class MainWindow(QMainWindow):
         w = QWidget(self)
         layout = QVBoxLayout(w)
         layout.addWidget(
-            QLabel("Activity from the last run (sensitive values are hidden):")
+            QLabel("Live activity log (sensitive values are hidden):")
         )
+
+        # (Issue #21) Toolbar: show-live toggle + log controls.
+        # Order: [Show live processing log]  [Clear]  [Jump to top]
+        #         [Bottom / Follow Live: On]  [stretch]
+        # Copy Log / Open Log File stay in the Run area below (unchanged).
+        bar = QHBoxLayout()
+        self._cb_show_live_log = QCheckBox("Show live processing log")
+        self._cb_show_live_log.setToolTip(
+            "Show what the app is doing while a run is in progress. "
+            "Your choice is remembered."
+        )
+        self._cb_show_live_log.setChecked(self._settings.show_live_log)
+        self._diag_clear_button = QPushButton("Clear")
+        self._diag_clear_button.setToolTip("Clear the log shown here.")
+        self._diag_top_button = QPushButton("Jump to top")
+        self._diag_top_button.setToolTip("Go to the first line of the log.")
+        self._diag_bottom_button = QPushButton("Follow Live: On")
+        self._diag_bottom_button.setToolTip(
+            "Keep the view pinned to the newest lines while the run is "
+            "progressing. Click to turn it off; click again to turn it "
+            "back on."
+        )
+        self._diag_bottom_button.clicked.connect(self._on_diag_bottom)
+        bar.addWidget(self._cb_show_live_log)
+        bar.addSpacing(12)
+        bar.addWidget(self._diag_clear_button)
+        bar.addWidget(self._diag_top_button)
+        bar.addWidget(self._diag_bottom_button)
+        bar.addStretch(1)
+        layout.addLayout(bar)
+
         self._diag = QPlainTextEdit(self)
         self._diag.setReadOnly(True)
+        # Keep the widget's memory bounded for very long runs: drop the
+        # oldest lines once the view grows past this many.
+        self._diag.setMaximumBlockCount(5000)
         layout.addWidget(self._diag)
+
+        self._diag_clear_button.clicked.connect(self._on_diag_clear)
+        self._diag_top_button.clicked.connect(self._on_diag_top)
+        # (Issue #21) Follow Live: pinned to the newest line by default.
+        self._follow_live = True
         return w
+
+    # --- (Issue #21) Diagnostics log controls ---------------------------------
+    def _append_diag(self, line: str) -> None:
+        """Append one line to the Diagnostics log with a timestamp.
+
+        Every entry is timestamped (``HH:MM:SS``) and redacted so a folder
+        path or provider detail can never carry a secret into the view.
+        While Follow Live is on the view stays pinned to the newest line.
+        """
+        if not self._cb_show_live_log.isChecked() and getattr(
+            self, "_run_in_progress", False
+        ):
+            # Live log switched off mid-run: stop appending live lines.
+            # Run-boundary markers are still added (see _run_marker).
+            return
+        text = activity_log.run_activity_line(line)
+        self._diag.appendPlainText(text)
+        if self._follow_live:
+            self._diag.verticalScrollBar().setValue(
+                self._diag.verticalScrollBar().maximum()
+            )
+
+    def _run_marker(self, text: str) -> None:
+        """Append a run boundary line (start/end) even when the live log is off."""
+        self._diag.appendPlainText(activity_log.run_activity_line(text))
+        self._diag.verticalScrollBar().setValue(
+            self._diag.verticalScrollBar().maximum()
+        )
+
+    def _on_diag_clear(self) -> None:
+        self._diag.clear()
+
+    def _on_diag_top(self) -> None:
+        self._diag.verticalScrollBar().setValue(0)
+
+    def _on_diag_bottom(self) -> None:
+        """Jump to the newest line and toggle the Follow Live pin."""
+        self._diag.verticalScrollBar().setValue(
+            self._diag.verticalScrollBar().maximum()
+        )
+        self._follow_live = not self._follow_live
+        self._diag_bottom_button.setText(
+            "Follow Live: On" if self._follow_live else "Follow Live: Off"
+        )
 
     # --- interaction ----------------------------------------------------------
     def _pick_dir(self, line_edit: QLineEdit) -> None:
@@ -776,6 +864,8 @@ class MainWindow(QMainWindow):
                 "verify_only": state.verify_only,
                 "export_gate_acknowledged": state.export_gate_acknowledged,
                 "advanced_mode": self._cb_advanced.isChecked(),
+                # (Issue #21) live Diagnostics log toggle (non-sensitive).
+                "show_live_log": self._cb_show_live_log.isChecked(),
             }
             geometry = self._current_persist_geometry()
             if geometry is not None:
@@ -834,6 +924,7 @@ class MainWindow(QMainWindow):
         self._cb_verify.setChecked(s.verify_only)
         self._cb_gate.setChecked(s.export_gate_acknowledged)
         self._cb_advanced.setChecked(s.advanced_mode)
+        self._cb_show_live_log.setChecked(s.show_live_log)
         apply_theme(s.theme or "system", themes_dir=self._paths.themes_dir)
 
     # --- run ------------------------------------------------------------------
@@ -851,49 +942,64 @@ class MainWindow(QMainWindow):
             )
             self._worker.progress.connect(self._on_progress)
             self._worker.finished.connect(self._on_finished)
+            # (Issue #21) live activity lines from the worker thread.
+            self._worker.activity.connect(self._on_activity)
+            self._run_in_progress = True
+            self._run_mode = state.run_mode
+            # (Issue #21) run boundary: the log shows every run start/end.
+            self._run_marker("=== RUN START ===")
             self._run_button.setEnabled(False)
             self._cancel_button.setEnabled(True)
             self._status_label.setText("Running…")
             self._worker.start()
         except Exception as exc:  # configuration errors surface as clear UI text
+            self._run_in_progress = False
+            self._run_marker(f"Run could not be started: {exc}")
             QMessageBox.critical(self, "Cannot start", f"Could not start: {exc}")
             self._status_label.setText(f"Error: {exc}")
+
+    def _on_activity(self, line: str) -> None:
+        """Worker-thread activity line -> live Diagnostics log (issue #21)."""
+        self._append_diag(line)
 
     def _on_cancel(self) -> None:
         if self._cancel_event is not None:
             self._cancel_event.set()
             self._status_label.setText("Cancelling…")
+            self._append_diag("Cancelling the run…")
 
     def _on_progress(self, phase: str, percent: int, detail: str) -> None:
+        # (Issue #21) The Diagnostics log no longer repeats stage names here;
+        # the worker's activity lines carry the real progress. The progress
+        # bar + status label keep the phase for at-a-glance feedback.
         self._progress.setValue(percent)
-        self._status_label.setText(phase + (f" — {detail}" if detail else ""))
-        self._diag.appendPlainText(phase)
+        self._status_label.setText(phase + (f" — {redact(detail)}" if detail else ""))
 
     def _on_finished(self, result, error: str, cancelled: bool) -> None:
+        self._run_in_progress = False
         self._run_button.setEnabled(True)
         self._cancel_button.setEnabled(False)
         if cancelled:
             self._status_label.setText("Cancelled.")
-            self._diag.appendPlainText("Run cancelled.")
+            self._run_marker("Run cancelled by the operator.")
+            self._run_marker("=== RUN END (cancelled) ===")
             return
         if error:
             # Errors never contain secret values; they are core/CLI messages.
             self._status_label.setText("Failed.")
-            self._diag.appendPlainText(f"ERROR: {error}")
+            self._append_diag(f"ERROR: {error}")
+            self._run_marker("=== RUN END (failed) ===")
             QMessageBox.critical(self, "Run failed", error)
             return
         self._progress.setValue(100)
         groups = result.get("groups", 0) if result else 0
         self._status_label.setText(f"Done. {groups} group(s) processed.")
-        self._diag.appendPlainText(
-            f"files scanned: {result.get('files_scanned') if result else '?'}"
-        )
-        if result and result.get("export"):
-            exp = result["export"]
-            self._diag.appendPlainText(
-                f"export: {exp.get('releases_exported')} releases, "
-                f"{exp.get('folders_written')} folders"
-            )
+        # (Issue #21) end-of-run result summary: outcome, counts, destinations.
+        for line in activity_log.render_run_summary(
+            result, run_mode=getattr(self, "_run_mode", "build")
+        ):
+            self._append_diag(line)
+        self._run_marker("=== RUN END (done) ===")
 
     # --- close ----------------------------------------------------------------
     def closeEvent(self, event: QEvent) -> None:
