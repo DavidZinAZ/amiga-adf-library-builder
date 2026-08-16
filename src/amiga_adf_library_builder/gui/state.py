@@ -57,6 +57,12 @@ class GuiState:
     require_artwork: bool = False
     verify_only: bool = False
     export_gate_acknowledged: bool = False
+    # (GH-24) Independent selection of the two optional metadata types. Both
+    # default ON, so a state that never sets them behaves exactly as before.
+    # (Distinct from ``require_artwork``, which gates the export, not the
+    # artwork search.)
+    include_artwork: bool = True
+    include_manuals_rtfm: bool = True
 
     # --- build vs export -------------------------------------------------------
     # The pipeline's ``export=`` flag is driven by the chosen run mode, not a
@@ -133,6 +139,9 @@ def build_pipeline_kwargs(
         "refresh_metadata": bool(state.refresh_metadata),
         "require_artwork": bool(state.require_artwork),
         "upstream_task_closed": bool(state.export_gate_acknowledged),
+        # (GH-24) Independent metadata selection, forwarded verbatim.
+        "include_artwork": bool(state.include_artwork),
+        "include_manuals_rtfm": bool(state.include_manuals_rtfm),
         "export": (state.run_mode == "export"),
         "verify_only": bool(state.verify_only),
         # The CLI passes the resolved config file as the provider-config source

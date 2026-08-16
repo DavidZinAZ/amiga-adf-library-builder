@@ -451,7 +451,29 @@ class MainWindow(QMainWindow):
             "Stop the export if any release is missing its cover artwork, "
             "instead of exporting with missing covers."
         )
-        for cb in (self._cb_online, self._cb_refresh, self._cb_artwork):
+        # (GH-24) Independent artwork selection: whether to SEARCH for artwork
+        # at all. Distinct from "Require artwork before export" (which gates
+        # the export). Default ON.
+        self._cb_include_artwork = QCheckBox("Include artwork")
+        self._cb_include_artwork.setChecked(True)
+        self._cb_include_artwork.setToolTip(
+            "Look for each release's cover artwork (approved local copies, "
+            "your configured local libraries, then online sources). Turn off "
+            "to skip artwork entirely for this run. On by default."
+        )
+        # (GH-24) Independent manuals/RTFM selection: whether to build the
+        # deterministic RTFM manuals at all. Default ON.
+        self._cb_include_manuals = QCheckBox("Include manuals (RTFM)")
+        self._cb_include_manuals.setChecked(True)
+        self._cb_include_manuals.setToolTip(
+            "Build the release's RTFM manual from its notes when an [rtfm] "
+            "configuration is present. Turn off to skip manual building for "
+            "this run. On by default."
+        )
+        for cb in (
+            self._cb_online, self._cb_refresh, self._cb_artwork,
+            self._cb_include_artwork, self._cb_include_manuals,
+        ):
             routine_layout.addWidget(cb)
         layout.addWidget(routine_box)
 
@@ -866,6 +888,9 @@ class MainWindow(QMainWindow):
                 "advanced_mode": self._cb_advanced.isChecked(),
                 # (Issue #21) live Diagnostics log toggle (non-sensitive).
                 "show_live_log": self._cb_show_live_log.isChecked(),
+                # (GH-24) independent metadata selection (non-sensitive).
+                "include_artwork": state.include_artwork,
+                "include_manuals_rtfm": state.include_manuals_rtfm,
             }
             geometry = self._current_persist_geometry()
             if geometry is not None:
@@ -887,6 +912,9 @@ class MainWindow(QMainWindow):
             require_artwork=self._cb_artwork.isChecked(),
             verify_only=self._cb_verify.isChecked(),
             export_gate_acknowledged=self._cb_gate.isChecked(),
+            # (GH-24) independent metadata selection.
+            include_artwork=self._cb_include_artwork.isChecked(),
+            include_manuals_rtfm=self._cb_include_manuals.isChecked(),
             run_mode="export" if self._mode_export.isChecked() else "build",
             provider_config_path=self._config_path or "",
         )
@@ -925,6 +953,9 @@ class MainWindow(QMainWindow):
         self._cb_gate.setChecked(s.export_gate_acknowledged)
         self._cb_advanced.setChecked(s.advanced_mode)
         self._cb_show_live_log.setChecked(s.show_live_log)
+        # (GH-24) independent metadata selection.
+        self._cb_include_artwork.setChecked(s.include_artwork)
+        self._cb_include_manuals.setChecked(s.include_manuals_rtfm)
         apply_theme(s.theme or "system", themes_dir=self._paths.themes_dir)
 
     # --- run ------------------------------------------------------------------

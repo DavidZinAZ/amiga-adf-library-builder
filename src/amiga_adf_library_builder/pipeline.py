@@ -51,6 +51,14 @@ def run_pipeline(
     online: bool = False,
     refresh_metadata: bool = False,
     require_artwork: bool = False,
+    # (GH-24) Independent selection of the two optional metadata types. Both
+    # default ON so existing callers (CLI, tests) keep the current behaviour.
+    # include_artwork gates BOTH local lookup and online acquisition of cover
+    # artwork; include_manuals_rtfm gates the deterministic RTFM build. The
+    # require_artwork export-stop gate above is a DISTINCT concept and is
+    # unaffected by either of these.
+    include_artwork: bool = True,
+    include_manuals_rtfm: bool = True,
     upstream_task_closed: bool = False,
     run_id: Optional[str] = None,
     export: bool = False,
@@ -208,6 +216,7 @@ def run_pipeline(
         local_media_provider=local_media_provider,
         playmatch_provider=playmatch_provider,
         hasheous_provider=hasheous_provider,
+        include_artwork=include_artwork,
         activity=activity,
     )
     _act("Metadata and artwork preparation complete.")
@@ -219,7 +228,10 @@ def run_pipeline(
     # unchanged. A failure must never break the run (degrade to no .rtfm).
     rtfm_results: list = []
     rtfm_dir = cfg.rtfm_dir
-    if rtfm_config_path:
+    # (GH-24) Manuals/RTFM selection is independent of artwork. When the
+    # operator turns it off, the deterministic RTFM build is skipped entirely
+    # (zero provider work) even if an [rtfm] config is present and enabled.
+    if rtfm_config_path and include_manuals_rtfm:
         try:
             from . import rtfm as rtfm_mod
             from .paths import load_rtfm_config
@@ -313,6 +325,9 @@ def run_pipeline(
     result: dict = {
         "run_id": run_id,
         "online": online,
+        # (GH-24) The operator's per-type selection is recorded for observability.
+        "include_artwork": bool(include_artwork),
+        "include_manuals_rtfm": bool(include_manuals_rtfm),
         "metadata_providers": [r.provider for r in enrich_results],
         "metadata_records": [str(r.metadata_path) for r in enrich_results if r.metadata_path],
         "files_scanned": len(scans),
@@ -348,6 +363,10 @@ def run_pipeline(
         }
     result["rtfm"] = {
         "configured": bool(rtfm_config_path),
+        # (GH-24) True when an [rtfm] config is present AND the operator's
+        # manuals/RTFM selection is on. A config that is present but deselected
+        # reports selected=False and builds nothing.
+        "selected": bool(rtfm_config_path and include_manuals_rtfm),
         "built": [str(r.rtfm_path) for r in rtfm_results if r.written],
         "routed_for_review": [
             {"release_key": r.release_key, "reason": r.review_reason}

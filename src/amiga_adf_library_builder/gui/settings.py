@@ -41,6 +41,9 @@ SETTINGS_KEYS = (
     "window_geometry",
     # (Issue #21) Diagnostics: show the live processing log. Default ON.
     "show_live_log",
+    # (GH-24) Independent artwork / manuals-RTFM selection. Both default ON.
+    "include_artwork",
+    "include_manuals_rtfm",
 )
 
 
@@ -63,6 +66,11 @@ class Settings:
     # (Issue #21) Show the live processing log in Diagnostics. Default ON;
     # old settings files without this key load with this safe default.
     show_live_log: bool = True
+    # (GH-24) Independent selection of the two optional metadata types. Both
+    # default ON, so a run that never touches these boxes behaves exactly as
+    # before. Old settings files without these keys load with this safe default.
+    include_artwork: bool = True
+    include_manuals_rtfm: bool = True
     presets: dict[str, "Preset"] = field(default_factory=dict)
 
     def as_dict(self) -> dict:
@@ -80,6 +88,9 @@ class Settings:
             "advanced_mode": self.advanced_mode,
             "window_geometry": self.window_geometry,
             "show_live_log": self.show_live_log,
+            # (GH-24) Independent metadata selection.
+            "include_artwork": self.include_artwork,
+            "include_manuals_rtfm": self.include_manuals_rtfm,
         }
         if self.presets:
             out["presets"] = {name: p.as_dict() for name, p in self.presets.items()}
@@ -105,6 +116,9 @@ class Settings:
         s.window_geometry = str(gui.get("window_geometry", ""))
         # (Issue #21) Missing key (old profile) -> safe default True.
         s.show_live_log = bool(gui.get("show_live_log", True))
+        # (GH-24) Missing keys (old profile) -> safe default True.
+        s.include_artwork = bool(gui.get("include_artwork", True))
+        s.include_manuals_rtfm = bool(gui.get("include_manuals_rtfm", True))
         raw_presets = gui.get("presets")
         if isinstance(raw_presets, dict):
             for name, val in raw_presets.items():
@@ -128,6 +142,9 @@ class Preset:
     verify_only: bool = False
     export_gate_acknowledged: bool = False
     advanced_mode: bool = False
+    # (GH-24) Independent metadata selection captured with the preset.
+    include_artwork: bool = True
+    include_manuals_rtfm: bool = True
 
     def as_dict(self) -> dict:
         return {
@@ -141,6 +158,8 @@ class Preset:
             "verify_only": self.verify_only,
             "export_gate_acknowledged": self.export_gate_acknowledged,
             "advanced_mode": self.advanced_mode,
+            "include_artwork": self.include_artwork,
+            "include_manuals_rtfm": self.include_manuals_rtfm,
         }
 
     @classmethod
@@ -156,6 +175,9 @@ class Preset:
             verify_only=bool(data.get("verify_only", False)),
             export_gate_acknowledged=bool(data.get("export_gate_acknowledged", False)),
             advanced_mode=bool(data.get("advanced_mode", False)),
+            # (GH-24) Old presets without these keys default ON.
+            include_artwork=bool(data.get("include_artwork", True)),
+            include_manuals_rtfm=bool(data.get("include_manuals_rtfm", True)),
         )
 
 
