@@ -447,6 +447,7 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                  online: bool = False, refresh: bool = False,
                  local_media_provider=None, playmatch_provider=None,
                  hasheous_provider=None,
+                 include_artwork: bool = True,
                  activity: Optional[Callable[[str], None]] = None) -> EnrichResult:
     metadata_cache_dir = Path(metadata_cache_dir or (Path(nfo_dir).parent / "metadata-cache"))
     curated_metadata_dir = Path(curated_metadata_dir or (Path(nfo_dir).parent / "metadata-curated"))
@@ -758,91 +759,102 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
         if _hs_success_note is not None:
             notes.append(_hs_success_note)
 
-    master = _find_existing_master(group, artwork_original_dir)
-    # Provider order #2: configured local-media libraries. Only consulted when no
-    # approved local-artwork master already exists. The provider copies a
-    # selected source into the app cache and returns the cached master; it never
-    # writes into the source library.
-    if master is None and local_media_provider is not None:
-        lm_master, lm_events = _resolve_local_media_master(group, local_media_provider)
-        events.extend(lm_events)
-        if lm_master is not None:
-            master = lm_master
-            _act("Found artwork in a local library.")
-    if online and metadata and metadata.artwork_url and master is None:
-        _act("Fetching artwork online…")
-        events.append(EnrichEvent(
-            category=EnrichCategory.ARTWORK_LOOKUP,
-            detail="downloading artwork master from metadata URL",
-            url=metadata.artwork_url,
-        ))
-        try:
-            master = _download_artwork(metadata, artwork_original_dir, lookup_title or "unknown")
-            notes.append(f"downloaded and preserved artwork master: {master}")
-            events.append(EnrichEvent(
-                category=EnrichCategory.ARTWORK_GENERATED,
-                detail="downloaded artwork master", url=metadata.artwork_url, ok=True,
-            ))
-            _act("Artwork downloaded and ready.")
-        except Exception as exc:
-            _act(f"Artwork download failed: {exc}")
-            notes.append(f"artwork download failed: {exc}")
-            events.append(EnrichEvent(
-                category=EnrichCategory.ARTWORK_DOWNLOAD_FAILED,
-                detail="artwork download raised an error",
-                url=metadata.artwork_url, ok=False, error=str(exc),
-            ))
-    elif online and metadata and not metadata.artwork_url and master is None:
-        _act("No artwork image found for this release.")
-        events.append(EnrichEvent(
-            category=EnrichCategory.ARTWORK_URL_NOT_FOUND,
-            detail="metadata present but no artwork URL to download", ok=False,
-        ))
-
+    master = None
     processed: Optional[Path] = None
-    if master:
-        try:
-            data = artwork_mod.process_artwork_bytes(
-                master, target_w=150, target_h=150,
-                max_w=artwork_mod.ARTWORK_MAX_W,
-                max_h=artwork_mod.ARTWORK_MAX_H,
-                max_bytes=artwork_mod.ARTWORK_MAX_BYTES,
-            )
-            Path(artwork_processed_dir).mkdir(parents=True, exist_ok=True)
-            processed = Path(artwork_processed_dir) / f"{release_basename(group)}.jpg"
-            if not processed.exists() or processed.read_bytes() != data:
-                processed.write_bytes(data)
-            notes.append(f"processed artwork: {processed}")
+    if include_artwork:
+        master = _find_existing_master(group, artwork_original_dir)
+        # Provider order #2: configured local-media libraries. Only consulted when no
+        # approved local-artwork master already exists. The provider copies a
+        # selected source into the app cache and returns the cached master; it never
+        # writes into the source library.
+        if master is None and local_media_provider is not None:
+            lm_master, lm_events = _resolve_local_media_master(group, local_media_provider)
+            events.extend(lm_events)
+            if lm_master is not None:
+                master = lm_master
+                _act("Found artwork in a local library.")
+        if online and metadata and metadata.artwork_url and master is None:
+            _act("Fetching artwork online…")
             events.append(EnrichEvent(
-                category=EnrichCategory.ARTWORK_GENERATED,
-                detail="resized artwork to Gotek master", ok=True,
+                category=EnrichCategory.ARTWORK_LOOKUP,
+                detail="downloading artwork master from metadata URL",
+                url=metadata.artwork_url,
             ))
-            _act("Artwork processed to final size.")
-        except Exception as exc:
-            _act(f"Artwork processing failed: {exc}")
-            notes.append(f"artwork processing failed: {exc}")
-            # A corrupt/unsupported source image fails at Image.open()/decode,
-            # which is a distinct failure from a genuine resize/processing error.
-            # Surface it as ARTWORK_INVALID_IMAGE so the operator can tell an
-            # unusable master apart from a processing-cap failure (structured logging).
-            if _is_invalid_image_error(exc):
+            try:
+                master = _download_artwork(metadata, artwork_original_dir, lookup_title or "unknown")
+                notes.append(f"downloaded and preserved artwork master: {master}")
                 events.append(EnrichEvent(
-                    category=EnrichCategory.ARTWORK_INVALID_IMAGE,
-                    detail="artwork master is not a valid/decodable image",
-                    ok=False, error=str(exc),
+                    category=EnrichCategory.ARTWORK_GENERATED,
+                    detail="downloaded artwork master", url=metadata.artwork_url, ok=True,
                 ))
-            else:
+                _act("Artwork downloaded and ready.")
+            except Exception as exc:
+                _act(f"Artwork download failed: {exc}")
+                notes.append(f"artwork download failed: {exc}")
                 events.append(EnrichEvent(
-                    category=EnrichCategory.ARTWORK_RESIZE_FAILED,
-                    detail="artwork resize/processing raised an error",
-                    ok=False, error=str(exc),
+                    category=EnrichCategory.ARTWORK_DOWNLOAD_FAILED,
+                    detail="artwork download raised an error",
+                    url=metadata.artwork_url, ok=False, error=str(exc),
                 ))
+        elif online and metadata and not metadata.artwork_url and master is None:
+            _act("No artwork image found for this release.")
+            events.append(EnrichEvent(
+                category=EnrichCategory.ARTWORK_URL_NOT_FOUND,
+                detail="metadata present but no artwork URL to download", ok=False,
+            ))
+
+        if master:
+            try:
+                data = artwork_mod.process_artwork_bytes(
+                    master, target_w=150, target_h=150,
+                    max_w=artwork_mod.ARTWORK_MAX_W,
+                    max_h=artwork_mod.ARTWORK_MAX_H,
+                    max_bytes=artwork_mod.ARTWORK_MAX_BYTES,
+                )
+                Path(artwork_processed_dir).mkdir(parents=True, exist_ok=True)
+                processed = Path(artwork_processed_dir) / f"{release_basename(group)}.jpg"
+                if not processed.exists() or processed.read_bytes() != data:
+                    processed.write_bytes(data)
+                notes.append(f"processed artwork: {processed}")
+                events.append(EnrichEvent(
+                    category=EnrichCategory.ARTWORK_GENERATED,
+                    detail="resized artwork to Gotek master", ok=True,
+                ))
+                _act("Artwork processed to final size.")
+            except Exception as exc:
+                _act(f"Artwork processing failed: {exc}")
+                notes.append(f"artwork processing failed: {exc}")
+                # A corrupt/unsupported source image fails at Image.open()/decode,
+                # which is a distinct failure from a genuine resize/processing error.
+                # Surface it as ARTWORK_INVALID_IMAGE so the operator can tell an
+                # unusable master apart from a processing-cap failure (structured logging).
+                if _is_invalid_image_error(exc):
+                    events.append(EnrichEvent(
+                        category=EnrichCategory.ARTWORK_INVALID_IMAGE,
+                        detail="artwork master is not a valid/decodable image",
+                        ok=False, error=str(exc),
+                    ))
+                else:
+                    events.append(EnrichEvent(
+                        category=EnrichCategory.ARTWORK_RESIZE_FAILED,
+                        detail="artwork resize/processing raised an error",
+                        ok=False, error=str(exc),
+                    ))
+        else:
+            _act("No artwork available for this release.")
+            notes.append("no artwork master available")
+            events.append(EnrichEvent(
+                category=EnrichCategory.ARTWORK_SKIPPED,
+                detail="no artwork master available; NFO only", ok=True,
+            ))
     else:
-        _act("No artwork available for this release.")
-        notes.append("no artwork master available")
+        # Artwork selection disabled (GH-24): no local lookup, no online download,
+        # no processing. Zero provider/network work. NFO + provenance still written.
+        _act("Artwork selection is off; no cover artwork will be prepared.")
+        notes.append("artwork selection disabled by operator")
         events.append(EnrichEvent(
             category=EnrichCategory.ARTWORK_SKIPPED,
-            detail="no artwork master available; NFO only", ok=True,
+            detail="artwork selection disabled by operator; NFO only", ok=True,
         ))
 
     Path(nfo_dir).mkdir(parents=True, exist_ok=True)
@@ -915,6 +927,7 @@ def enrich_all(groups: list[ReleaseGroup], *, nfo_dir: Path, scans: list[ScanRec
                online: bool = False, refresh: bool = False,
                local_media_provider=None, playmatch_provider=None,
                hasheous_provider=None,
+               include_artwork: bool = True,
                activity: Optional[Callable[[str], None]] = None) -> list[EnrichResult]:
     scan_map = {s.filename: s for s in scans}
     metadata_cache_dir = Path(metadata_cache_dir or (Path(nfo_dir).parent / "metadata-cache"))
@@ -939,5 +952,6 @@ def enrich_all(groups: list[ReleaseGroup], *, nfo_dir: Path, scans: list[ScanRec
                      local_media_provider=local_media_provider,
                      playmatch_provider=playmatch_provider,
                      hasheous_provider=hasheous_provider,
+                     include_artwork=include_artwork,
                      activity=activity))
     return results
