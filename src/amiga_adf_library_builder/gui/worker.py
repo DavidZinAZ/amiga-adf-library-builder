@@ -60,11 +60,11 @@ class PipelineWorker(QObject):
         from .. import pipeline  # lazy import keeps GUI importable headless
 
         try:
-            self.progress.emit("Resolving configuration", 2, "")
+            self.progress.emit("Checking your settings", 2, "")
             cfg = build_path_config_from_gui_state(
                 self._state, config_path=self._config_path
             )
-            self.progress.emit("Ensuring managed directories", 6, str(cfg.library_root))
+            self.progress.emit("Preparing folders", 6, str(cfg.library_root))
             from ..initializer import ensure_managed_directories
 
             ensure_managed_directories(cfg)
@@ -77,17 +77,17 @@ class PipelineWorker(QObject):
                 self._state, cfg, config_path=self._config_path
             )
             # Cooperative cancellation hooks: emit progress and check the event.
-            self.progress.emit("Scanning intake", 15, str(cfg.original_dir))
+            self.progress.emit("Scanning the original disks", 15, str(cfg.original_dir))
             if self._cancel.is_set():
                 self.finished.emit(None, "", True)
                 return
 
-            self.progress.emit("Parsing + grouping", 30, "")
+            self.progress.emit("Organizing and preparing metadata", 30, "")
             if self._cancel.is_set():
                 self.finished.emit(None, "", True)
                 return
 
-            self.progress.emit("Enriching (offline NFO)", 55, "")
+            self.progress.emit("Filling in missing metadata", 55, "")
             if self._cancel.is_set():
                 self.finished.emit(None, "", True)
                 return
@@ -98,7 +98,7 @@ class PipelineWorker(QObject):
                 self.finished.emit(None, "", True)
                 return
 
-            self.progress.emit("Finalizing", 95, "")
+            self.progress.emit("Finishing up", 95, "")
             self.finished.emit(result, "", False)
         except Exception as exc:  # never let a pipeline error kill the GUI thread
             self.finished.emit(None, str(exc), False)

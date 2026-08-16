@@ -192,15 +192,16 @@ class MasterPasswordDialog(QDialog):
         self._mode = mode
         self._vault_exists = vault_exists
         self.setWindowTitle(
-            "Set vault master password" if mode == "set" else "Unlock secret vault"
+            "Set your master password" if mode == "set" else "Open the credential store"
         )
         self._build()
 
     def _build(self) -> None:
         layout = QVBoxLayout(self)
         warn = QLabel(
-            "The master password is unrecoverable. If lost, the stored "
-            "credentials cannot be recovered — store it in a password manager."
+            "This password unlocks the stored credentials and cannot be "
+            "recovered if lost — if you forget it, the stored credentials are "
+            "gone. Save it in a password manager."
         )
         warn.setWordWrap(True)
         layout.addWidget(warn)
@@ -330,9 +331,18 @@ class MainWindow(QMainWindow):
         run_box = QGroupBox("Run")
         run_layout = QVBoxLayout(run_box)
         mode_row = QHBoxLayout()
-        self._mode_build = QCheckBox("Build (scan/parse/group/enrich/quarantine)")
+        self._mode_build = QCheckBox("Build the library (scan, organize, prepare)")
         self._mode_build.setChecked(True)
-        self._mode_export = QCheckBox("Export to staging (opens Gotek export gate)")
+        self._mode_build.setToolTip(
+            "Scans the library, groups the disks into releases, and prepares the "
+            "metadata. Nothing is written to the export destination."
+        )
+        self._mode_export = QCheckBox("Export the library (writes the final files)")
+        self._mode_export.setToolTip(
+            "Builds the library and then writes the final export files to the "
+            "export destination. A confirmation is requested before files are "
+            "written."
+        )
         mode_row.addWidget(self._mode_build)
         mode_row.addWidget(self._mode_export)
         run_layout.addLayout(mode_row)
@@ -350,7 +360,7 @@ class MainWindow(QMainWindow):
         self._cancel_button = QPushButton("Cancel")
         self._cancel_button.setEnabled(False)
         self._cancel_button.clicked.connect(self._on_cancel)
-        self._open_log_button = QPushButton("Open log directory")
+        self._open_log_button = QPushButton("Open log files…")
         self._open_log_button.clicked.connect(self._on_open_logs)
         btn_row.addWidget(self._run_button)
         btn_row.addWidget(self._cancel_button)
@@ -359,11 +369,14 @@ class MainWindow(QMainWindow):
         run_layout.addLayout(btn_row)
         root.addWidget(run_box)
 
-    def _dir_row(self, label: str, line_edit: QLineEdit) -> QHBoxLayout:
+    def _dir_row(self, label: str, line_edit: QLineEdit, tooltip: str = "") -> QHBoxLayout:
         row = QHBoxLayout()
-        row.addWidget(QLabel(label))
+        label_widget = QLabel(label)
+        if tooltip:
+            label_widget.setToolTip(tooltip)
+        row.addWidget(label_widget)
         row.addWidget(line_edit, 1)
-        picker = QPushButton("Browse…")
+        picker = QPushButton("Choose…")
         picker.clicked.connect(lambda _checked=False, le=line_edit: self._pick_dir(le))
         row.addWidget(picker)
         return row
@@ -375,31 +388,93 @@ class MainWindow(QMainWindow):
         self._le_original_dir = QLineEdit(self)
         self._le_staging_dir = QLineEdit(self)
         self._le_output_dir = QLineEdit(self)
-        layout.addLayout(self._dir_row("Library root", self._le_library_root))
-        layout.addLayout(self._dir_row("Original (read-only)", self._le_original_dir))
-        layout.addLayout(self._dir_row("Staging dir", self._le_staging_dir))
-        layout.addLayout(self._dir_row("Output dir", self._le_output_dir))
+        layout.addLayout(
+            self._dir_row(
+                "Library root",
+                self._le_library_root,
+                "The top-level folder containing your ADF collection.",
+            )
+        )
+        layout.addLayout(
+            self._dir_row(
+                "Original disks (read-only)",
+                self._le_original_dir,
+                "Where the original .adf files live. This folder is never "
+                "modified — leave it blank to use the default location.",
+            )
+        )
+        layout.addLayout(
+            self._dir_row(
+                "Export work folder",
+                self._le_staging_dir,
+                "A scratch area where export files are prepared before the "
+                "final export. Safe to delete — it is rebuilt on every export. "
+                "Leave blank to use the default location.",
+            )
+        )
+        layout.addLayout(
+            self._dir_row(
+                "Export destination",
+                self._le_output_dir,
+                "Where the finished export files are written. Leave blank to "
+                "use the default location.",
+            )
+        )
         layout.addStretch(1)
         return w
 
     def _build_options_tab(self) -> QWidget:
         w = QWidget(self)
         layout = QVBoxLayout(w)
-        self._cb_online = QCheckBox("Online (allow metadata providers)")
-        self._cb_refresh = QCheckBox("Refresh metadata (ignore cache)")
-        self._cb_artwork = QCheckBox("Require artwork (export preflight)")
-        self._cb_verify = QCheckBox("Verify only (no writes; export mode)")
-        self._cb_gate = QCheckBox("Export gate acknowledged (I confirm safety gate)")
-        self._cb_advanced = QCheckBox("Advanced mode")
-        for cb in (
-            self._cb_online,
-            self._cb_refresh,
-            self._cb_artwork,
-            self._cb_verify,
-            self._cb_gate,
-            self._cb_advanced,
-        ):
-            layout.addWidget(cb)
+
+        # --- routine options --------------------------------------------------
+        routine_box = QGroupBox("Metadata")
+        routine_layout = QVBoxLayout(routine_box)
+        self._cb_online = QCheckBox("Use online metadata sources")
+        self._cb_online.setToolTip(
+            "Allow the app to look up game titles and artwork from online "
+            "sources. Off by default; everything works fully offline."
+        )
+        self._cb_refresh = QCheckBox("Refresh metadata even if cached")
+        self._cb_refresh.setToolTip(
+            "Re-fetch metadata from the sources instead of using the copies "
+            "from the last run. Slower; only needed if a lookup came back "
+            "wrong."
+        )
+        self._cb_artwork = QCheckBox("Require artwork before export")
+        self._cb_artwork.setToolTip(
+            "Stop the export if any release is missing its cover artwork, "
+            "instead of exporting with missing covers."
+        )
+        for cb in (self._cb_online, self._cb_refresh, self._cb_artwork):
+            routine_layout.addWidget(cb)
+        layout.addWidget(routine_box)
+
+        # --- advanced options (visually separated from routine controls) ------
+        advanced_box = QGroupBox("Advanced")
+        advanced_box.setToolTip(
+            "Power-user controls. The defaults are safe for normal use — "
+            "leave them alone unless you know what you are changing."
+        )
+        advanced_layout = QVBoxLayout(advanced_box)
+        self._cb_verify = QCheckBox("Check only — don't change files")
+        self._cb_verify.setToolTip(
+            "Run the full build/export check without writing any files. "
+            "Useful to verify your library and settings before a real export."
+        )
+        self._cb_gate = QCheckBox("Allow export")
+        self._cb_gate.setToolTip(
+            "Confirm that you want to write the export files. The export is "
+            "refused until this box is checked."
+        )
+        self._cb_advanced = QCheckBox("Remember these settings")
+        self._cb_advanced.setToolTip(
+            "Keep the choices in this group so they are restored the next "
+            "time you start the app. Off by default."
+        )
+        for cb in (self._cb_verify, self._cb_gate, self._cb_advanced):
+            advanced_layout.addWidget(cb)
+        layout.addWidget(advanced_box)
         layout.addStretch(1)
         return w
 
@@ -417,6 +492,10 @@ class MainWindow(QMainWindow):
         form = QFormLayout(box)
         enabled = QCheckBox("Enabled")
         enabled.setChecked(provider.enabled())
+        enabled.setToolTip(
+            "Turn this metadata source on. A source only activates once it "
+            "has been set up below."
+        )
         enabled.stateChanged.connect(
             lambda state, p=provider: p.set_enabled(state == Qt.CheckState.Checked.value)
         )
@@ -434,15 +513,19 @@ class MainWindow(QMainWindow):
         if provider.metadata.requires_secret or provider.metadata.auth_required != "none":
             secret_btn = QPushButton("Set credentials…")
             secret_btn.setToolTip(
-                "Stores the token securely in the local AES vault. "
-                "Pipeline/provider wiring is planned (coming soon); the token "
-                "is not yet passed to the run engine."
+                "Store this source's token securely in the local encrypted "
+                "credential store. Live lookups are not connected to runs yet — "
+                "the token is saved but not used by the app until that lands."
             )
             secret_btn.clicked.connect(
                 lambda _checked=False, p=provider: self._edit_credentials(p)
             )
             form.addRow("Credentials", secret_btn)
-        status_btn = QPushButton("Test connection")
+        status_btn = QPushButton("Check connection…")
+        status_btn.setToolTip(
+            "Shows whether this source is set up and reachable. No live "
+            "request is made."
+        )
         status_btn.clicked.connect(
             lambda _checked=False, p=provider: self._test_provider(p)
         )
@@ -452,7 +535,9 @@ class MainWindow(QMainWindow):
     def _build_diagnostics_tab(self) -> QWidget:
         w = QWidget(self)
         layout = QVBoxLayout(w)
-        layout.addWidget(QLabel("Run output (secrets are redacted automatically):"))
+        layout.addWidget(
+            QLabel("Activity from the last run (sensitive values are hidden):")
+        )
         self._diag = QPlainTextEdit(self)
         self._diag.setReadOnly(True)
         layout.addWidget(self._diag)
@@ -463,7 +548,7 @@ class MainWindow(QMainWindow):
         # F8: start the picker at the app config dir (portable layout), not at
         # the user/home directory. Falls back to the last-used value if present.
         start = line_edit.text() or str(self._paths.config_dir)
-        chosen = QFileDialog.getExistingDirectory(self, "Select directory", start)
+        chosen = QFileDialog.getExistingDirectory(self, "Choose folder", start)
         if chosen:
             line_edit.setText(chosen)
 
@@ -494,7 +579,9 @@ class MainWindow(QMainWindow):
                 self._secret_store.unlock(dlg.password)
         except SecretError as exc:
             QMessageBox.critical(
-                self, "Vault error", f"Could not open the vault: {exc}"
+                self,
+                "Credential store error",
+                f"Could not open the credential store: {exc}",
             )
             return False
         return bool(getattr(backend, "is_unlocked", False))
@@ -510,14 +597,15 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(dlg)
         token_le = QLineEdit(dlg)
         token_le.setEchoMode(QLineEdit.EchoMode.Password)
-        token_le.setPlaceholderText("secret token (stored in vault, never shown)")
-        layout.addWidget(QLabel("Token (kept in the secret store, not in config):"))
+        token_le.setPlaceholderText("secret token (stored securely, never shown)")
+        layout.addWidget(QLabel("Token (stored in the encrypted credential store):"))
         layout.addWidget(token_le)
         # F3: honest affordance. The token is stored securely in the vault; the
         # bridge from the vault to the core run engine is deferred (MVP).
         note = QLabel(
-            "Stored securely in the local vault. Pipeline/provider wiring is "
-            "planned (coming soon); the token is not yet passed to the run engine."
+            "Stored securely in the local credential store. Live lookups are "
+            "not connected to runs yet — the token is saved but not used by "
+            "the app until that lands."
         )
         note.setWordWrap(True)
         layout.addWidget(note)
@@ -549,15 +637,16 @@ class MainWindow(QMainWindow):
             # slot. Surface an actionable message instead.
             QMessageBox.critical(
                 self,
-                "Vault is locked",
-                "Vault is locked — set a master password first, then try again.",
+                "Credential store is locked",
+                "The credential store is locked — open it with your master "
+                "password first, then try again.",
             )
             logger.warning("credential save failed: %s", exc)
             return
         finally:
             redactor.remove_secret(token)
         self._status_label.setText(
-            f"{provider.metadata.name} credentials saved to the vault."
+            f"{provider.metadata.name} token saved to the credential store."
         )
 
     def _test_provider(self, provider: Provider) -> None:
@@ -565,7 +654,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             f"{provider.metadata.name} status",
-            f"Configured: {status.configured}\n{status.message}",
+            f"Status: {status.message}",
         )
 
     def _set_theme(self, name: str) -> None:
@@ -580,9 +669,13 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "Help",
-            "Select a library root and input/output directories, choose Build or "
-            "Export, then Run. The GUI calls the same core pipeline as the CLI, so "
-            "results match. Online providers are optional and disabled by default.",
+            "1. On the Library tab, point the Library root at your ADF "
+            "collection (the other folders can stay at their defaults).\n"
+            "2. On the Options tab, turn on any options you need (all "
+            "optional; offline is the default).\n"
+            "3. Choose Build or Export in the Run area and press Run.\n"
+            "Exporting asks for a final confirmation before writing files. "
+            "Online metadata sources are optional and off by default.",
         )
 
     def _show_about(self) -> None:
@@ -590,7 +683,9 @@ class MainWindow(QMainWindow):
             self,
             "About",
             f"Amiga ADF Library Builder — GUI\nVersion {gui_version}\n"
-            "PySide6 (LGPL) presentation layer over the shared core.",
+            "A graphical front end for building Amiga ADF libraries for the "
+            "Gotek. It runs the same processing as the command-line tool, so "
+            "results match.",
         )
 
     def _on_open_logs(self) -> None:
@@ -601,7 +696,7 @@ class MainWindow(QMainWindow):
 
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
         except Exception:
-            QMessageBox.information(self, "Log directory", str(path))
+            QMessageBox.information(self, "Log files", str(path))
 
     # --- state <-> widgets ----------------------------------------------------
     def _restore_geometry(self) -> None:
@@ -761,7 +856,7 @@ class MainWindow(QMainWindow):
             self._status_label.setText("Running…")
             self._worker.start()
         except Exception as exc:  # configuration errors surface as clear UI text
-            QMessageBox.critical(self, "Cannot start", str(exc))
+            QMessageBox.critical(self, "Cannot start", f"Could not start: {exc}")
             self._status_label.setText(f"Error: {exc}")
 
     def _on_cancel(self) -> None:
