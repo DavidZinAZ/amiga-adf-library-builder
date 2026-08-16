@@ -14,11 +14,13 @@ in the UI or written to logs.
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QEvent, Qt
+from PySide6.QtCore import QEvent, QRect, Qt
+from PySide6.QtGui import QGuiApplication, QRegion
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -53,6 +55,116 @@ from .state import GuiState
 from .themes import apply_theme, available_themes
 
 logger = logging.getLogger("amiga_adf_gui")
+
+
+# --- window geometry persistence (Issue #18) ----------------------------------
+#
+# The main window's geometry is persisted in the same non-sensitive settings
+# store used for the folder defaults (Issue #17), under the ``window_geometry``
+# key of the ``[gui]`` table.
+#
+# Serialized payload (JSON string, stable + versioned so future schema changes
+# cannot break restore):
+#   {"v": 1, "geom": "<x,y,w,h>", "max": true|false}
+#
+# ``geom`` is the window's *normal* geometry (the size/position it would have
+# if not maximized) -- the correct value to restore even when the window was
+# closed while maximized. ``max`` is an explicit flag: the offscreen platform
+# and some WMs leave ``normalGeometry()`` invalid while maximized, and
+# ``QMainWindow.restoreState()`` does not reliably round-trip the maximized
+# flag, so the flag is stored as data, not as an opaque byte blob.
+#
+# SAFETY: on restore the saved rect is tested against the union of every
+# screen's ``availableGeometry`` (QGuiApplication.screens()). If the rect does
+# not intersect that union -- e.g. the monitor it lived on was disconnected or
+# the display layout changed -- it is clamped back on-screen: the default
+# size repositioned to the center of the primary available area. The window
+# must never be restored entirely off-screen.
+
+
+def _default_window_geometry() -> QRect:
+    """Default geometry: 900x680 centered on the primary available area.
+
+    ``QGuiApplication.primaryScreen()`` is guaranteed non-None once a
+    QApplication exists (a virtual screen is always present, offscreen
+    included). If it ever is not, the 0,0 800x600 rect is returned rather
+    than raising from the window constructor.
+    """
+    screen = QGuiApplication.primaryScreen()
+    if screen is None:  # pragma: no cover - requires a live QApplication
+        return QRect(0, 0, 800, 600)
+    return _centered_rect(QRect(0, 0, 900, 680), screen.availableGeometry())
+
+
+def _centered_rect(size: QRect, area: QRect) -> QRect:
+    """Place ``size`` (its width/height) centered inside ``area``."""
+    x = area.x() + max(0, (area.width() - size.width()) // 2)
+    y = area.y() + max(0, (area.height() - size.height()) // 2)
+    return QRect(x, y, size.width(), size.height())
+
+
+def _geometry_is_on_screen(rect: QRect) -> bool:
+    """True if ``rect`` intersects ANY screen's available area.
+
+    Uses the screen-geometry union (QRegion), not the bounding box, so a
+    rect sitting in the GAP between two side-by-side monitors (inside the
+    union's bounding box but off every screen) is correctly rejected.
+    """
+    region = QRegion()
+    for screen in QGuiApplication.screens():
+        region = region.united(QRegion(QRect(screen.availableGeometry())))
+    return not region.intersected(QRegion(QRect(rect))).isEmpty()
+
+
+def _sanitize_geometry(rect: QRect) -> QRect:
+    """Clamp a saved geometry back on-screen if it is no longer visible.
+
+    Returns ``rect`` unchanged when it intersects any available screen area;
+    otherwise returns the default size centered on the primary screen's
+    available area. The result always intersects the virtual desktop.
+    """
+    if rect.isValid() and _geometry_is_on_screen(rect):
+        return rect
+    return _default_window_geometry()
+
+
+def _encode_geometry(rect: QRect, maximized: bool) -> str:
+    """Serialize geometry + maximized flag to the versioned JSON payload."""
+    payload = {
+        "v": 1,
+        "geom": f"{rect.x()},{rect.y()},{rect.width()},{rect.height()}",
+        "max": bool(maximized),
+    }
+    return json.dumps(payload)
+
+
+def _decode_geometry(text: str) -> tuple[Optional[QRect], bool]:
+    """Parse a versioned geometry payload; tolerant of garbage.
+
+    Returns ``(None, False)`` for empty/malformed payloads, unknown
+    versions, or invalid rects -- the caller falls back to the default
+    geometry. A missing ``max`` field (or any non-bool value) decodes to
+    ``False`` so a partial payload still restores a usable window.
+    """
+    if not text:
+        return None, False
+    try:
+        payload = json.loads(text)
+    except (ValueError, UnicodeDecodeError):
+        return None, False
+    if not isinstance(payload, dict) or payload.get("v") != 1:
+        return None, False
+    parts = payload.get("geom")
+    if not isinstance(parts, str):
+        return None, False
+    try:
+        x, y, w, h = (int(p) for p in parts.split(","))
+    except ValueError:
+        return None, False
+    rect = QRect(x, y, w, h)
+    if not rect.isValid():
+        return None, False
+    return rect, payload.get("max") is True
 
 
 class MasterPasswordDialog(QDialog):
@@ -145,6 +257,8 @@ class MainWindow(QMainWindow):
     ) -> None:
         super().__init__()
         self.setWindowTitle("Amiga ADF Library Builder")
+        # (Issue #18) Default size; replaced below by the persisted geometry
+        # restore when a valid saved geometry exists.
         self.resize(900, 680)
 
         self._paths = portable_paths or PortablePaths()
@@ -154,6 +268,8 @@ class MainWindow(QMainWindow):
             self._settings = self._settings_store.load()
         except Exception:
             self._settings = Settings()
+        self._saved_maximized = False
+        self._restore_geometry()
         self._secret_store = secret_store or SecretStore.with_vault(self._paths.vault_file())
         self._registry = provider_registry or default_registry()
         self._config_path = config_path
@@ -169,6 +285,12 @@ class MainWindow(QMainWindow):
         self._build_menu()
         self._worker = None
         self._cancel_event = None
+        # (Issue #18) Re-apply the maximized flag now that the window is fully
+        # built, so widget construction cannot clobber it. ``setWindowState``
+        # (not ``showMaximized``) keeps a hidden window hidden -- the flag
+        # takes effect on the first ``show()``.
+        if self._saved_maximized:
+            self.setWindowState(Qt.WindowState.WindowMaximized)
 
     # --- menu -----------------------------------------------------------------
     def _build_menu(self) -> None:
@@ -482,29 +604,88 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Log directory", str(path))
 
     # --- state <-> widgets ----------------------------------------------------
+    def _restore_geometry(self) -> None:
+        """Restore persisted window geometry (Issue #18), safely.
+
+        The saved payload is decoded and the rect is sanitized against the
+        CURRENT display layout (see :func:`_sanitize_geometry`): a geometry
+        that no longer intersects any screen (monitor disconnected, display
+        layout changed) is replaced by the default size centered on the
+        primary screen. The window is therefore never restored fully
+        off-screen.
+
+        The maximized flag is stored as explicit data in the payload (the
+        offscreen platform and some WMs do not round-trip it through
+        ``saveState``/``restoreState``). It is re-applied at the END of
+        ``__init__`` (see the ``_saved_maximized`` flag) so widget
+        construction cannot clobber it, and only when the saved rect is
+        on-screen -- a clamped restore comes up in the normal state.
+
+        Malformed payloads, unknown versions, and empty settings all fall
+        through to the default geometry; this method never raises.
+        """
+        try:
+            rect, maximized = _decode_geometry(self._settings.window_geometry)
+        except Exception:
+            rect, maximized = None, False
+        if rect is None:
+            # No saved (or unparseable) geometry: default position + size.
+            self.setGeometry(_default_window_geometry())
+            return
+        on_screen = _geometry_is_on_screen(rect)
+        self.setGeometry(_sanitize_geometry(rect))
+        self._saved_maximized = bool(maximized) and on_screen
+
+    def _current_persist_geometry(self) -> Optional[str]:
+        """The geometry payload to persist right now, or None to skip.
+
+        Persists the *normal* geometry (a maximized size must not be baked
+        into the settings) plus the maximized flag. While maximized,
+        ``normalGeometry()`` is the right value, but on some platforms --
+        including the offscreen test platform -- it is invalid in that
+        state; ``geometry()`` is then used instead (the saved rect is
+        sanitized on restore anyway). While fullscreen the WM owns the
+        surface, so nothing is persisted.
+        """
+        if self.isFullScreen():
+            return None
+        maximized = self.isMaximized()
+        rect = self.normalGeometry() if maximized else self.geometry()
+        if not rect.isValid():
+            rect = self.geometry()
+        if not rect.isValid():
+            return None
+        return _encode_geometry(rect, maximized)
+
     def _persist_defaults(self) -> bool:
-        """Persist current widget values as non-sensitive defaults (Issue #17).
+        """Persist current widget values as non-sensitive defaults (Issue #17)
+        plus the window geometry (Issue #18).
 
         Single persist path shared by the run and close call sites -- no
         duplicated key lists. Reads the widgets (not a prior run's GuiState),
         so closing WITHOUT having started a run still saves the folder
-        selections. A settings-write failure is logged, never raised: it must
-        not block or crash window close. Returns True on success.
+        selections and the window geometry. A settings-write failure is
+        logged, never raised: it must not block or crash window close.
+        Returns True on success.
         """
         try:
             state = self._state_from_widgets()
-            self._settings_store.update(
-                default_library_root=state.library_root,
-                default_original_dir=state.original_dir,
-                default_staging_dir=state.staging_dir,
-                default_output_dir=state.output_dir,
-                online=state.online,
-                refresh_metadata=state.refresh_metadata,
-                require_artwork=state.require_artwork,
-                verify_only=state.verify_only,
-                export_gate_acknowledged=state.export_gate_acknowledged,
-                advanced_mode=self._cb_advanced.isChecked(),
-            )
+            changes: dict = {
+                "default_library_root": state.library_root,
+                "default_original_dir": state.original_dir,
+                "default_staging_dir": state.staging_dir,
+                "default_output_dir": state.output_dir,
+                "online": state.online,
+                "refresh_metadata": state.refresh_metadata,
+                "require_artwork": state.require_artwork,
+                "verify_only": state.verify_only,
+                "export_gate_acknowledged": state.export_gate_acknowledged,
+                "advanced_mode": self._cb_advanced.isChecked(),
+            }
+            geometry = self._current_persist_geometry()
+            if geometry is not None:
+                changes["window_geometry"] = geometry
+            self._settings_store.update(**changes)
             return True
         except Exception as exc:  # pragma: no cover - filesystem failure path
             logger.debug("settings persist failed (non-fatal): %s", exc)
@@ -622,8 +803,9 @@ class MainWindow(QMainWindow):
     # --- close ----------------------------------------------------------------
     def closeEvent(self, event: QEvent) -> None:
         # (Issue #17) Persist current folder/option defaults on normal exit so a
-        # session that never started a run still survives the close/reopen cycle.
-        # Never blocks or crashes the close (see _persist_defaults).
+        # session that never started a run still survives the close/reopen cycle;
+        # (Issue #18) the same call also persists the window geometry. Never
+        # blocks or crashes the close (see _persist_defaults).
         self._persist_defaults()
         if self._cancel_event is not None:
             self._cancel_event.set()
