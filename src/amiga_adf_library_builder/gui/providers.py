@@ -132,28 +132,32 @@ def _playmatch_field_defaults() -> list[ProviderField]:
     return [
         ProviderField(
             key="base_url",
-            label="Base URL",
+            label="Server address",
             default="https://api.playmatch.example/v1",
             placeholder="https://api.playmatch.example/v1",
-            help_text="Self-hosted Playmatch endpoint. Only the public sha256 is transmitted.",
+            help_text=(
+                "Address of your Playmatch server. Only the public hash of "
+                "each disk is ever sent — the disk itself never leaves this "
+                "machine."
+            ),
         ),
         ProviderField(
             key="timeout_seconds",
-            label="Timeout (s)",
+            label="Time limit per request (seconds)",
             default="10.0",
-            help_text="Request timeout (bounded; cannot exceed 30s by policy).",
+            help_text="How long to wait for the server before giving up (capped at 30 seconds).",
         ),
         ProviderField(
             key="max_response_bytes",
-            label="Max response bytes",
+            label="Maximum response size (bytes)",
             default="1000000",
-            help_text="Response size cap (DoS defense).",
+            help_text="Refuse to read more than this from the server (protection against oversized replies).",
         ),
         ProviderField(
             key="confidence_threshold",
-            label="Confidence threshold",
+            label="Minimum match confidence",
             default="0.9",
-            help_text="Minimum confidence to auto-accept a match.",
+            help_text="A result is accepted automatically only if the server is at least this confident (0–1).",
         ),
     ]
 
@@ -245,10 +249,10 @@ class PlaymatchProvider(Provider):
     def status(self) -> ProviderStatus:
         with self._lock:
             if not self._enabled:
-                return ProviderStatus(ok=True, message="disabled", configured=self.is_configured())
+                return ProviderStatus(ok=True, message="Turned off", configured=self.is_configured())
             if not self.is_configured():
-                return ProviderStatus(ok=False, message="base URL not set", configured=False)
-            return ProviderStatus(ok=True, message="configured", configured=True)
+                return ProviderStatus(ok=False, message="Not set up yet — enter the server address below", configured=False)
+            return ProviderStatus(ok=True, message="Ready", configured=True)
 
     def test_connection(self) -> ProviderStatus:
         # The core provider performs the real SSRF-guarded fetch lazily; the GUI
@@ -272,34 +276,34 @@ def _hasheous_field_defaults() -> list[ProviderField]:
     return [
         ProviderField(
             key="base_url",
-            label="Base URL",
+            label="Server address",
             default="https://api.hasheous.example/v1",
             placeholder="https://api.hasheous.example/v1",
-            help_text="Self-hosted Hasheous endpoint. Unauthenticated hash lookup.",
+            help_text="Address of your Hasheous server. No sign-in is needed for lookups.",
         ),
         ProviderField(
             key="timeout_seconds",
-            label="Timeout (s)",
+            label="Time limit per request (seconds)",
             default="10.0",
-            help_text="Request timeout (bounded; cannot exceed 30s by policy).",
+            help_text="How long to wait for the server before giving up (capped at 30 seconds).",
         ),
         ProviderField(
             key="max_response_bytes",
-            label="Max response bytes",
+            label="Maximum response size (bytes)",
             default="1000000",
-            help_text="Response size cap (DoS defense).",
+            help_text="Refuse to read more than this from the server (protection against oversized replies).",
         ),
         ProviderField(
             key="confidence_threshold",
-            label="Confidence threshold",
+            label="Minimum match confidence",
             default="0.9",
-            help_text="Minimum confidence to auto-accept a match.",
+            help_text="A result is accepted automatically only if the server is at least this confident (0–1).",
         ),
         ProviderField(
             key="respect_rate_limit",
-            label="Respect rate limit (429)",
+            label="Honor the server's rate limits",
             default="true",
-            help_text="Honor HTTP 429 + Retry-After (ToS).",
+            help_text="Pause and retry when the server asks us to slow down.",
         ),
     ]
 
@@ -397,10 +401,10 @@ class HasheousProvider(Provider):
     def status(self) -> ProviderStatus:
         with self._lock:
             if not self._enabled:
-                return ProviderStatus(ok=True, message="disabled", configured=self.is_configured())
+                return ProviderStatus(ok=True, message="Turned off", configured=self.is_configured())
             if not self.is_configured():
-                return ProviderStatus(ok=False, message="base URL not set", configured=False)
-            return ProviderStatus(ok=True, message="configured", configured=True)
+                return ProviderStatus(ok=False, message="Not set up yet — enter the server address below", configured=False)
+            return ProviderStatus(ok=True, message="Ready", configured=True)
 
     def test_connection(self) -> ProviderStatus:
         # Real fetch is performed lazily by the core provider under SSRF guards.

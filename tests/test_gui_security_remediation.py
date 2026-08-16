@@ -190,7 +190,7 @@ def test_f2_locked_vault_set_credentials_raises_clear_path_not_escape(qt_offscre
         mwmod.QMessageBox.critical = orig_critical
 
     assert "title" in captured, "no clear error path was produced"
-    assert captured["title"] == "Vault is locked"
+    assert captured["title"] == "Credential store is locked"
     # The token must never have been written to the (locked) vault. Reading a
     # locked vault raises SecretError, which proves the secret was not stored.
     try:
@@ -302,7 +302,7 @@ def test_f6_master_password_dialog_warns_unrecoverable(qt_offscreen):
     # The warning text must communicate unrecoverability + password manager.
     texts = [w.text() for w in dlg.findChildren(QLabel)]
     combined = " ".join(texts).lower()
-    assert "unrecoverable" in combined, f"warning missing: {texts}"
+    assert "cannot be recovered" in combined, f"warning missing: {texts}"
     assert "password manager" in combined, f"warning missing: {texts}"
     # set mode must require a confirm field (F6).
     assert dlg._confirm is not None
