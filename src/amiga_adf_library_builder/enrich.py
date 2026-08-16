@@ -11,9 +11,10 @@ from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from . import artwork as artwork_mod
+from .logging_utils import redact
 from .metadata import MetadataRecord, cache_key, guard_url, lookup_metadata
 from .playmatch import PlaymatchMatchMethod
 from .hasheous import HasheousMatchMethod
@@ -445,7 +446,8 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                  metadata_cache_dir: Optional[Path] = None, curated_metadata_dir: Optional[Path] = None,
                  online: bool = False, refresh: bool = False,
                  local_media_provider=None, playmatch_provider=None,
-                 hasheous_provider=None) -> EnrichResult:
+                 hasheous_provider=None,
+                 activity: Optional[Callable[[str], None]] = None) -> EnrichResult:
     metadata_cache_dir = Path(metadata_cache_dir or (Path(nfo_dir).parent / "metadata-cache"))
     curated_metadata_dir = Path(curated_metadata_dir or (Path(nfo_dir).parent / "metadata-curated"))
     notes: list[str] = []
@@ -453,6 +455,19 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
     metadata: Optional[MetadataRecord] = None
     provider = "offline"
     metadata_path: Optional[Path] = None
+
+    # (Issue #21) live activity hook: one plain-language, redacted line per
+    # notable step, prefixed with the release title. Optional and safe: a
+    # missing/failed callback never affects enrichment.
+    _title = group.title or group.release_key
+
+    def _act(msg: str) -> None:
+        if activity is None:
+            return
+        try:
+            activity(f"{_title}: {redact(str(msg))}")
+        except Exception:  # logging must never break enrichment
+            pass
 
     # manual-approval feature: approved source URLs from a matched manual-approval record.
     # Forced as provenance (and as the metadata/artwork source where the role
@@ -467,6 +482,11 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
             category=EnrichCategory.METADATA_LOOKUP,
             detail=f"query={lookup_title!r}", cache=("refresh" if refresh else "miss"),
         ))
+        _act(
+            "Looking up metadata online (refreshing cached copy)."
+            if refresh
+            else "Looking up metadata online…"
+        )
         try:
             metadata, provider, relevance_events = lookup_metadata(
                 lookup_title, cache_dir=metadata_cache_dir,
@@ -492,6 +512,7 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                         ok=False, error=rev["reason"],
                     ))
             if metadata:
+                _act(f"Metadata found (source: {provider}).")
                 notes.append(f"metadata lookup: {provider}")
                 events.append(EnrichEvent(
                     category=EnrichCategory.METADATA_LOOKUP,
@@ -510,12 +531,14 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                         detail="refreshed cached metadata record", cache="refresh",
                     ))
             else:
+                _act("No metadata found from online sources.")
                 notes.append("metadata lookup: not-found")
                 events.append(EnrichEvent(
                     category=EnrichCategory.METADATA_NOT_FOUND,
                     detail="online lookup returned no record", cache="miss",
                 ))
         except Exception as exc:
+            _act(f"Online lookup problem: {exc}")
             notes.append(f"metadata lookup failed: {exc}")
             events.append(EnrichEvent(
                 category=EnrichCategory.METADATA_NOT_FOUND,
@@ -526,12 +549,14 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
         metadata = load_cached(metadata_cache_dir, lookup_title)
         if metadata:
             provider = "cache"
+            _act("Using a cached metadata copy (offline).")
             notes.append("reused cached metadata offline")
             events.append(EnrichEvent(
                 category=EnrichCategory.CACHE_HIT,
                 detail="reused cached metadata record", cache="hit",
             ))
         else:
+            _act("No cached metadata available (offline).")
             notes.append("offline; no cached metadata")
             events.append(EnrichEvent(
                 category=EnrichCategory.CACHE_MISS,
@@ -743,7 +768,9 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
         events.extend(lm_events)
         if lm_master is not None:
             master = lm_master
+            _act("Found artwork in a local library.")
     if online and metadata and metadata.artwork_url and master is None:
+        _act("Fetching artwork online…")
         events.append(EnrichEvent(
             category=EnrichCategory.ARTWORK_LOOKUP,
             detail="downloading artwork master from metadata URL",
@@ -756,7 +783,9 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                 category=EnrichCategory.ARTWORK_GENERATED,
                 detail="downloaded artwork master", url=metadata.artwork_url, ok=True,
             ))
+            _act("Artwork downloaded and ready.")
         except Exception as exc:
+            _act(f"Artwork download failed: {exc}")
             notes.append(f"artwork download failed: {exc}")
             events.append(EnrichEvent(
                 category=EnrichCategory.ARTWORK_DOWNLOAD_FAILED,
@@ -764,6 +793,7 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                 url=metadata.artwork_url, ok=False, error=str(exc),
             ))
     elif online and metadata and not metadata.artwork_url and master is None:
+        _act("No artwork image found for this release.")
         events.append(EnrichEvent(
             category=EnrichCategory.ARTWORK_URL_NOT_FOUND,
             detail="metadata present but no artwork URL to download", ok=False,
@@ -787,7 +817,9 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                 category=EnrichCategory.ARTWORK_GENERATED,
                 detail="resized artwork to Gotek master", ok=True,
             ))
+            _act("Artwork processed to final size.")
         except Exception as exc:
+            _act(f"Artwork processing failed: {exc}")
             notes.append(f"artwork processing failed: {exc}")
             # A corrupt/unsupported source image fails at Image.open()/decode,
             # which is a distinct failure from a genuine resize/processing error.
@@ -806,6 +838,7 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                     ok=False, error=str(exc),
                 ))
     else:
+        _act("No artwork available for this release.")
         notes.append("no artwork master available")
         events.append(EnrichEvent(
             category=EnrichCategory.ARTWORK_SKIPPED,
@@ -881,12 +914,23 @@ def enrich_all(groups: list[ReleaseGroup], *, nfo_dir: Path, scans: list[ScanRec
                curated_metadata_dir: Optional[Path] = None,
                online: bool = False, refresh: bool = False,
                local_media_provider=None, playmatch_provider=None,
-               hasheous_provider=None) -> list[EnrichResult]:
+               hasheous_provider=None,
+               activity: Optional[Callable[[str], None]] = None) -> list[EnrichResult]:
     scan_map = {s.filename: s for s in scans}
     metadata_cache_dir = Path(metadata_cache_dir or (Path(nfo_dir).parent / "metadata-cache"))
     curated_metadata_dir = Path(curated_metadata_dir or (Path(nfo_dir).parent / "metadata-curated"))
-    return [
-        enrich_group(group, nfo_dir=nfo_dir, scans=scan_map,
+    total = len(groups)
+    results: list[EnrichResult] = []
+    for idx, group in enumerate(groups, start=1):
+        if activity is not None:
+            try:
+                activity(
+                    f"Preparing release {idx} of {total}"
+                    + (f": {group.title}" if group.title else "")
+                )
+            except Exception:  # logging must never break the run
+                pass
+        results.append(enrich_group(group, nfo_dir=nfo_dir, scans=scan_map,
                      artwork_original_dir=artwork_original_dir,
                      artwork_processed_dir=artwork_processed_dir,
                      metadata_cache_dir=metadata_cache_dir,
@@ -894,6 +938,6 @@ def enrich_all(groups: list[ReleaseGroup], *, nfo_dir: Path, scans: list[ScanRec
                      online=online, refresh=refresh,
                      local_media_provider=local_media_provider,
                      playmatch_provider=playmatch_provider,
-                     hasheous_provider=hasheous_provider)
-        for group in groups
-    ]
+                     hasheous_provider=hasheous_provider,
+                     activity=activity))
+    return results

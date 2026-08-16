@@ -12,12 +12,13 @@ import itertools
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from . import artwork as artwork_mod
 from . import catalog, enrich, exporter, grouper, quarantine, scanner
 from .enrich import VERIFIED_ARTWORK_WIDTH, VERIFIED_ARTWORK_HEIGHT
 from .exporter_guard import export_gate_open
+from .logging_utils import redact
 from .models import ParsedRecord, ReleaseGroup, ScanRecord
 from .parser import parse_filename
 from .naming import release_basename
@@ -60,12 +61,26 @@ def run_pipeline(
     rtfm_config_path: Optional[str] = None,
     playmatch_config_path: Optional[str] = None,
     hasheous_config_path: Optional[str] = None,
+    activity: Optional[Callable[[str], None]] = None,
 ) -> dict:
     """Execute phases 2-4, 5 (optional), and 6. Returns a result summary dict.
 
     All filesystem locations come from ``cfg`` (:class:`PathConfig`). The
     original corpus (``cfg.original_dir``) is read-only throughout.
+
+    ``activity`` (issue #21): optional live-log hook. When given, the pipeline
+    reports each major milestone (scan, grouping, enrichment, export) as one
+    plain-language line. The hook is optional and safe: a missing or failing
+    callback never changes pipeline behavior. CLI callers omit it, so CLI
+    output is byte-identical to before.
     """
+    def _act(msg: str) -> None:
+        if activity is None:
+            return
+        try:
+            activity(redact(str(msg)))
+        except Exception:  # logging must never break the pipeline
+            pass
     library_root = cfg.library_root
     original_dir = cfg.original_dir
     catalog_dir = cfg.catalog_dir
@@ -80,12 +95,16 @@ def run_pipeline(
     run_id = run_id or _run_id()
 
     # Phase 2: scan (read-only) + parse.
+    _act(f"Scanning {redact(str(original_dir))} for .adf files…")
     scans = scanner.scan_intake(original_dir)
     scan_map = {s.filename: s for s in scans}
     records: list[ParsedRecord] = [parse_filename(s.filename) for s in scans]
+    _act(f"Found {len(scans)} .adf file(s); {len(records)} record(s) parsed.")
 
     # Phase 3: group.
+    _act("Grouping files into releases…")
     groups: list[ReleaseGroup] = grouper.group_records(records)
+    _act(f"Prepared {len(groups)} release(s).")
 
     # manual-approval feature: apply operator manual approvals BEFORE enrich + quarantine so an
     # approved special-only set is retitled, de-quarantined, and routed for
@@ -170,6 +189,12 @@ def run_pipeline(
                 hasheous_provider.discover()
         except Exception:  # provider failure must not break the pipeline
             hasheous_provider = None
+    _act(
+        f"Filling in missing metadata for {len(groups)} release(s) "
+        + ("from online sources (this can take a while)."
+           if online
+           else "from cached copies (offline).")
+    )
     enrich_results = enrich.enrich_all(
         groups,
         nfo_dir=nfo_dir,
@@ -183,7 +208,9 @@ def run_pipeline(
         local_media_provider=local_media_provider,
         playmatch_provider=playmatch_provider,
         hasheous_provider=hasheous_provider,
+        activity=activity,
     )
+    _act("Metadata and artwork preparation complete.")
 
     # Phase 4b: RTFM deterministic manual sidecar build (M1; offline, NO-AI).
     # Built only when an [rtfm] config is present and enabled. Strictly read-only
@@ -206,14 +233,20 @@ def run_pipeline(
             rtfm_results = []
 
     # Phase 6: quarantine routing for flagged groups.
+    _act("Checking for releases that need review…")
     quarantine_summary = quarantine.route_quarantine(
         groups, review_dir=review_dir, unknown_dir=unknown_dir, scans=scan_map
+    )
+    _act(
+        f"Sent {len(quarantine_summary['review'])} release(s) to review; "
+        f"{len(quarantine_summary['unknown'])} set aside as unrecognized."
     )
 
     # Phase 5: Gotek export (gated). Runs only when requested AND the gate is
     # open. Writes exclusively to a run-owned staging dir; never the SD card.
     export_result = None
     if export:
+        _act("Preparing the export…")
         export_result = exporter.export_all(
             groups,
             staging_dir=cfg.staging_dir,
@@ -228,6 +261,11 @@ def run_pipeline(
             original_dir=original_dir,
             verify_only=verify_only,
             require_artwork=require_artwork,
+        )
+        _act(
+            f"Export finished: {export_result.releases_exported} release(s), "
+            f"{export_result.folders_written} folder(s) written to "
+            f"{redact(str(export_result.staging_root))}."
         )
 
     # Phase 5 gate check (report even when export not requested).

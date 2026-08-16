@@ -104,6 +104,7 @@ def build_pipeline_kwargs(
     cfg: PathConfig,
     *,
     config_path: Optional[str] = None,
+    activity: Optional[Any] = None,
 ) -> dict:
     """Build the ``run_pipeline`` keyword arguments from GUI state (CLI-equivalent).
 
@@ -120,6 +121,10 @@ def build_pipeline_kwargs(
     Provider config paths: the GUI passes the same file the CLI would
     (``--config``), unless an explicit provider config path is set. The core
     resolves ``[playmatch]``/``[hasheous]``/``[rtfm]``/``[local_media]`` from it.
+
+    ``activity`` (issue #21): optional live-log callback forwarded to the
+    pipeline as a plain-language activity hook. Omitted (absent) when ``None``,
+    so CLI<->GUI equivalence and non-GUI callers are unchanged.
     """
     provider_cfg = state.provider_config_path or config_path or None
     kwargs: dict[str, Any] = {
@@ -137,4 +142,6 @@ def build_pipeline_kwargs(
         "playmatch_config_path": provider_cfg,
         "hasheous_config_path": provider_cfg,
     }
+    if activity is not None:
+        kwargs["activity"] = activity
     return kwargs
