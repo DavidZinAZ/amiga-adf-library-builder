@@ -112,3 +112,34 @@ enabled = false
 # confidence_threshold = 0.9
 # cache_ttl = 0  # seconds; <= 0 disables canonical-reuse cache
 
+
+# --- Issue #14 LaunchBox Games Database online provider (BLOCKED) --------------
+# FEASIBILITY: INFEASIBLE / BLOCKED — see docs/issue14-launchbox-gamesdb-feasibility.md
+#
+# No official public API exists (confirmed by LaunchBox feedback portal: the
+# "Public API Access" request is OPEN, not implemented). The ONLY officially
+# supported third-party access path is the LOCAL LaunchBox Desktop plugin model
+# (parse the user's local LaunchBox.Metadata.db / Unbroken.LaunchBox.Plugins.Data
+# namespace) — an in-app plugin, NOT a standalone online provider. That does not
+# satisfy ISS-14's standalone external provider requirement.
+# The remaining accessible artifact is Metadata.zip (daily XML dump), which
+# carries no explicit license for third-party automated access, caching, or
+# image redistribution. Image URLs can be constructed from the XML, but no terms
+# authorize external automated retrieval or redistribution.
+#
+# This placeholder remains DISABLED by default and is NON-FUNCTIONAL. It mirrors
+# the proposed issue #14 config shape for future reference only. Implementation is
+# gated behind a compliant access path (official API + explicit integration terms).
+#
+#[launchbox_gamesdb]
+#enabled = false
+#metadata_enabled = true
+#artwork_enabled = true
+#preferred_regions = ["us", "eu", "wor"]
+#cache_enabled = true
+#metadata_zip_url = "https://gamesdb.launchbox-app.com/Metadata.zip"
+#image_base_url = ""        # Constructed from XML; no documented schema/terms
+#api_base_url = ""          # No public API endpoint exists
+#require_explicit_opt_in = true
+#attribution = "LaunchBox Games Database"
+
