@@ -351,7 +351,7 @@ def test_enrich_emits_relevance_rejected_event(tmp_path: Path):
     orig = enrich_mod.lookup_metadata
 
     def fake_lookup(title, *, cache_dir, curated_dir, refresh=False, timeout=20.0,
-                    group=None, opener=None):
+                    group=None, opener=None, **kwargs):
         return (None, "not-found", [{
             "provider": "wikipedia",
             "canonical_title": "Example Galaxy Raiders",

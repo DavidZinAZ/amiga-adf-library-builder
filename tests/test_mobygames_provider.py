@@ -54,16 +54,35 @@ def _raise_opener(log: list[str], msg="synthetic provider failure"):
 
 
 def _wiki_opener(log: list[str]):
-    """Fake opener answering the Wikipedia API call (fallback provider)."""
-    payload = {
-        "query": {"pages": [{
-            "pageid": 777,
-            "title": "Wikipedia Fallback Game",
-            "extract": "Wikipedia Fallback Game is a strategy video game released for the Amiga.",
-            "fullurl": "https://en.wikipedia.org/wiki/Wikipedia_Fallback_Game",
-        }]}
-    }
-    return _json_opener(payload, log)
+    """Fake opener answering the Wikipedia search API call (fallback provider).
+
+    Echoes the requested title back (parsed from the gsrsearch query) so the
+    shared relevance validator accepts the Wikipedia fallback candidate —
+    matching the current main lookup_metadata contract where every provider
+    (including the unkeyed Wikipedia fallback) is relevance-gated.
+    """
+    import re as _re
+    import urllib.parse as _up
+
+    def opener(request, timeout=0):
+        log.append(request.full_url)
+        qs = _up.urlparse(request.full_url).query
+        params = _up.parse_qs(qs)
+        raw = (params.get("gsrsearch") or [""])[0]
+        # gsrsearch looks like: '"Star Voyage" Amiga video game'
+        m = _re.search(r'"([^"]+)"', raw)
+        title = m.group(1) if m else "Wikipedia Fallback Game"
+        payload = {
+            "query": {"pages": [{
+                "pageid": 777,
+                "title": title,
+                "extract": f"{title} is a strategy video game released for the Amiga.",
+                "fullurl": f"https://en.wikipedia.org/wiki/{_up.quote(title)}",
+            }]}
+        }
+        return _json_opener(payload, log)(request, timeout)
+
+    return opener
 
 
 # --- synthetic MobyGames fixtures ----------------------------------------------
@@ -184,7 +203,7 @@ def test_mobygames_failure_falls_through_to_wikipedia(monkeypatch, tmp_path):
             }]}
         }).encode())
 
-    record, provider = lookup_metadata(
+    record, provider, _ = lookup_metadata(
         "Wikipedia Fallback Game", cache_dir=tmp_path / "cache",
         curated_dir=tmp_path / "curated", opener=opener,
         mobygames_enabled=True,
@@ -200,7 +219,7 @@ def test_mobygames_lookup_exception_does_not_escape_lookup_metadata(monkeypatch,
     monkeypatch.setenv("MOBYGAMES_API_KEY", "synthetic-mobygames-test-key")
     # Every provider fails (mobygames raises, wikipedia raises): lookup must
     # degrade to not-found, never raise.
-    record, provider = lookup_metadata(
+    record, provider, _ = lookup_metadata(
         "Anything", cache_dir=tmp_path / "cache", curated_dir=tmp_path / "curated",
         opener=_raise_opener([]), mobygames_enabled=True,
     )
@@ -218,7 +237,7 @@ def test_second_lookup_hits_cache_without_network(monkeypatch, tmp_path):
     log: list[str] = []
     payload = {"games": [_amiga_game()]}
 
-    first, provider1 = lookup_metadata(
+    first, provider1, _ = lookup_metadata(
         "Star Voyage", cache_dir=cache, curated_dir=curated,
         opener=_json_opener(payload, log), mobygames_enabled=True,
     )
@@ -229,7 +248,7 @@ def test_second_lookup_hits_cache_without_network(monkeypatch, tmp_path):
     calls_after_first = len([u for u in log if u.startswith(MOBY_URL_PREFIX)])
     assert calls_after_first == 1
 
-    second, provider2 = lookup_metadata(
+    second, provider2, _ = lookup_metadata(
         "Star Voyage", cache_dir=cache, curated_dir=curated,
         opener=_raise_opener([]), mobygames_enabled=True,  # network is now impossible
     )
@@ -346,7 +365,7 @@ def test_enabled_but_keyless_is_noop(monkeypatch, tmp_path):
     monkeypatch.delenv("RAWG_API_KEY", raising=False)
     _env_key(monkeypatch, value=None)
     log: list[str] = []
-    record, provider = lookup_metadata(
+    record, provider, _ = lookup_metadata(
         "Star Voyage", cache_dir=tmp_path / "cache", curated_dir=tmp_path / "curated",
         opener=_wiki_opener(log), mobygames_enabled=True,
     )
@@ -361,7 +380,7 @@ def test_keyed_but_disabled_is_noop(monkeypatch, tmp_path):
     monkeypatch.delenv("RAWG_API_KEY", raising=False)
     _env_key(monkeypatch, value="synthetic-mobygames-test-key")
     log: list[str] = []
-    record, provider = lookup_metadata(
+    record, provider, _ = lookup_metadata(
         "Star Voyage", cache_dir=tmp_path / "cache", curated_dir=tmp_path / "curated",
         opener=_wiki_opener(log),  # mobygames_enabled defaults to False
     )
@@ -377,7 +396,7 @@ def test_default_lookup_metadata_signature_is_unchanged(monkeypatch, tmp_path):
     monkeypatch.delenv("RAWG_API_KEY", raising=False)
     _env_key(monkeypatch, value="synthetic-mobygames-test-key")
     log: list[str] = []
-    record, provider = lookup_metadata(
+    record, provider, _ = lookup_metadata(
         "Star Voyage", cache_dir=tmp_path / "cache", curated_dir=tmp_path / "curated",
         opener=_wiki_opener(log),
     )
@@ -391,7 +410,7 @@ def test_custom_api_key_env_is_honored(monkeypatch, tmp_path):
     monkeypatch.setenv("CUSTOM_MG_KEY", "synthetic-custom-key")
     log: list[str] = []
     payload = {"games": [_amiga_game()]}
-    record, provider = lookup_metadata(
+    record, provider, _ = lookup_metadata(
         "Star Voyage", cache_dir=tmp_path / "cache", curated_dir=tmp_path / "curated",
         opener=_json_opener(payload, log), mobygames_enabled=True,
         mobygames_api_key_env="CUSTOM_MG_KEY",
