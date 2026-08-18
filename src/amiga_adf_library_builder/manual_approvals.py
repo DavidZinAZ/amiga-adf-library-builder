@@ -45,6 +45,8 @@ HOST_ALLOWLIST: frozenset[str] = frozenset(
         "halloflight.amiga32.org",
         "wikipedia.org",
         "rawg.io",
+        "mobygames.com",
+        "images.mobygames.com",
     }
 )
 

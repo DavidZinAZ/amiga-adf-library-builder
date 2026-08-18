@@ -21,10 +21,13 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from .manual_approvals import validate_source_url
+
 USER_AGENT = "AmigaADFLibraryBuilder/0.2.1 (+preservation metadata client)"
 _ALLOWED_ARTWORK_PAGE_HOSTS = {
     "www.lemonamiga.com", "lemonamiga.com", "amiga.abime.net",
     "www.openretro.org", "openretro.org", "amiga.lychesis.net",
+    "www.mobygames.com", "mobygames.com", "images.mobygames.com",
 }
 
 
@@ -580,6 +583,126 @@ def rawg_lookup(title: str, *, api_key: str, timeout: float = 20.0,
     )
 
 
+def mobygames_lookup(title: str, *, api_key: str, timeout: float = 20.0,
+                     opener: Optional[Callable[..., Any]] = None) -> Optional[MetadataRecord]:
+    """Search MobyGames for a title and return a MetadataRecord if an Amiga
+    release of a clearly-matching game exists.
+
+    Uses the ``/games`` endpoint in ``normal`` format, which returns per game a
+    ``platforms`` array (``platform_name`` / ``first_release_date``), a
+    ``sample_cover`` (with its own ``platforms`` list), a ``sample_screenshots``
+    array, ``genres``, ``moby_url`` and ``description`` -- all of which we need.
+    This is a single verified-shape request: no second detail fetch, no reading
+    of fields the response does not carry.
+
+    The ``platform`` query parameter requires an integer platform ID, so we do
+    NOT pass it. Instead we search by ``title`` (case-insensitive substring) and
+    filter client-side to games released on an Amiga platform, then rank by
+    title similarity. Matches below a confidence floor are rejected rather than
+    silently chosen (mirrors the Wikipedia relevance floor).
+
+    The API key is passed as the ``api_key`` query argument (URL-encoded). All
+    HTTP goes through :func:`_json_get` with an injectable ``opener`` for tests.
+    Every artwork URL we emit is validated against the ratified
+    :func:`validate_source_url` guard before it is returned; a URL that fails
+    validation is dropped (no artwork) rather than returned.
+    """
+    # Title-only search. The `platform` param is an integer ID and is
+    # intentionally omitted -- we filter to Amiga client-side below.
+    params = {"api_key": api_key, "title": title, "format": "normal", "limit": "25"}
+    data = _json_get(
+        "https://api.mobygames.com/v1/games?" + urllib.parse.urlencode(params),
+        timeout=timeout, opener=opener,
+    )
+    games = [g for g in (data.get("games") or []) if isinstance(g, dict)]
+    if not games:
+        return None
+    target = _norm(title)
+
+    # Keep only games released on at least one Amiga platform.
+    amiga_games: list[tuple[float, dict, list[str]]] = []
+    for game in games:
+        platforms = [
+            str(p.get("platform_name") or "")
+            for p in (game.get("platforms") or []) if isinstance(p, dict)
+        ]
+        amiga_platforms = [p for p in platforms if "amiga" in p.lower()]
+        if not amiga_platforms:
+            continue
+        ratio = SequenceMatcher(None, target, _norm(str(game.get("title") or ""))).ratio()
+        amiga_games.append((ratio, game, amiga_platforms))
+    if not amiga_games:
+        return None
+
+    # Deterministic best match: highest title similarity, ties broken by the
+    # lower game_id (stable, no dict-order dependence).
+    amiga_games.sort(key=lambda item: (-item[0], int(item[1].get("game_id") or 0)))
+    best_ratio, game, amiga_platforms = amiga_games[0]
+    if best_ratio < 0.60:
+        # Ambiguous or unrelated title -- reject rather than silently choose.
+        return None
+    game_id = game.get("game_id")
+    if not game_id:
+        return None
+
+    # Year: earliest Amiga first_release_date (string "YYYY", "YYYY-MM" or
+    # "YYYY-MM-DD"); take the 4-char year prefix.
+    dates = []
+    for p in (game.get("platforms") or []):
+        if not isinstance(p, dict):
+            continue
+        name = str(p.get("platform_name") or "")
+        if "amiga" in name.lower():
+            d = str(p.get("first_release_date") or "")
+            if d:
+                dates.append(d)
+    dates.sort()
+    year = dates[0][:4] if dates else ""
+
+    # Artwork: prefer a sample_cover that actually covers an Amiga platform
+    # (or an unspecified platform), else the first sample screenshot. Every
+    # candidate is validated by the ratified guard before it may be emitted.
+    artwork_url = ""
+    cover = game.get("sample_cover") or {}
+    cover_platforms = {str(x).lower() for x in (cover.get("platforms") or [])}
+    amiga_names = {n.lower() for n in amiga_platforms}
+    cover_image = str(cover.get("image") or "")
+    cover_is_amiga = bool(cover_image) and (not cover_platforms or bool(cover_platforms & amiga_names))
+    if cover_is_amiga:
+        ok, _reason = validate_source_url(cover_image)
+        if ok:
+            artwork_url = cover_image
+    if not artwork_url:
+        for shot in (game.get("sample_screenshots") or []):
+            img = str((shot or {}).get("image") or "")
+            if img:
+                ok, _reason = validate_source_url(img)
+                if ok:
+                    artwork_url = img
+                    break
+
+    source_url = str(game.get("moby_url") or f"https://www.mobygames.com/game/{game_id}")
+    ok_src, _ = validate_source_url(source_url)
+    if not ok_src:
+        source_url = ""
+    return MetadataRecord(
+        canonical_title=str(game.get("title") or title),
+        description=re.sub(r"<[^>]+>", "", str(game.get("description") or "")).strip(),
+        year=year,
+        genres=[str(g.get("genre_name") or "") for g in (game.get("genres") or []) if isinstance(g, dict) and g.get("genre_name")],
+        platforms=amiga_platforms,
+        source_url=source_url,
+        artwork_url=artwork_url,
+        artwork_source_url=source_url if artwork_url else "",
+        artwork_provider="mobygames" if artwork_url else "",
+        provider="mobygames",
+        provider_id=str(game_id),
+        retrieved_at=utc_now(),
+        confidence=min(round(best_ratio, 4), 1.0),
+        query=title,
+    )
+
+
 def _discover_curated_artwork(record: MetadataRecord, title: str, *, timeout: float,
                               opener: Optional[Callable[..., Any]]) -> None:
     pages = list(dict.fromkeys(record.artwork_page_urls))
@@ -603,8 +726,20 @@ def _discover_curated_artwork(record: MetadataRecord, title: str, *, timeout: fl
 def lookup_metadata(title: str, *, cache_dir: Path, curated_dir: Path,
                     refresh: bool = False, timeout: float = 20.0,
                     group: Any = None,
-                    opener: Optional[Callable[..., Any]] = None
+                    opener: Optional[Callable[..., Any]] = None,
+                    mobygames_enabled: bool = False,
+                    mobygames_api_key_env: str = "MOBYGAMES_API_KEY"
                     ) -> tuple[Optional[MetadataRecord], str, list[dict]]:
+    """Resolve metadata for ``title`` using the shared precedence chain.
+
+    Precedence (deterministic, highest first): curated -> cache -> keyed online
+    providers (RAWG, then MobyGames) -> Wikipedia (unkeyed fallback). A keyed
+    provider is only attempted when BOTH its config flag is enabled AND its API
+    key is present in the environment; otherwise it is a no-op and the chain
+    simply proceeds to the next provider. MobyGames is DISABLED BY DEFAULT
+    (``mobygames_enabled=False``), so the base app is unchanged unless an
+    operator opts in via the ``[mobygames]`` config table.
+    """
     curated = load_curated(curated_dir, title)
     if curated:
         # Preserve curated identity/facts. Wikipedia may supplement only missing
@@ -663,6 +798,11 @@ def lookup_metadata(title: str, *, cache_dir: Path, curated_dir: Path,
     if rawg_key:
         _try_provider("rawg",
                       lambda: rawg_lookup(title, api_key=rawg_key, timeout=timeout, opener=opener))
+    if accepted is None:
+        mobygames_key = os.environ.get(mobygames_api_key_env, "").strip() if mobygames_enabled else ""
+        if mobygames_key:
+            _try_provider("mobygames",
+                          lambda: mobygames_lookup(title, api_key=mobygames_key, timeout=timeout, opener=opener))
     if accepted is None:
         _try_provider("wikipedia",
                       lambda: wikipedia_lookup(title, timeout=timeout, opener=opener))

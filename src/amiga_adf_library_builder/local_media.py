@@ -194,6 +194,56 @@ class LocalMediaConfig:
         )
 
 
+# --- MobyGames Configuration -------------------------------------------------
+
+
+@dataclass(frozen=True)
+class MobyGamesConfig:
+    """Typed view of the ``[mobygames]`` TOML table.
+
+    This provider is OPTIONAL and DISABLED BY DEFAULT. The base app must
+    continue to work with no MobyGames config, no account, no network,
+    and no hard-coded credentials. The API key is read ONLY from the
+    environment variable specified by ``api_key_env`` (default:
+    ``MOBYGAMES_API_KEY``).
+    """
+
+    enabled: bool = False
+    api_key_env: str = "MOBYGAMES_API_KEY"
+    preferred_image_types: tuple[str, ...] = ("cover", "screenshot", "box")
+    timeout: float = 20.0
+
+    @classmethod
+    def from_dict(cls, data: Optional[dict]) -> "MobyGamesConfig":
+        if not data:
+            return cls(enabled=False)
+        raw = data or {}
+
+        def _as_tuple(v, default):
+            if v is None:
+                return default
+            if isinstance(v, str):
+                return (v,)
+            try:
+                return tuple(str(x) for x in v)
+            except TypeError:
+                return default
+
+        enabled = bool(raw.get("enabled", False))
+        api_key_env = str(raw.get("api_key_env", "MOBYGAMES_API_KEY")).strip() or "MOBYGAMES_API_KEY"
+        pit = _as_tuple(raw.get("preferred_image_types"), ("cover", "screenshot", "box"))
+        try:
+            timeout = float(raw.get("timeout", 20.0))
+        except (TypeError, ValueError):
+            timeout = 20.0
+        return cls(
+            enabled=enabled,
+            api_key_env=api_key_env,
+            preferred_image_types=pit,
+            timeout=timeout,
+        )
+
+
 # --- Data records ------------------------------------------------------------
 
 
@@ -1167,6 +1217,34 @@ def load_local_media_config(config_path) -> LocalMediaConfig:
     if not isinstance(data, dict):
         return LocalMediaConfig(enabled=False)
     return LocalMediaConfig.from_dict(data.get("local_media"))
+
+
+def load_mobygames_config(config_path) -> MobyGamesConfig:
+    """Return the ``[mobygames]`` table from a TOML config as a typed config.
+
+    The MobyGames provider is OPTIONAL and DISABLED BY DEFAULT. A missing file
+    or an absent ``[mobygames]`` table yields a disabled config (no-op), so the
+    base app is unaffected. The API key itself is never read here -- only the
+    name of the environment variable holding it (``api_key_env``).
+    """
+    try:
+        import tomllib
+    except ModuleNotFoundError as exc:  # pragma: no cover - 3.11+ always has it
+        raise LocalMediaError(
+            "mobygames config requires Python 3.11+ (tomllib)"
+        ) from exc
+
+    config_path = Path(config_path)
+    if not config_path.is_file():
+        return MobyGamesConfig(enabled=False)
+    try:
+        with open(config_path, "rb") as fh:
+            data = tomllib.load(fh)
+    except Exception as exc:  # malformed TOML
+        raise LocalMediaError(f"could not read config {config_path}: {exc}") from exc
+    if not isinstance(data, dict):
+        return MobyGamesConfig(enabled=False)
+    return MobyGamesConfig.from_dict(data.get("mobygames"))
 
 
 def _relative_to_root(path: Path, root: Path) -> str:
