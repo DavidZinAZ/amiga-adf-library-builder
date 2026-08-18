@@ -65,6 +65,35 @@ IMAGE_SUFFIXES: frozenset[str] = frozenset(
     {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tif", ".tiff"}
 )
 
+#: Manual document extensions discovered from configured manual roots
+#: (issue #33: multiple manual roots for PDF/TXT manuals).
+MANUAL_SUFFIXES: frozenset[str] = frozenset({".pdf", ".txt"})
+
+#: Representative LaunchBox image/media categories offered by the GUI asset-type
+#: selector (issue #33). Order is the order the GUI presents them; it is NOT a
+#: priority order (priority comes from ``preferred_image_types``).
+LAUNCHBOX_IMAGE_CATEGORIES: tuple[str, ...] = (
+    "Box - Front",
+    "Box - Back",
+    "Box - 3D",
+    "Disc",
+    "Clear Logo",
+    "Screenshot - Gameplay",
+    "Screenshot - Game Title",
+    "Screenshot - Game Select",
+    "Screenshot - Game Over",
+    "Fanart",
+    "Banner",
+    "Background",
+    "Music",
+    "Videos",
+    "Manual",
+)
+
+#: Fallback asset type for a bare-string typed media root whose folder name is
+#: not a recognized LaunchBox category.
+DEFAULT_MEDIA_ROOT_ASSET_TYPE = "Box - Front"
+
 #: Image-category folder names that carry NO per-game identity. Used by
 #: :attr:`LocalMediaCandidate.folder_chain_norm` to exclude the category level
 #: (and its variants) from the set of candidate game-title identities, so a
@@ -146,9 +175,86 @@ class LocalMediaDisabled(LocalMediaError):
 # --- Configuration -----------------------------------------------------------
 
 
+def _parse_media_roots(raw) -> tuple[MediaRoot, ...]:
+    """Parse ``media_roots`` entries: bare strings OR ``{path, asset_type}``.
+
+    A bare string becomes a typed root whose asset type is the folder's own
+    name when that name is a recognized LaunchBox category, else
+    :data:`DEFAULT_MEDIA_ROOT_ASSET_TYPE`. Entries without a usable path are
+    dropped (defensive: a malformed mapping must not break config loading).
+    """
+    if raw is None:
+        return ()
+    if isinstance(raw, (str, dict)):
+        raw = [raw]
+    out: list[MediaRoot] = []
+    for entry in raw:
+        if isinstance(entry, str):
+            path = entry.strip()
+            if not path:
+                continue
+            folder = Path(path).name
+            asset = folder if folder in CAT_SET_SKIP else DEFAULT_MEDIA_ROOT_ASSET_TYPE
+            out.append(MediaRoot(path=path, asset_type=asset))
+        elif isinstance(entry, dict):
+            path = str(entry.get("path") or "").strip()
+            if not path:
+                continue
+            asset = str(entry.get("asset_type") or "").strip() or DEFAULT_MEDIA_ROOT_ASSET_TYPE
+            out.append(MediaRoot(path=path, asset_type=asset))
+    return tuple(out)
+
+
+def _parse_manual_roots(raw) -> tuple[ManualRoot, ...]:
+    """Parse ``manual_roots`` entries: strings OR ``{path}`` tables."""
+    if raw is None:
+        return ()
+    if isinstance(raw, (str, dict)):
+        raw = [raw]
+    out: list[ManualRoot] = []
+    for entry in raw:
+        if isinstance(entry, str):
+            path = entry.strip()
+        elif isinstance(entry, dict):
+            path = str(entry.get("path") or "").strip()
+        else:
+            path = ""
+        if path:
+            out.append(ManualRoot(path=path))
+    return tuple(out)
+
+
+@dataclass(frozen=True)
+class MediaRoot:
+    """One typed LaunchBox image/media root (issue #33).
+
+    ``path`` is the root directory; ``asset_type`` is the LaunchBox media
+    category it holds (e.g. ``"Box - Front"``). Images directly under the root
+    (or under region/per-game subfolders) are all attributed to ``asset_type``.
+    A root is LOCAL ONLY: discovery is read-only and never touches the network.
+    """
+
+    path: str
+    asset_type: str
+
+
+@dataclass(frozen=True)
+class ManualRoot:
+    """One manual-document root (PDF/TXT) for issue #33 mappings."""
+
+    path: str
+
+
 @dataclass(frozen=True)
 class LocalMediaConfig:
-    """Typed view of the ``[local_media]`` TOML table."""
+    """Typed view of the ``[local_media]`` TOML table.
+
+    ``roots`` keeps its existing semantics (LaunchBox image-tree roots,
+    ``<root>/Images/<Platform>/<Category>/...``) and is backward compatible.
+    ``media_roots`` and ``manual_roots`` are the issue #33 LaunchBox mappings:
+    multiple image/media roots, each with an explicit asset type, plus multiple
+    manual roots for PDF/TXT documents.
+    """
 
     enabled: bool = False
     roots: tuple[str, ...] = ()
@@ -156,6 +262,8 @@ class LocalMediaConfig:
     preferred_image_types: tuple[str, ...] = DEFAULT_PREFERRED_TYPES
     recursive: bool = True
     confidence_threshold: float = AUTO_ACCEPT_MIN_CONF
+    media_roots: tuple[MediaRoot, ...] = ()
+    manual_roots: tuple[ManualRoot, ...] = ()
 
     @classmethod
     def from_dict(cls, data: Optional[dict]) -> "LocalMediaConfig":
@@ -191,6 +299,8 @@ class LocalMediaConfig:
             preferred_image_types=pit,
             recursive=recursive,
             confidence_threshold=threshold,
+            media_roots=_parse_media_roots(raw.get("media_roots")),
+            manual_roots=_parse_manual_roots(raw.get("manual_roots")),
         )
 
 
@@ -753,6 +863,70 @@ class LaunchBoxAdapter(LocalMediaAdapter):
             )
 
 
+class TypedMediaRootAdapter(LocalMediaAdapter):
+    """Adapter for issue #33 typed media roots.
+
+    A typed media root is a directory whose ENTIRE image set belongs to one
+    explicit LaunchBox asset type (the GUI records ``asset_type`` per mapping,
+    e.g. ``"Box - Front"``). The root's own folder name is NOT a category and
+    must not be mistaken for one: every image under the root is attributed to
+    the configured ``asset_type``.
+
+    Per-game identity resolution reuses the LaunchBox conventions: the
+    immediate parent folder is a game title when it is not a region and not a
+    recognized category (per-game subfolders inside the root are respected);
+    otherwise the filename stem carries the identity (flat root layout).
+
+    Confinement is identical to :class:`LaunchBoxAdapter`: the root is treated
+    as UNTRUSTED, every candidate's real path must stay inside the root, and
+    only regular files are accepted.
+    """
+
+    name = "typed_media_root"
+
+    def iter_candidates(
+        self, root: Path, platform_names: Iterable[str], *, recursive: bool,
+        categories: Iterable[str] = (),
+    ) -> Iterable[LocalMediaCandidate]:
+        root = Path(root)
+        if not root.is_dir():
+            return
+        # The configured asset type is the FIRST element of ``categories`` when
+        # the provider passes the single-type list it builds per typed root;
+        # fall back to the root's own name only for a direct (non-provider)
+        # call, which never happens in production paths.
+        asset_type = next(iter(categories), None) or root.name
+        root_resolved = root.resolve()
+        iterator = root.rglob("*") if recursive else root.glob("*")
+        for entry in iterator:
+            try:
+                real = entry.resolve()
+            except OSError:
+                continue
+            if not real.is_relative_to(root_resolved):
+                continue
+            try:
+                st = os.lstat(real)
+            except OSError:
+                continue
+            if not stat.S_ISREG(st.st_mode):
+                continue
+            if entry.suffix.lower() not in IMAGE_SUFFIXES:
+                continue
+            parent = entry.parent
+            if parent.name != root.name and not _is_region_name(parent.name) \
+                    and parent.name not in CAT_SET_SKIP:
+                game_folder = parent.name
+            else:
+                game_folder = None
+            yield LocalMediaCandidate(
+                path=entry,
+                category=asset_type,
+                root=root,
+                game_folder=game_folder,
+            )
+
+
 # --- Provider ----------------------------------------------------------------
 
 
@@ -793,6 +967,12 @@ class LocalMediaProvider:
 
         Strictly read-only: only ``is_dir`` / directory enumeration is used.
         Returns the number of candidate images discovered.
+
+        Scans, in order: (1) the legacy ``roots`` (LaunchBox image-tree
+        layout, existing adapter) and (2) the issue #33 typed ``media_roots``
+        (each root's whole image set belongs to its explicit asset type).
+        Missing roots are skipped (they are retained in config and surfaced
+        by :func:`scan_launchbox_roots`, never deleted).
         """
         self._index = []
         for root in self.config.roots:
@@ -803,6 +983,19 @@ class LocalMediaProvider:
                     self.config.platform_names,
                     recursive=self.config.recursive,
                     categories=self.config.preferred_image_types,
+                ):
+                    self._index.append(cand)
+            except OSError:
+                # A single unreadable root must not abort the whole run.
+                continue
+        typed_adapter = TypedMediaRootAdapter()
+        for media_root in self.config.media_roots:
+            try:
+                for cand in typed_adapter.iter_candidates(
+                    Path(media_root.path),
+                    self.config.platform_names,
+                    recursive=self.config.recursive,
+                    categories=(media_root.asset_type,),
                 ):
                     self._index.append(cand)
             except OSError:
@@ -1290,8 +1483,12 @@ def assert_read_only_roots(config: LocalMediaConfig) -> None:
     Callers and tests (QA and security review) use this as an auditable
     existence/visibility receipt; the real read-only proof is the ``"rb"`` open of
     individual source images elsewhere in the provider.
+
+    Issue #33: the check now covers the typed ``media_roots`` and ``manual_roots``
+    as well as the legacy ``roots``.
     """
-    for root in config.roots:
+    for root in tuple(config.roots) + tuple(m.path for m in config.media_roots) \
+            + tuple(m.path for m in config.manual_roots):
         rpath = Path(root)
         try:
             rpath.stat()
@@ -1302,4 +1499,222 @@ def assert_read_only_roots(config: LocalMediaConfig) -> None:
             raise LocalMediaError(
                 f"local-media root not readable (read-only proof failed): {rpath}: {exc}"
             ) from exc
+
+
+# --- Issue #33: LaunchBox root diagnostics + manual discovery -----------------
+
+
+@dataclass(frozen=True)
+class RootStatus:
+    """Diagnostics entry for one configured image or manual root."""
+
+    path: str
+    kind: str  # "media" | "manual" | "legacy"
+    asset_type: str  # empty for manual/legacy roots
+    status: str  # "ok" | "missing"
+    file_count: int  # candidate images (media) or manual files (manual)
+
+
+@dataclass(frozen=True)
+class LaunchboxScanReport:
+    """Read-only scan report over all configured LaunchBox roots (issue #33).
+
+    Diagnostics only: identifies which configured roots were scanned
+    (``status == "ok"``) and which are currently missing or inaccessible
+    (``status == "missing"`` — retained in config, never deleted).
+    """
+
+    roots: tuple[RootStatus, ...]
+
+    @property
+    def scanned_media_roots(self) -> tuple[RootStatus, ...]:
+        return tuple(r for r in self.roots if r.kind == "media" and r.status == "ok")
+
+    @property
+    def scanned_manual_roots(self) -> tuple[RootStatus, ...]:
+        return tuple(r for r in self.roots if r.kind == "manual" and r.status == "ok")
+
+    @property
+    def missing_roots(self) -> tuple[RootStatus, ...]:
+        return tuple(r for r in self.roots if r.status == "missing")
+
+    @property
+    def total_image_candidates(self) -> int:
+        return sum(r.file_count for r in self.roots if r.kind in ("media", "legacy"))
+
+    @property
+    def total_manual_files(self) -> int:
+        return sum(r.file_count for r in self.roots if r.kind == "manual")
+
+    def to_lines(self) -> list[str]:
+        """Human-readable diagnostics lines (deterministic order)."""
+        lines = []
+        for r in self.roots:
+            if r.status == "missing":
+                lines.append(
+                    f"LaunchBox root not found (kept in config): {r.path}"
+                    + (f" [{r.asset_type}]" if r.asset_type else "")
+                )
+                continue
+            if r.kind == "media":
+                lines.append(
+                    f"LaunchBox media root ok: {r.path} "
+                    f"[{r.asset_type}] ({r.file_count} image candidate(s))"
+                )
+            elif r.kind == "manual":
+                lines.append(
+                    f"LaunchBox manual root ok: {r.path} "
+                    f"({r.file_count} manual file(s))"
+                )
+            else:
+                lines.append(
+                    f"Local media root ok: {r.path} "
+                    f"({r.file_count} image candidate(s))"
+                )
+        return lines
+
+
+def _count_files_under(
+    base: Path, suffixes: frozenset[str], *, recursive: bool,
+) -> int:
+    """Read-only count of regular files with ``suffixes`` under ``base``.
+
+    Symlink-safe: a candidate must resolve back inside ``base`` and be a
+    regular file (mirrors the adapter confinement rules). Never opens a file.
+    """
+    count = 0
+    if not base.is_dir():
+        return 0
+    try:
+        base_resolved = base.resolve()
+    except OSError:
+        return 0
+    iterator = base.rglob("*") if recursive else base.glob("*")
+    for entry in iterator:
+        try:
+            real = entry.resolve()
+        except OSError:
+            continue
+        if not real.is_relative_to(base_resolved):
+            continue
+        try:
+            st = os.lstat(real)
+        except OSError:
+            continue
+        if not stat.S_ISREG(st.st_mode):
+            continue
+        if entry.suffix.lower() in suffixes:
+            count += 1
+    return count
+
+
+def scan_launchbox_roots(
+    config: LocalMediaConfig, *, recursive: bool = True
+) -> LaunchboxScanReport:
+    """Read-only diagnostics scan of all configured LaunchBox roots.
+
+    For every legacy ``roots`` entry, typed ``media_roots`` entry, and
+    ``manual_roots`` entry: report ``ok``/``missing`` status plus a candidate
+    count (images for media roots, ``.pdf``/``.txt`` files for manual roots).
+
+    Pure stdlib, stat + ``os.scandir`` only: no file contents are read, no
+    writes happen, and no socket is ever opened. Missing roots are reported,
+    NEVER deleted from the config (issue #33 acceptance criterion 7).
+    """
+    entries: list[RootStatus] = []
+    for root in config.roots:
+        base = Path(root)
+        ok = base.is_dir()
+        entries.append(
+            RootStatus(
+                path=root,
+                kind="legacy",
+                asset_type="",
+                status="ok" if ok else "missing",
+                file_count=_count_files_under(base, IMAGE_SUFFIXES, recursive=recursive)
+                if ok
+                else 0,
+            )
+        )
+    for media_root in config.media_roots:
+        base = Path(media_root.path)
+        ok = base.is_dir()
+        entries.append(
+            RootStatus(
+                path=media_root.path,
+                kind="media",
+                asset_type=media_root.asset_type,
+                status="ok" if ok else "missing",
+                file_count=_count_files_under(base, IMAGE_SUFFIXES, recursive=recursive)
+                if ok
+                else 0,
+            )
+        )
+    for manual_root in config.manual_roots:
+        base = Path(manual_root.path)
+        ok = base.is_dir()
+        entries.append(
+            RootStatus(
+                path=manual_root.path,
+                kind="manual",
+                asset_type="",
+                status="ok" if ok else "missing",
+                file_count=_count_files_under(base, MANUAL_SUFFIXES, recursive=recursive)
+                if ok
+                else 0,
+            )
+        )
+    return LaunchboxScanReport(roots=tuple(entries))
+
+
+@dataclass(frozen=True)
+class ManualSource:
+    """One discovered manual document (PDF/TXT) from a manual root."""
+
+    path: Path
+    root: Path
+    suffix: str  # ".pdf" | ".txt"
+
+
+def discover_manuals(
+    manual_roots: Iterable[ManualRoot], *, recursive: bool = True
+) -> list[ManualSource]:
+    """Read-only discovery of ``.pdf``/``.txt`` manuals under manual roots.
+
+    Returns a deterministic (path-sorted) list of :class:`ManualSource`.
+    Symlink-safe and confined to each root, exactly like the image adapters:
+    a candidate whose real path escapes the root is skipped, and only regular
+    files are accepted. Never writes, never opens file contents, no network.
+    """
+    out: list[ManualSource] = []
+    for manual_root in manual_roots:
+        base = Path(manual_root.path)
+        if not base.is_dir():
+            continue
+        try:
+            base_resolved = base.resolve()
+        except OSError:
+            continue
+        iterator = base.rglob("*") if recursive else base.glob("*")
+        for entry in iterator:
+            try:
+                real = entry.resolve()
+            except OSError:
+                continue
+            if not real.is_relative_to(base_resolved):
+                continue
+            try:
+                st = os.lstat(real)
+            except OSError:
+                continue
+            if not stat.S_ISREG(st.st_mode):
+                continue
+            if entry.suffix.lower() in MANUAL_SUFFIXES:
+                out.append(
+                    ManualSource(
+                        path=entry, root=base, suffix=entry.suffix.lower()
+                    )
+                )
+    out.sort(key=lambda m: (str(m.root), str(m.path)))
+    return out
 

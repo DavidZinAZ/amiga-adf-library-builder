@@ -25,7 +25,9 @@ path, or an explicit provider config path, to ``run_pipeline``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import os
+import tempfile
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
@@ -75,6 +77,15 @@ class GuiState:
     # in the CLI). Secrets are NOT here.
     provider_config_path: str = ""
 
+    # --- (GH-33) LaunchBox local folder mappings -------------------------------
+    # GUI-only LOCAL mappings (no network): image/media roots with an explicit
+    # LaunchBox asset type, plus manual-document roots (PDF/TXT). Each media
+    # root is {"path": str, "asset_type": str}. Empty = no GUI mappings, which
+    # keeps the pipeline behavior byte-for-byte identical to the CLI
+    # (CLI<->GUI equivalence preserved).
+    launchbox_media_roots: list[dict] = field(default_factory=list)
+    launchbox_manual_roots: list[str] = field(default_factory=list)
+
 
 def build_path_config_from_gui_state(
     state: GuiState,
@@ -105,12 +116,101 @@ def build_path_config_from_gui_state(
     return cfg
 
 
+# --- (GH-33) LaunchBox GUI mappings -> provider config -------------------------
+
+
+def _launchbox_mappings(state: GuiState) -> tuple[list[dict], list[str]]:
+    """Return cleaned (media_roots, manual_roots) from GUI state."""
+    media: list[dict] = []
+    for entry in state.launchbox_media_roots or []:
+        if isinstance(entry, dict):
+            path = str(entry.get("path") or "").strip()
+            if path:
+                media.append(
+                    {
+                        "path": path,
+                        "asset_type": str(entry.get("asset_type") or "").strip(),
+                    }
+                )
+        elif isinstance(entry, str) and entry.strip():
+            media.append({"path": entry.strip(), "asset_type": ""})
+    manuals: list[str] = []
+    for entry in state.launchbox_manual_roots or []:
+        if isinstance(entry, str) and entry.strip():
+            manuals.append(entry.strip())
+        elif isinstance(entry, dict):
+            path = str(entry.get("path") or "").strip()
+            if path:
+                manuals.append(path)
+    return media, manuals
+
+
+def resolve_local_media_config_path(
+    state: GuiState,
+    *,
+    config_path: Optional[str] = None,
+    cache_dir: Optional[os.PathLike] = None,
+) -> Optional[str]:
+    """Resolve the provider-config path the pipeline should use.
+
+    (GH-33) When the GUI holds LaunchBox local mappings, the operator's
+    provider config (if any) is merged with the GUI's ``[local_media]``
+    ``media_roots`` / ``manual_roots`` into a DETERMINISTIC GUI-managed file
+    (default: ``<cache_dir>/gui-local-media.toml``, where ``cache_dir`` is the
+    app's own managed directory — never the read-only original corpus). The
+    merged file is rewritten atomically on every run, so it always reflects
+    the current GUI mappings. Without GUI mappings this returns the unchanged
+    provider-config path, preserving CLI<->GUI equivalence exactly.
+
+    No secrets, no network: the merged file holds local path mappings only.
+    """
+    media, manuals = _launchbox_mappings(state)
+    if not media and not manuals:
+        return state.provider_config_path or config_path or None
+    base_cfg = state.provider_config_path or config_path or None
+    if base_cfg:
+        data: dict = {}
+        try:
+            import tomllib
+
+            p = Path(base_cfg)
+            if p.is_file():
+                with open(p, "rb") as fh:
+                    data = tomllib.load(fh)
+        except Exception:
+            # Unreadable/absent operator config: start from an empty document;
+            # the operator's other provider tables are simply not carried.
+            data = {}
+    else:
+        data = {}
+    table = data.get("local_media")
+    if not isinstance(table, dict):
+        table = {}
+    table = dict(table)
+    table["enabled"] = True
+    table["media_roots"] = media
+    table["manual_roots"] = manuals
+    data["local_media"] = table
+
+    import tomli_w
+
+    cache_dir = Path(cache_dir) if cache_dir else Path(tempfile.gettempdir())
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    target = cache_dir / "gui-local-media.toml"
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    with open(tmp, "wb") as fh:
+        tomli_w.dump(data, fh)
+    tmp.replace(target)
+    return str(target)
+
+
 def build_pipeline_kwargs(
     state: GuiState,
     cfg: PathConfig,
     *,
     config_path: Optional[str] = None,
     activity: Optional[Any] = None,
+    cache_dir: Optional[os.PathLike] = None,
 ) -> dict:
     """Build the ``run_pipeline`` keyword arguments from GUI state (CLI-equivalent).
 
@@ -128,11 +228,20 @@ def build_pipeline_kwargs(
     (``--config``), unless an explicit provider config path is set. The core
     resolves ``[playmatch]``/``[hasheous]``/``[rtfm]``/``[local_media]`` from it.
 
+    (GH-33) The ``local_media_config_path`` is resolved through
+    :func:`resolve_local_media_config_path`: when the GUI holds LaunchBox local
+    mappings, a GUI-managed merged ``[local_media]`` config is written (into
+    ``cache_dir`` when provided, else the system temp dir) and passed instead;
+    with no GUI mappings the original provider-config path is used unchanged.
+
     ``activity`` (issue #21): optional live-log callback forwarded to the
     pipeline as a plain-language activity hook. Omitted (absent) when ``None``,
     so CLI<->GUI equivalence and non-GUI callers are unchanged.
     """
     provider_cfg = state.provider_config_path or config_path or None
+    local_media_cfg = resolve_local_media_config_path(
+        state, config_path=config_path, cache_dir=cache_dir
+    )
     kwargs: dict[str, Any] = {
         "cfg": cfg,
         "online": bool(state.online),
@@ -144,9 +253,9 @@ def build_pipeline_kwargs(
         "include_manuals_rtfm": bool(state.include_manuals_rtfm),
         "export": (state.run_mode == "export"),
         "verify_only": bool(state.verify_only),
-        # The CLI passes the resolved config file as the provider-config source
-        # for all optional providers; keep that exact behavior.
-        "local_media_config_path": provider_cfg,
+        # (GH-33) GUI LaunchBox mappings take precedence for local media;
+        # otherwise identical to the CLI's provider-config behavior.
+        "local_media_config_path": local_media_cfg,
         "rtfm_config_path": provider_cfg,
         "playmatch_config_path": provider_cfg,
         "hasheous_config_path": provider_cfg,

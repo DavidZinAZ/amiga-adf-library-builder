@@ -23,6 +23,7 @@ from PySide6.QtCore import QEvent, QRect, Qt
 from PySide6.QtGui import QGuiApplication, QRegion
 from PySide6.QtWidgets import (
     QApplication,
+    QAbstractItemView,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -30,9 +31,11 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QGroupBox,
+    QHeaderView,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
     QMainWindow,
     QMenu,
     QMenuBar,
@@ -42,12 +45,22 @@ from PySide6.QtWidgets import (
     QPushButton,
     QTabWidget,
     QTextEdit,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
 from .. import activity_log
 from ..logging_utils import redact
+from ..local_media import (
+    DEFAULT_MEDIA_ROOT_ASSET_TYPE,
+    LAUNCHBOX_IMAGE_CATEGORIES,
+    LocalMediaConfig,
+    MediaRoot,
+    ManualRoot,
+    scan_launchbox_roots,
+)
 from . import __version__ as gui_version
 from .layout import PortablePaths
 from .providers import Provider, ProviderRegistry, default_registry
@@ -330,6 +343,8 @@ class MainWindow(QMainWindow):
         tabs.addTab(self._build_paths_tab(), "Library")
         tabs.addTab(self._build_options_tab(), "Options")
         tabs.addTab(self._build_providers_tab(), "Providers")
+        # (GH-33) LaunchBox local folder mappings (image/media + manuals).
+        tabs.addTab(self._build_launchbox_tab(), "LaunchBox media")
         tabs.addTab(self._build_diagnostics_tab(), "Diagnostics")
 
         # --- run controls ---
@@ -558,6 +573,197 @@ class MainWindow(QMainWindow):
         )
         form.addRow("", status_btn)
         return box
+
+    # --- (GH-33) LaunchBox local media tab -------------------------------------
+    def _build_launchbox_tab(self) -> QWidget:
+        """Local LaunchBox folder mappings: image/media roots + manual roots.
+
+        (GH-33) Everything here is LOCAL ONLY: native folder browsing, add /
+        remove mappings, per-root asset-type selection, and a read-only
+        "Check roots" diagnostic (scanned / missing, candidate counts). No
+        network egress; nothing is ever deleted from the mappings list by a
+        missing path — missing roots are surfaced as diagnostics only.
+        """
+        w = QWidget(self)
+        layout = QVBoxLayout(w)
+
+        # --- image / media roots --------------------------------------------
+        media_box = QGroupBox("Image / media roots (each root has one asset type)")
+        media_box.setToolTip(
+            "Local LaunchBox image folders. Pick a folder and choose which "
+            "LaunchBox media type it holds (for example \"Box - Front\"). "
+            "Everything stays local; nothing is uploaded."
+        )
+        media_layout = QVBoxLayout(media_box)
+        self._lb_media_table = QTableWidget(0, 2)
+        self._lb_media_table.setHorizontalHeaderLabels(["Folder", "Asset type"])
+        self._lb_media_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
+        self._lb_media_table.horizontalHeader().setStretchLastSection(True)
+        self._lb_media_table.verticalHeader().setVisible(False)
+        self._lb_media_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._lb_media_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._lb_media_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        media_layout.addWidget(self._lb_media_table)
+        media_buttons = QHBoxLayout()
+        self._lb_media_add_button = QPushButton("Add folder…")
+        self._lb_media_add_button.setToolTip(
+            "Choose a local folder of images (Browse). You can then select "
+            "its asset type from the list."
+        )
+        self._lb_media_add_button.clicked.connect(self._lb_add_media_root)
+        self._lb_media_remove_button = QPushButton("Remove")
+        self._lb_media_remove_button.setToolTip(
+            "Remove the selected mapping. The folder itself is never touched."
+        )
+        self._lb_media_remove_button.clicked.connect(self._lb_remove_media_root)
+        media_buttons.addWidget(self._lb_media_add_button)
+        media_buttons.addWidget(self._lb_media_remove_button)
+        media_buttons.addStretch(1)
+        media_layout.addLayout(media_buttons)
+        layout.addWidget(media_box)
+
+        # --- manual roots ------------------------------------------------------
+        manual_box = QGroupBox("Manual roots (PDF / TXT documents)")
+        manual_box.setToolTip(
+            "Local folders holding manual documents (.pdf, .txt). Local only; "
+            "nothing is uploaded."
+        )
+        manual_layout = QVBoxLayout(manual_box)
+        self._lb_manual_list = QListWidget()
+        self._lb_manual_list.setToolTip(
+            "Folders of manual documents. Add as many as you need."
+        )
+        manual_layout.addWidget(self._lb_manual_list)
+        manual_buttons = QHBoxLayout()
+        self._lb_manual_add_button = QPushButton("Add folder…")
+        self._lb_manual_add_button.setToolTip(
+            "Choose a local folder of manual documents (Browse)."
+        )
+        self._lb_manual_add_button.clicked.connect(self._lb_add_manual_root)
+        self._lb_manual_remove_button = QPushButton("Remove")
+        self._lb_manual_remove_button.setToolTip(
+            "Remove the selected mapping. The folder itself is never touched."
+        )
+        self._lb_manual_remove_button.clicked.connect(self._lb_remove_manual_root)
+        manual_buttons.addWidget(self._lb_manual_add_button)
+        manual_buttons.addWidget(self._lb_manual_remove_button)
+        manual_buttons.addStretch(1)
+        manual_layout.addLayout(manual_buttons)
+        layout.addWidget(manual_box)
+
+        # --- diagnostics ---------------------------------------------------------
+        diag_row = QHBoxLayout()
+        self._lb_check_button = QPushButton("Check roots…")
+        self._lb_check_button.setToolTip(
+            "Read-only check: shows which configured roots were scanned and "
+            "which are missing, plus how many image / manual candidates each "
+            "root holds. Missing folders are kept, just reported. No network."
+        )
+        self._lb_check_button.clicked.connect(self._lb_check_roots)
+        self._lb_diag_label = QLabel("")
+        self._lb_diag_label.setWordWrap(True)
+        diag_row.addWidget(self._lb_check_button)
+        diag_row.addWidget(self._lb_diag_label, 1)
+        layout.addLayout(diag_row)
+        layout.addStretch(1)
+        return w
+
+    # --- (GH-33) LaunchBox mapping helpers --------------------------------------
+    def _lb_asset_type_combo(self, asset_type: str) -> QComboBox:
+        combo = QComboBox(self)
+        combo.addItem(DEFAULT_MEDIA_ROOT_ASSET_TYPE)
+        for category in LAUNCHBOX_IMAGE_CATEGORIES:
+            if category != DEFAULT_MEDIA_ROOT_ASSET_TYPE:
+                combo.addItem(category)
+        index = combo.findText(asset_type)
+        combo.setCurrentIndex(index if index >= 0 else 0)
+        return combo
+
+    def _lb_add_media_root(self) -> None:
+        folder = QFileDialog.getExistingDirectory(
+            self, "Choose an image / media folder"
+        )
+        if not folder:
+            return
+        self._lb_media_table.insertRow(self._lb_media_table.rowCount())
+        path_item = QTableWidgetItem(folder)
+        self._lb_media_table.setItem(self._lb_media_table.rowCount() - 1, 0, path_item)
+        combo = self._lb_asset_type_combo(DEFAULT_MEDIA_ROOT_ASSET_TYPE)
+        self._lb_media_table.setCellWidget(
+            self._lb_media_table.rowCount() - 1, 1, combo
+        )
+        self._lb_diag_label.setText("")
+
+    def _lb_remove_media_root(self) -> None:
+        row = self._lb_media_table.currentRow()
+        if row >= 0:
+            self._lb_media_table.removeRow(row)
+        self._lb_diag_label.setText("")
+
+    def _lb_add_manual_root(self) -> None:
+        folder = QFileDialog.getExistingDirectory(
+            self, "Choose a manual documents folder"
+        )
+        if not folder:
+            return
+        self._lb_manual_list.addItem(folder)
+        self._lb_diag_label.setText("")
+
+    def _lb_remove_manual_root(self) -> None:
+        item = self._lb_manual_list.currentItem()
+        if item is not None:
+            self._lb_manual_list.takeItem(self._lb_manual_list.row(item))
+        self._lb_diag_label.setText("")
+
+    def _lb_media_mappings(self) -> list[dict]:
+        out: list[dict] = []
+        for row in range(self._lb_media_table.rowCount()):
+            item = self._lb_media_table.item(row, 0)
+            combo = self._lb_media_table.cellWidget(row, 1)
+            if item is None:
+                continue
+            path = item.text().strip()
+            if not path:
+                continue
+            asset_type = combo.currentText().strip() if combo is not None else ""
+            out.append({"path": path, "asset_type": asset_type})
+        return out
+
+    def _lb_manual_mappings(self) -> list[str]:
+        out: list[str] = []
+        for row in range(self._lb_manual_list.count()):
+            item = self._lb_manual_list.item(row)
+            if item is not None:
+                text = item.text().strip()
+                if text:
+                    out.append(text)
+        return out
+
+    def _lb_check_roots(self) -> None:
+        """Read-only diagnostics: scan the configured LaunchBox roots (GH-33)."""
+        cfg = LocalMediaConfig(
+            enabled=True,
+            media_roots=tuple(
+                MediaRoot(path=m["path"], asset_type=m["asset_type"])
+                for m in self._lb_media_mappings()
+            ),
+            manual_roots=tuple(
+                ManualRoot(path=p) for p in self._lb_manual_mappings()
+            ),
+        )
+        try:
+            report = scan_launchbox_roots(cfg)
+        except Exception as exc:  # a check failure is reported, never fatal
+            self._lb_diag_label.setText(f"Check failed: {exc}")
+            return
+        if not report.roots:
+            self._lb_diag_label.setText("No LaunchBox roots configured yet.")
+            return
+        self._lb_diag_label.setText("\n".join(report.to_lines()))
+        for line in report.to_lines():
+            self._append_diag(line)
 
     def _build_diagnostics_tab(self) -> QWidget:
         w = QWidget(self)
@@ -891,6 +1097,10 @@ class MainWindow(QMainWindow):
                 # (GH-24) independent metadata selection (non-sensitive).
                 "include_artwork": state.include_artwork,
                 "include_manuals_rtfm": state.include_manuals_rtfm,
+                # (GH-33) LaunchBox local folder mappings (non-sensitive local
+                # paths; missing folders are kept, never deleted).
+                "launchbox_media_roots": self._lb_media_mappings(),
+                "launchbox_manual_roots": self._lb_manual_mappings(),
             }
             geometry = self._current_persist_geometry()
             if geometry is not None:
@@ -915,6 +1125,10 @@ class MainWindow(QMainWindow):
             # (GH-24) independent metadata selection.
             include_artwork=self._cb_include_artwork.isChecked(),
             include_manuals_rtfm=self._cb_include_manuals.isChecked(),
+            # (GH-33) LaunchBox local folder mappings (LOCAL ONLY; empty lists
+            # keep the pipeline identical to the CLI's provider-config path).
+            launchbox_media_roots=self._lb_media_mappings(),
+            launchbox_manual_roots=self._lb_manual_mappings(),
             run_mode="export" if self._mode_export.isChecked() else "build",
             provider_config_path=self._config_path or "",
         )
@@ -956,7 +1170,49 @@ class MainWindow(QMainWindow):
         # (GH-24) independent metadata selection.
         self._cb_include_artwork.setChecked(s.include_artwork)
         self._cb_include_manuals.setChecked(s.include_manuals_rtfm)
+        self._lb_restore_mappings(s)
         apply_theme(s.theme or "system", themes_dir=self._paths.themes_dir)
+
+    # --- (GH-33) LaunchBox mappings: restore from persisted settings ----------
+    def _lb_restore_mappings(self, s: "Settings") -> None:
+        """Restore persisted LaunchBox mappings into the tab widgets (GH-33).
+
+        Missing paths are KEPT (never deleted on absence) and surfaced as a
+        status diagnostic — the same behavior as the Issue #17 folder fields.
+        """
+        self._lb_media_table.setRowCount(0)
+        for mapping in s.launchbox_media_roots or []:
+            path = str(mapping.get("path") or "").strip()
+            if not path:
+                continue
+            row = self._lb_media_table.rowCount()
+            self._lb_media_table.insertRow(row)
+            self._lb_media_table.setItem(row, 0, QTableWidgetItem(path))
+            self._lb_media_table.setCellWidget(
+                row, 1, self._lb_asset_type_combo(mapping.get("asset_type", ""))
+            )
+        self._lb_manual_list.clear()
+        for path in s.launchbox_manual_roots or []:
+            text = str(path).strip()
+            if text:
+                self._lb_manual_list.addItem(text)
+        # Diagnostic for mappings that cannot be found on THIS machine.
+        missing: list[str] = []
+        for mapping in s.launchbox_media_roots or []:
+            path = str(mapping.get("path") or "").strip()
+            if path and not Path(path).is_dir():
+                missing.append(path)
+        for path in s.launchbox_manual_roots or []:
+            text = str(path).strip()
+            if text and not Path(text).is_dir():
+                missing.append(text)
+        if missing:
+            message = (
+                "LaunchBox root(s) not found on this machine (kept): "
+                + "; ".join(missing)
+            )
+            logger.debug("%s", message)
+            self._status_label.setText(message)
 
     # --- run ------------------------------------------------------------------
     def _on_run(self) -> None:

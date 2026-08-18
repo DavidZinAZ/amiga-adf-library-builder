@@ -268,11 +268,140 @@ def main() -> int:
         mw2.close()
         mw2 = None
 
+        # --- (GH-33) LaunchBox local folder mappings (offscreen, Windows) ----
+        # Drive the REAL GUI LaunchBox tab on the Windows runtime: add multiple
+        # image/media roots (native Browse picker, mocked in-process) each with an
+        # explicit asset type, add multiple manual roots, run the read-only
+        # "Check roots" diagnostic, and persist across close + reopen.
+        from unittest import mock as _mock
+        from amiga_adf_library_builder import local_media as _lm
+
+        lb_dirs = {
+            "front": base_dir / "lb" / "box front",
+            "back": base_dir / "lb" / "box back",
+            "manuals": base_dir / "lb" / "manuals",
+        }
+        for d in lb_dirs.values():
+            d.mkdir(parents=True, exist_ok=True)
+        # Representative LaunchBox image + manual for discovery.
+        (lb_dirs["front"] / "Synthetic Quest III.png").write_bytes(
+            b"\x89PNG\r\n\x1a\n" + b"\x00" * 20
+        )
+        (lb_dirs["manuals"] / "Synthetic Quest III.txt").write_bytes(b"controls")
+
+        mw_lb = MainWindow(
+            portable_paths=pp,
+            settings_store=SettingsStore(pp.settings_file()),
+        )
+        # Add two image roots + one manual root via the REAL GUI methods,
+        # mocking the native Browse picker (offscreen: no real dialog).
+        with _mock.patch(
+            "amiga_adf_library_builder.gui.main_window.QFileDialog.getExistingDirectory",
+            side_effect=[str(lb_dirs["front"]), str(lb_dirs["back"]), str(lb_dirs["manuals"])],
+        ):
+            mw_lb._lb_add_media_root()
+            mw_lb._lb_add_media_root()
+            mw_lb._lb_add_manual_root()
+        # Set DISTINCT asset types on the two image roots (explicit per-root mapping).
+        combo0 = mw_lb._lb_media_table.cellWidget(0, 1)
+        combo1 = mw_lb._lb_media_table.cellWidget(1, 1)
+        for combo, wanted in ((combo0, "Box - Front"), (combo1, "Box - Back")):
+            idx = combo.findText(wanted)
+            combo.setCurrentIndex(idx if idx >= 0 else 0)
+        added_ok = (
+            mw_lb._lb_media_table.rowCount() == 2
+            and mw_lb._lb_manual_list.count() == 1
+            and combo0 is not None
+            and combo1 is not None
+        )
+        _step("lb_multi_mappings_added", added_ok,
+              f"media_rows={mw_lb._lb_media_table.rowCount()} "
+              f"manual_rows={mw_lb._lb_manual_list.count()} "
+              f"asset0={combo0.currentText() if combo0 else None!r} "
+              f"asset1={combo1.currentText() if combo1 else None!r}")
+
+        # Run the read-only diagnostic (scanned/missing + candidate counts).
+        mw_lb._lb_check_roots()
+        diag = mw_lb._lb_diag_label.text()
+        _step("lb_check_roots_diagnostic", bool(diag),
+              f"diag_chars={len(diag)}")
+
+        # Persist across close + reopen (widget-level restore of both mapping types).
+        mw_lb.show()
+        mw_lb.close()  # closeEvent persists the LaunchBox mappings
+        mw_lb2 = MainWindow(
+            portable_paths=pp,
+            settings_store=SettingsStore(pp.settings_file()),
+        )
+        restored_media = [
+            mw_lb2._lb_media_table.item(r, 0).text()
+            for r in range(mw_lb2._lb_media_table.rowCount())
+        ]
+        restored_manual = [
+            mw_lb2._lb_manual_list.item(r).text()
+            for r in range(mw_lb2._lb_manual_list.count())
+        ]
+        lb_restore = (
+            len(restored_media) == 2
+            and len(restored_manual) == 1
+            and str(lb_dirs["manuals"]) in restored_manual
+        )
+        _step("lb_mappings_persist_reopen", lb_restore,
+              f"restored_media={restored_media!r} restored_manual={restored_manual!r}")
+
+        # A missing/inaccessible path is RETAINED (not deleted) + diagnostic emitted.
+        gone = base_dir / "lb" / "gone"
+        with _mock.patch(
+            "amiga_adf_library_builder.gui.main_window.QFileDialog.getExistingDirectory",
+            side_effect=[str(gone)],
+        ):
+            mw_lb2._lb_add_media_root()
+        mw_lb2._lb_check_roots()
+        rows_after = [
+            mw_lb2._lb_media_table.item(r, 0).text()
+            for r in range(mw_lb2._lb_media_table.rowCount())
+        ]
+        diagnostic = mw_lb2._lb_diag_label.text()
+        missing_retained = (str(gone) in rows_after) and ("gone" in diagnostic)
+        _step("lb_missing_path_retained_diagnostic", missing_retained,
+              f"media_rows={len(rows_after)} diag_mentions_gone={'gone' in diagnostic}")
+        mw_lb2.close()
+        mw_lb2 = None
+
         mw.close()
         if QApplication.instance():
             QApplication.instance().quit()
     except Exception as exc:
         _step("gui_code_exercise", False, f"could not drive GUI code on Windows: {exc!r}")
+        REPORT["errors"].append(repr(exc))
+
+    # ------------------------------------------------------------------ #
+    # 2b) (GH-33) Direct backend diagnostic: a missing/inaccessible LaunchBox
+    #      root is reported (retained, never deleted) by scan_launchbox_roots.
+    #      No Qt required; proves the diagnostic on the real runtime.
+    # ------------------------------------------------------------------ #
+    try:
+        from amiga_adf_library_builder import local_media as _lm
+
+        media_root = base_dir / "lb" / "box front"
+        media_root.mkdir(parents=True, exist_ok=True)
+        missing_root = base_dir / "lb" / "gone"
+        cfg = _lm.LocalMediaConfig(
+            enabled=True,
+            media_roots=(
+                _lm.MediaRoot(path=str(media_root), asset_type="Box - Front"),
+                _lm.MediaRoot(path=str(missing_root), asset_type="Box - Back"),
+            ),
+        )
+        report = _lm.scan_launchbox_roots(cfg)
+        missing_reported = any(str(missing_root) in ln for ln in report.to_lines())
+        retained_not_deleted = missing_root in {r.path for r in report.missing_roots}
+        _step("lb_backend_missing_root_diagnostic",
+              missing_reported and retained_not_deleted,
+              f"missing_roots={len(report.missing_roots)} "
+              f"reported_in_lines={missing_reported}")
+    except Exception as exc:
+        _step("lb_backend_missing_root_diagnostic", False, f"backend diagnostic failed: {exc!r}")
         REPORT["errors"].append(repr(exc))
 
     # ------------------------------------------------------------------ #
@@ -295,7 +424,12 @@ def main() -> int:
                                      "exe_self_contained", "settings_persist",
                                      "close_without_run_restore",
                                      "help_about_available", "no_crash_on_invalid_input",
-                                     "no_secret_leak_in_logs"))
+                                     "no_secret_leak_in_logs",
+                                     # (GH-33) LaunchBox local mappings flows
+                                     "lb_multi_mappings_added", "lb_check_roots_diagnostic",
+                                     "lb_mappings_persist_reopen",
+                                     "lb_missing_path_retained_diagnostic",
+                                     "lb_backend_missing_root_diagnostic"))
     return 1 if hard_fail else 0
 
 

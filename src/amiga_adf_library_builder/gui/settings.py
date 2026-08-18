@@ -44,7 +44,54 @@ SETTINGS_KEYS = (
     # (GH-24) Independent artwork / manuals-RTFM selection. Both default ON.
     "include_artwork",
     "include_manuals_rtfm",
+    # (GH-33) LaunchBox local folder mappings (non-sensitive local paths).
+    "launchbox_media_roots",
+    "launchbox_manual_roots",
 )
+
+
+def _clean_media_root_entries(raw: Any) -> list[dict]:
+    """Defensively coerce a settings value into ``[{path, asset_type}]``."""
+    out: list[dict] = []
+    if raw is None:
+        return out
+    if isinstance(raw, (str, dict)):
+        raw = [raw]
+    for entry in raw:
+        if isinstance(entry, str):
+            path = entry.strip()
+            if path:
+                out.append({"path": path, "asset_type": ""})
+        elif isinstance(entry, dict):
+            path = str(entry.get("path") or "").strip()
+            if not path:
+                continue
+            out.append(
+                {
+                    "path": path,
+                    "asset_type": str(entry.get("asset_type") or "").strip(),
+                }
+            )
+    return out
+
+
+def _clean_manual_root_entries(raw: Any) -> list[str]:
+    """Defensively coerce a settings value into a list of path strings."""
+    out: list[str] = []
+    if raw is None:
+        return out
+    if isinstance(raw, (str, dict)):
+        raw = [raw]
+    for entry in raw:
+        if isinstance(entry, str):
+            path = entry.strip()
+        elif isinstance(entry, dict):
+            path = str(entry.get("path") or "").strip()
+        else:
+            path = ""
+        if path:
+            out.append(path)
+    return out
 
 
 @dataclass
@@ -71,6 +118,12 @@ class Settings:
     # before. Old settings files without these keys load with this safe default.
     include_artwork: bool = True
     include_manuals_rtfm: bool = True
+    # (GH-33) LaunchBox local folder mappings (non-sensitive local paths).
+    # ``launchbox_media_roots``: list of {"path": str, "asset_type": str};
+    # ``launchbox_manual_roots``: list of paths (str). Old settings files
+    # without these keys load with empty lists (no mappings).
+    launchbox_media_roots: list[dict] = field(default_factory=list)
+    launchbox_manual_roots: list[str] = field(default_factory=list)
     presets: dict[str, "Preset"] = field(default_factory=dict)
 
     def as_dict(self) -> dict:
@@ -91,6 +144,13 @@ class Settings:
             # (GH-24) Independent metadata selection.
             "include_artwork": self.include_artwork,
             "include_manuals_rtfm": self.include_manuals_rtfm,
+            # (GH-33) LaunchBox local folder mappings.
+            "launchbox_media_roots": _clean_media_root_entries(
+                self.launchbox_media_roots
+            ),
+            "launchbox_manual_roots": _clean_manual_root_entries(
+                self.launchbox_manual_roots
+            ),
         }
         if self.presets:
             out["presets"] = {name: p.as_dict() for name, p in self.presets.items()}
@@ -119,6 +179,13 @@ class Settings:
         # (GH-24) Missing keys (old profile) -> safe default True.
         s.include_artwork = bool(gui.get("include_artwork", True))
         s.include_manuals_rtfm = bool(gui.get("include_manuals_rtfm", True))
+        # (GH-33) Missing keys (old profile) -> no mappings (empty lists).
+        s.launchbox_media_roots = _clean_media_root_entries(
+            gui.get("launchbox_media_roots")
+        )
+        s.launchbox_manual_roots = _clean_manual_root_entries(
+            gui.get("launchbox_manual_roots")
+        )
         raw_presets = gui.get("presets")
         if isinstance(raw_presets, dict):
             for name, val in raw_presets.items():
@@ -145,6 +212,9 @@ class Preset:
     # (GH-24) Independent metadata selection captured with the preset.
     include_artwork: bool = True
     include_manuals_rtfm: bool = True
+    # (GH-33) LaunchBox local folder mappings captured with the preset.
+    launchbox_media_roots: list[dict] = field(default_factory=list)
+    launchbox_manual_roots: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return {
@@ -160,6 +230,13 @@ class Preset:
             "advanced_mode": self.advanced_mode,
             "include_artwork": self.include_artwork,
             "include_manuals_rtfm": self.include_manuals_rtfm,
+            # (GH-33) LaunchBox local folder mappings.
+            "launchbox_media_roots": _clean_media_root_entries(
+                self.launchbox_media_roots
+            ),
+            "launchbox_manual_roots": _clean_manual_root_entries(
+                self.launchbox_manual_roots
+            ),
         }
 
     @classmethod
@@ -178,6 +255,13 @@ class Preset:
             # (GH-24) Old presets without these keys default ON.
             include_artwork=bool(data.get("include_artwork", True)),
             include_manuals_rtfm=bool(data.get("include_manuals_rtfm", True)),
+            # (GH-33) Old presets without these keys have no mappings.
+            launchbox_media_roots=_clean_media_root_entries(
+                data.get("launchbox_media_roots")
+            ),
+            launchbox_manual_roots=_clean_manual_root_entries(
+                data.get("launchbox_manual_roots")
+            ),
         )
 
 

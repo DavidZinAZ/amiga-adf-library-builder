@@ -105,6 +105,10 @@ class PipelineWorker(QObject):
             kwargs = build_pipeline_kwargs(
                 self._state, cfg, config_path=self._config_path,
                 activity=self._act,
+                # (GH-33) GUI LaunchBox mappings are merged into a managed
+                # provider config under the app's own cache dir (deterministic,
+                # atomic, never inside the read-only original corpus).
+                cache_dir=cfg.cache_dir,
             )
             # Cooperative cancellation hooks: emit progress and check the event.
             self.progress.emit(

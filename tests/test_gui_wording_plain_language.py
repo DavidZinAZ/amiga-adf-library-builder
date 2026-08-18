@@ -174,6 +174,9 @@ def test_settings_keys_unchanged():
         # GH-24: independent artwork / manuals-RTFM selection (both default ON).
         "include_artwork",
         "include_manuals_rtfm",
+        # GH-33: LaunchBox local folder mappings (local paths, non-sensitive).
+        "launchbox_media_roots",
+        "launchbox_manual_roots",
     )
     # The dataclass still exposes the same attribute names (used by the
     # GUI and the real-Windows QA driver).
