@@ -395,7 +395,7 @@ def main() -> int:
         )
         report = _lm.scan_launchbox_roots(cfg)
         missing_reported = any(str(missing_root) in ln for ln in report.to_lines())
-        retained_not_deleted = missing_root in {r.path for r in report.missing_roots}
+        retained_not_deleted = str(missing_root) in {r.path for r in report.missing_roots}
         _step("lb_backend_missing_root_diagnostic",
               missing_reported and retained_not_deleted,
               f"missing_roots={len(report.missing_roots)} "
