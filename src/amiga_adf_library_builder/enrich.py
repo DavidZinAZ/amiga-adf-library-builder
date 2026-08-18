@@ -447,6 +447,8 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                  online: bool = False, refresh: bool = False,
                  local_media_provider=None, playmatch_provider=None,
                  hasheous_provider=None,
+                 mobygames_enabled: bool = False,
+                 mobygames_api_key_env: str = "MOBYGAMES_API_KEY",
                  include_artwork: bool = True,
                  activity: Optional[Callable[[str], None]] = None) -> EnrichResult:
     metadata_cache_dir = Path(metadata_cache_dir or (Path(nfo_dir).parent / "metadata-cache"))
@@ -492,6 +494,8 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
             metadata, provider, relevance_events = lookup_metadata(
                 lookup_title, cache_dir=metadata_cache_dir,
                 curated_dir=curated_metadata_dir, refresh=refresh, group=group,
+                mobygames_enabled=mobygames_enabled,
+                mobygames_api_key_env=mobygames_api_key_env,
             )
             # Surface online relevance fall-through decisions as structured
             # diagnostics (bounded: one event per rejected/reviewed candidate).
@@ -927,6 +931,8 @@ def enrich_all(groups: list[ReleaseGroup], *, nfo_dir: Path, scans: list[ScanRec
                online: bool = False, refresh: bool = False,
                local_media_provider=None, playmatch_provider=None,
                hasheous_provider=None,
+               mobygames_enabled: bool = False,
+               mobygames_api_key_env: str = "MOBYGAMES_API_KEY",
                include_artwork: bool = True,
                activity: Optional[Callable[[str], None]] = None) -> list[EnrichResult]:
     scan_map = {s.filename: s for s in scans}
@@ -952,6 +958,8 @@ def enrich_all(groups: list[ReleaseGroup], *, nfo_dir: Path, scans: list[ScanRec
                      local_media_provider=local_media_provider,
                      playmatch_provider=playmatch_provider,
                      hasheous_provider=hasheous_provider,
+                     mobygames_enabled=mobygames_enabled,
+                     mobygames_api_key_env=mobygames_api_key_env,
                      include_artwork=include_artwork,
                      activity=activity))
     return results

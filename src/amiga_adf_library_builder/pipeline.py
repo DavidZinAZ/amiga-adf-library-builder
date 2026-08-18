@@ -140,10 +140,12 @@ def run_pipeline(
     # existing offline + online artwork paths are unchanged. A provider failure
     # must never break the run -- we degrade to the standard enrich path.
     local_media_provider = None
+    mobygames_enabled = False
+    mobygames_api_key_env = "MOBYGAMES_API_KEY"
     if local_media_config_path:
-        try:
-            from . import local_media as lm
+        from . import local_media as lm
 
+        try:
             lm_cfg = lm.load_local_media_config(local_media_config_path)
             if lm_cfg.enabled:
                 lm.assert_read_only_roots(lm_cfg)
@@ -216,6 +218,8 @@ def run_pipeline(
         local_media_provider=local_media_provider,
         playmatch_provider=playmatch_provider,
         hasheous_provider=hasheous_provider,
+        mobygames_enabled=mobygames_enabled,
+        mobygames_api_key_env=mobygames_api_key_env,
         include_artwork=include_artwork,
         activity=activity,
     )

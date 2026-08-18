@@ -143,3 +143,16 @@ enabled = false
 #require_explicit_opt_in = true
 #attribution = "LaunchBox Games Database"
 
+# --- Optional MobyGames online metadata/artwork provider (Issue #1) ------------
+# DISABLED BY DEFAULT. Enable by setting enabled = true and providing an API key
+# via the MOBYGAMES_API_KEY environment variable (or configure api_key_env).
+# The provider searches MobyGames for the title, filters to Amiga platform
+# releases, and returns metadata + cover/screenshot artwork. It reuses the
+# shared cache/provenance/security architecture (no new HTTP libs, SSRF guards,
+# allowlisted hosts only). See docs/mobygames-provider.md for setup and precedence.
+[mobygames]
+enabled = false
+# api_key_env = "MOBYGAMES_API_KEY"
+# preferred_image_types = ["cover", "screenshot", "box"]
+# timeout = 20.0
+
