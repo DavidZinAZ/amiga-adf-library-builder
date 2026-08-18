@@ -33,9 +33,11 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHeaderView,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMenu,
     QMenuBar,
@@ -65,7 +67,7 @@ from . import __version__ as gui_version
 from .layout import PortablePaths
 from .providers import Provider, ProviderRegistry, default_registry
 from .secrets import SecretError, SecretStore, install_gui_redaction
-from .settings import Settings, SettingsStore
+from .settings import Preset, Settings, SettingsStore
 from .state import GuiState
 from .themes import apply_theme, available_themes
 
@@ -318,6 +320,26 @@ class MainWindow(QMainWindow):
 
         file_menu = QMenu("&File", self)
         menubar.addMenu(file_menu)
+        # (GH-20) Named configuration profiles: save the current widget state
+        # as a named preset, or load one back. Both operate on the existing
+        # non-sensitive SettingsStore preset API — no secrets involved.
+        save_profile_act = file_menu.addAction("Save Profile")
+        save_profile_act.setToolTip(
+            "Save the current settings as the last-used named profile."
+        )
+        save_profile_act.triggered.connect(self._on_save_profile)
+        save_as_act = file_menu.addAction("Save Profile As…")
+        save_as_act.setToolTip(
+            "Save the current settings under a new profile name. Overwriting "
+            "an existing profile asks for confirmation."
+        )
+        save_as_act.triggered.connect(self._on_save_profile_as)
+        load_act = file_menu.addAction("Load Profile…")
+        load_act.setToolTip(
+            "Load a saved configuration profile into the current settings."
+        )
+        load_act.triggered.connect(self._on_load_profile)
+        file_menu.addSeparator()
         quit_act = file_menu.addAction("E&xit")
         quit_act.triggered.connect(self.close)
 
@@ -1213,6 +1235,220 @@ class MainWindow(QMainWindow):
             )
             logger.debug("%s", message)
             self._status_label.setText(message)
+
+    # --- (GH-20) named configuration profiles ----------------------------------
+    #
+    # A profile is a named snapshot of the non-sensitive settings currently in
+    # the widgets: the four folder paths, the run-mode toggles, the GH-24
+    # independent metadata selection, and the GH-33 LaunchBox local mappings.
+    # It is stored through the EXISTING SettingsStore preset API
+    # (``save_preset`` / ``apply_preset`` / ``get().presets``), which already
+    # serializes only non-sensitive data. There is deliberately no code path
+    # here that reads SecretStore or any secret field — the ``Preset``
+    # dataclass has no such field, so a saved profile file cannot carry a
+    # secret.
+    #
+    # Loading a profile is NON-DESTRUCTIVE in the same sense as the startup
+    # restore: folder paths are applied to the fields even when the folder
+    # does not exist on THIS machine (a profile may travel between machines),
+    # but the missing paths are reported cleanly — status label plus a
+    # QMessageBox warning — and nothing is deleted or overwritten on disk.
+
+    _DEFAULT_PROFILE_NAME = "Default"
+
+    def _preset_from_widgets(self) -> "Preset":
+        """Collect the current widget state into a :class:`Preset`.
+
+        Never touches SecretStore or any secret field: every value comes from
+        the non-sensitive widgets (folder line edits, option checkboxes,
+        LaunchBox mapping tables) via the same accessors ``_persist_defaults``
+        uses for the last-used settings.
+        """
+        state = self._state_from_widgets()
+        return Preset(
+            name=self._last_profile_name(),
+            library_root=state.library_root,
+            original_dir=state.original_dir,
+            staging_dir=state.staging_dir,
+            output_dir=state.output_dir,
+            online=state.online,
+            refresh_metadata=state.refresh_metadata,
+            require_artwork=state.require_artwork,
+            verify_only=state.verify_only,
+            export_gate_acknowledged=state.export_gate_acknowledged,
+            advanced_mode=self._cb_advanced.isChecked(),
+            include_artwork=state.include_artwork,
+            include_manuals_rtfm=state.include_manuals_rtfm,
+            launchbox_media_roots=self._lb_media_mappings(),
+            launchbox_manual_roots=self._lb_manual_mappings(),
+        )
+
+    def _last_profile_name(self) -> str:
+        """Name the current settings snapshot should be saved under.
+
+        Tracks the last profile loaded by name (``_profile_name``), so a
+        session that loads "Work" and tweaks the widgets can re-save "Work"
+        from File -> Save Profile without retyping the name. Fresh or
+        default-startup sessions fall back to the "Default" profile.
+        """
+        name = (getattr(self, "_profile_name", "") or "").strip()
+        return name or self._DEFAULT_PROFILE_NAME
+
+    def _on_save_profile(self) -> None:
+        """File -> Save Profile: store the widgets under the last name."""
+        preset = self._preset_from_widgets()
+        preset.name = self._last_profile_name()
+        try:
+            self._settings_store.save_preset(preset)
+            self._profile_name = preset.name
+            self._status_label.setText(f"Saved profile '{preset.name}'.")
+            self._append_diag(f"Saved profile '{preset.name}'.")
+        except Exception as exc:
+            QMessageBox.critical(self, "Save profile", f"Could not save profile: {exc}")
+            self._status_label.setText("Saving the profile failed.")
+
+    def _on_save_profile_as(self) -> None:
+        """File -> Save Profile As…: prompt for a name, confirm overwrites."""
+        presets = self._settings_store.get().presets
+        name, ok = QInputDialog.getText(
+            self,
+            "Save Profile As",
+            "Profile name:",
+            text=self._last_profile_name(),
+        )
+        name = (name or "").strip()
+        if not ok or not name:
+            return
+        if name in presets:
+            answer = QMessageBox.question(
+                self,
+                "Save Profile",
+                f"A profile named '{name}' already exists. Overwrite it?",
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        preset = self._preset_from_widgets()
+        preset.name = name
+        try:
+            self._settings_store.save_preset(preset)
+            self._profile_name = name
+            self._status_label.setText(f"Saved profile '{name}'.")
+            self._append_diag(f"Saved profile '{name}'.")
+        except Exception as exc:
+            QMessageBox.critical(self, "Save profile", f"Could not save profile: {exc}")
+            self._status_label.setText("Saving the profile failed.")
+
+    def _on_load_profile(self) -> None:
+        """File -> Load Profile…: pick a saved preset and apply it."""
+        names = sorted(self._settings_store.get().presets)
+        if not names:
+            QMessageBox.information(
+                self, "Load Profile", "No saved profiles yet."
+            )
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Load Profile")
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("Choose a configuration profile to load:"))
+        self._profile_choice = QListWidget(dialog)
+        for name in names:
+            self._profile_choice.addItem(QListWidgetItem(name, self._profile_choice))
+        if len(names) == 1:
+            self._profile_choice.setCurrentRow(0)
+        layout.addWidget(self._profile_choice)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        row = self._profile_choice.currentRow()
+        if row < 0:
+            return
+        self._load_profile(names[row])
+
+    def _load_profile(self, name: str) -> bool:
+        """Load preset ``name`` into the widgets and persist as last-used.
+
+        Non-destructive: the preset's folder paths are applied to the fields
+        even when a folder is missing on this machine (profiles travel
+        between machines); the missing paths are then reported via a clean
+        QMessageBox warning plus the status label. Returns True when the
+        preset was applied (or reported-with-missing-paths), False when the
+        name is unknown or the store rejected it — in which case the current
+        widgets are left untouched.
+        """
+        try:
+            preset = self._settings_store.apply_preset(name)
+        except Exception as exc:
+            QMessageBox.critical(
+                self, "Load Profile", f"Could not load profile '{name}': {exc}"
+            )
+            self._status_label.setText("Loading the profile failed.")
+            return False
+
+        # Map Preset -> Settings onto the same widget targets the startup
+        # restore uses (``_apply_settings_to_widgets`` reads ``self._settings``).
+        # window_geometry is deliberately left as-is: loading a profile must
+        # not move or resize the window.
+        self._settings.default_library_root = preset.library_root
+        self._settings.default_original_dir = preset.original_dir
+        self._settings.default_staging_dir = preset.staging_dir
+        self._settings.default_output_dir = preset.output_dir
+        self._settings.online = preset.online
+        self._settings.refresh_metadata = preset.refresh_metadata
+        self._settings.require_artwork = preset.require_artwork
+        self._settings.verify_only = preset.verify_only
+        self._settings.export_gate_acknowledged = preset.export_gate_acknowledged
+        self._settings.advanced_mode = preset.advanced_mode
+        self._settings.include_artwork = preset.include_artwork
+        self._settings.include_manuals_rtfm = preset.include_manuals_rtfm
+        self._settings.launchbox_media_roots = preset.launchbox_media_roots
+        self._settings.launchbox_manual_roots = preset.launchbox_manual_roots
+        self._profile_name = name
+        self._apply_settings_to_widgets()
+
+        # Report paths the preset carries that do not exist on THIS machine.
+        # They are KEPT in the fields (never cleared, nothing deleted) — the
+        # operator reselects them if needed.
+        missing = [
+            path
+            for path in (
+                preset.library_root,
+                preset.original_dir,
+                preset.staging_dir,
+                preset.output_dir,
+            )
+            if path and not Path(path).is_dir()
+        ]
+        for mapping in preset.launchbox_media_roots or []:
+            path = str(mapping.get("path") or "").strip()
+            if path and not Path(path).is_dir():
+                missing.append(path)
+        for path in preset.launchbox_manual_roots or []:
+            text = str(path).strip()
+            if text and not Path(text).is_dir():
+                missing.append(text)
+        if missing:
+            message = "Profile path(s) not found on this machine (kept): " + "; ".join(
+                missing
+            )
+            logger.debug("%s", message)
+            QMessageBox.warning(self, "Load Profile", message)
+            self._status_label.setText(message)
+
+        # Persist the loaded profile as the new last-used settings so the
+        # next launch starts exactly where this profile left off. The
+        # automatic last-used behavior (run/close persistence) coexists: it
+        # simply re-persists whatever is in the widgets at that moment.
+        self._persist_defaults()
+        self._append_diag(f"Loaded profile '{name}'.")
+        return True
 
     # --- run ------------------------------------------------------------------
     def _on_run(self) -> None:
