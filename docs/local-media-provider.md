@@ -143,14 +143,22 @@ platform_names = ["Commodore Amiga", "Amiga"]
 preferred_image_types = ["Screenshot - Game Title", "Box - Front", "Screenshot - Gameplay"]
 recursive = true
 # confidence_threshold = 0.95
+# Issue #33: per-folder mappings (GUI-editable; also persistable via the app).
+# media_roots = [{ path = "/path/to/LaunchBox/Box Front", asset_type = "Box - Front" }]
+# manual_roots = ["/path/to/manuals"]
 ```
 
 * `enabled` — master switch.
-* `roots` — one or more operator-configured LaunchBox root paths.
+* `roots` — one or more operator-configured LaunchBox root paths (legacy
+  `Images/<Platform>/<Category>` tree discovery).
 * `platform_names` — maps to the LaunchBox `Images/<Platform>` folders.
 * `preferred_image_types` — the three categories in priority order.
 * `recursive` — controls nested-folder descent.
 * `confidence_threshold` — auto-accept floor (default 0.95).
+* `media_roots` (Issue #33) — **new**: multiple image/media folders, each with
+  an **explicit asset type** (e.g. `Box - Front`). See Section 13.
+* `manual_roots` (Issue #33) — **new**: multiple folders of manual documents
+  (`.pdf` / `.txt`). See Section 13.
 
 The `[local_media]` table is surfaced by `paths.load_local_media_config`, which
 preserves the existing config-precedence chain (explicit `--config` > env >
@@ -313,3 +321,49 @@ criterion:
 * `test_is_region_name_detects_regions_not_games`
 
 Full public test suite passes.
+
+## 13. Issue #33 — configurable local LaunchBox folder mappings
+
+Local, GUI-editable mappings between operator folders and LaunchBox media
+types, plus manual-document roots. **LOCAL ONLY: no network egress, no
+download/redistribution.** This complements (does not replace) the legacy
+`roots` tree discovery.
+
+### GUI (LaunchBox tab)
+
+* **Image / media roots** — table of `(folder, asset type)` rows. *Add
+  folder…* opens the native Browse picker; the asset type is chosen per row
+  (default `Box - Front`, plus the LaunchBox categories from
+  `LAUNCHBOX_IMAGE_CATEGORIES`). *Remove* deletes the selected mapping only —
+  the folder itself is never touched.
+* **Manual roots** — list of folders holding `.pdf` / `.txt` documents.
+  *Add folder…* / *Remove* behave the same way.
+* **Check roots…** — a **read-only** diagnostic that scans every configured
+  root and reports, per root: scanned or missing, and the candidate image /
+  manual-file count. **A missing/inaccessible root is retained in the config
+  and reported in the diagnostics — it is never deleted.**
+
+### Persistence
+
+The two mappings persist across close/reopen via the settings store
+(`launchbox_media_roots`, `launchbox_manual_roots`) and are restored on the
+LaunchBox tab when the window reopens.
+
+### Config / CLI
+
+The same mappings are expressible in `[local_media]` as `media_roots`
+(a table array of `{path, asset_type}`) and `manual_roots` (a string array),
+and are surfaced by `LocalMediaConfig` / `scan_launchbox_roots` (diagnostics)
+and the provider (candidate resolution).
+
+### Tests
+
+`tests/test_issue33_launchbox_mappings.py` covers: multi-root config with
+distinct asset types; GUI add/remove/persist-restore of both mapping types;
+the missing-path **retained-not-deleted** diagnostic; settings/preset
+round-trip; and an offline assertion (socket monkeypatched).
+
+`tools/qa_windows_real_exec.py` drives the real GUI LaunchBox tab on the
+Windows runtime (offscreen): multi-mapping add with distinct asset types,
+Check-roots diagnostic, persist-restore across close/reopen, and the
+missing-path diagnostic — each a hard-fail step.

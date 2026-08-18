@@ -149,6 +149,22 @@ def run_pipeline(
             lm_cfg = lm.load_local_media_config(local_media_config_path)
             if lm_cfg.enabled:
                 lm.assert_read_only_roots(lm_cfg)
+                # Issue #33 diagnostics: report the configured LaunchBox local
+                # media roots that were scanned and any missing/inaccessible
+                # ones. Missing roots are RETAINED in config (never deleted) and
+                # surface here as diagnostics. Read-only, no network.
+                lm_report = lm.scan_launchbox_roots(lm_cfg)
+                for r in lm_report.missing_roots:
+                    _act(
+                        f"LaunchBox root not found (kept in config): {r.path}"
+                        + (f" [{r.asset_type}]" if r.asset_type else "")
+                    )
+                _act(
+                    f"Scanned {len(lm_report.roots)} LaunchBox local media "
+                    f"root(s): {lm_report.total_image_candidates} image "
+                    f"candidate(s), {lm_report.total_manual_files} manual "
+                    f"file(s) (PDF/TXT)."
+                )
                 local_media_provider = lm.LocalMediaProvider(
                     lm_cfg, cfg.artwork_original_dir
                 )
