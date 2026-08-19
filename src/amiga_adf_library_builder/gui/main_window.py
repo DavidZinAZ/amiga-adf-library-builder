@@ -609,12 +609,18 @@ class MainWindow(QMainWindow):
         w = QWidget(self)
         layout = QVBoxLayout(w)
 
-        # --- image / media roots --------------------------------------------
-        media_box = QGroupBox("Image / media roots (each root has one asset type)")
+        # --- artwork (image / media) roots ----------------------------------
+        # (GH-23) The list ORDER is the precedence order: when the same
+        # asset type is found in more than one root, the FIRST root in this
+        # list wins. Move Up / Move Down therefore change which artwork wins.
+        media_box = QGroupBox("Artwork roots (each root has one asset type)")
         media_box.setToolTip(
-            "Local LaunchBox image folders. Pick a folder and choose which "
+            "Local LaunchBox artwork folders. Pick a folder and choose which "
             "LaunchBox media type it holds (for example \"Box - Front\"). "
-            "Everything stays local; nothing is uploaded."
+            "List order is precedence order: when the same artwork type is "
+            "present in several roots, the first root wins. Use Move Up / "
+            "Move Down to change priority. Everything stays local; nothing "
+            "is uploaded."
         )
         media_layout = QVBoxLayout(media_box)
         self._lb_media_table = QTableWidget(0, 2)
@@ -640,28 +646,47 @@ class MainWindow(QMainWindow):
             "Remove the selected mapping. The folder itself is never touched."
         )
         self._lb_media_remove_button.clicked.connect(self._lb_remove_media_root)
+        self._lb_media_up_button = QPushButton("Move Up")
+        self._lb_media_up_button.setToolTip(
+            "Raise the selected artwork root's priority (closer to the top "
+            "wins same-type artwork conflicts)."
+        )
+        self._lb_media_up_button.clicked.connect(self._lb_move_media_root_up)
+        self._lb_media_down_button = QPushButton("Move Down")
+        self._lb_media_down_button.setToolTip(
+            "Lower the selected artwork root's priority (the first root in "
+            "the list wins same-type artwork conflicts)."
+        )
+        self._lb_media_down_button.clicked.connect(self._lb_move_media_root_down)
         media_buttons.addWidget(self._lb_media_add_button)
         media_buttons.addWidget(self._lb_media_remove_button)
+        media_buttons.addWidget(self._lb_media_up_button)
+        media_buttons.addWidget(self._lb_media_down_button)
         media_buttons.addStretch(1)
         media_layout.addLayout(media_buttons)
         layout.addWidget(media_box)
 
-        # --- manual roots ------------------------------------------------------
-        manual_box = QGroupBox("Manual roots (PDF / TXT documents)")
+        # --- manual / RTFM roots --------------------------------------------
+        # (GH-23) Same rule as artwork: list order is precedence order; the
+        # first manual root that contains a matching document wins.
+        manual_box = QGroupBox("Manuals / RTFM roots (PDF / TXT documents)")
         manual_box.setToolTip(
-            "Local folders holding manual documents (.pdf, .txt). Local only; "
-            "nothing is uploaded."
+            "Local folders holding manual / RTFM documents (.pdf, .txt). "
+            "List order is precedence order: when the same manual is found "
+            "in several roots, the first root wins. Use Move Up / Move Down "
+            "to change priority. Local only; nothing is uploaded."
         )
         manual_layout = QVBoxLayout(manual_box)
         self._lb_manual_list = QListWidget()
         self._lb_manual_list.setToolTip(
-            "Folders of manual documents. Add as many as you need."
+            "Folders of manual / RTFM documents. Add as many as you need. "
+            "Top of the list has the highest priority."
         )
         manual_layout.addWidget(self._lb_manual_list)
         manual_buttons = QHBoxLayout()
         self._lb_manual_add_button = QPushButton("Add folder…")
         self._lb_manual_add_button.setToolTip(
-            "Choose a local folder of manual documents (Browse)."
+            "Choose a local folder of manual / RTFM documents (Browse)."
         )
         self._lb_manual_add_button.clicked.connect(self._lb_add_manual_root)
         self._lb_manual_remove_button = QPushButton("Remove")
@@ -669,8 +694,22 @@ class MainWindow(QMainWindow):
             "Remove the selected mapping. The folder itself is never touched."
         )
         self._lb_manual_remove_button.clicked.connect(self._lb_remove_manual_root)
+        self._lb_manual_up_button = QPushButton("Move Up")
+        self._lb_manual_up_button.setToolTip(
+            "Raise the selected manual / RTFM root's priority (closer to the "
+            "top wins same-manual conflicts)."
+        )
+        self._lb_manual_up_button.clicked.connect(self._lb_move_manual_root_up)
+        self._lb_manual_down_button = QPushButton("Move Down")
+        self._lb_manual_down_button.setToolTip(
+            "Lower the selected manual / RTFM root's priority (the first root "
+            "in the list wins same-manual conflicts)."
+        )
+        self._lb_manual_down_button.clicked.connect(self._lb_move_manual_root_down)
         manual_buttons.addWidget(self._lb_manual_add_button)
         manual_buttons.addWidget(self._lb_manual_remove_button)
+        manual_buttons.addWidget(self._lb_manual_up_button)
+        manual_buttons.addWidget(self._lb_manual_down_button)
         manual_buttons.addStretch(1)
         manual_layout.addLayout(manual_buttons)
         layout.addWidget(manual_box)
@@ -738,6 +777,93 @@ class MainWindow(QMainWindow):
         if item is not None:
             self._lb_manual_list.takeItem(self._lb_manual_list.row(item))
         self._lb_diag_label.setText("")
+
+    # --- (GH-23) reorder handlers: list order is precedence order -----------
+    def _lb_move_media_root_up(self) -> None:
+        """Raise the selected artwork row one position (toward the top).
+
+        Reorder swaps the whole row (folder + its asset-type combo), so the
+        underlying ordered list produced by ``_lb_media_mappings()`` changes.
+        The first root in the list wins same-category artwork conflicts, so
+        this changes which image is selected. A no-op at the top.
+        """
+        row = self._lb_media_table.currentRow()
+        if row <= 0:
+            return
+        self._lb_swap_media_rows(row - 1, row)
+        self._lb_media_table.selectRow(row - 1)
+        self._lb_diag_label.setText("")
+
+    def _lb_move_media_root_down(self) -> None:
+        """Lower the selected artwork row one position (toward the bottom).
+
+        A no-op at the bottom. See :meth:`_lb_move_media_root_up`.
+        """
+        row = self._lb_media_table.currentRow()
+        last = self._lb_media_table.rowCount() - 1
+        if row < 0 or row >= last:
+            return
+        self._lb_swap_media_rows(row, row + 1)
+        self._lb_media_table.selectRow(row + 1)
+        self._lb_diag_label.setText("")
+
+    def _lb_swap_media_rows(self, a: int, b: int) -> None:
+        """Swap artwork rows ``a`` and ``b`` (path item + asset-type combo).
+
+        The whole row moves as a unit so each folder keeps its asset type.
+        QTableWidget has no ``takeWidget``; ``setCellWidget(r, c, None)``
+        detaches the cell widget without deleting it (its parent is the
+        window, not the table), so both widgets can be re-placed crossed.
+        """
+        pa = self._lb_media_table.takeItem(a, 0)
+        pb = self._lb_media_table.takeItem(b, 0)
+        wa = self._lb_media_table.cellWidget(a, 1)
+        wb = self._lb_media_table.cellWidget(b, 1)
+        self._lb_media_table.setCellWidget(a, 1, None)
+        self._lb_media_table.setCellWidget(b, 1, None)
+        self._lb_media_table.setItem(a, 0, pb)
+        self._lb_media_table.setItem(b, 0, pa)
+        self._lb_media_table.setCellWidget(a, 1, wb)
+        self._lb_media_table.setCellWidget(b, 1, wa)
+
+    def _lb_move_manual_root_up(self) -> None:
+        """Raise the selected manual / RTFM row one position. No-op at top."""
+        row = self._lb_manual_list.currentRow()
+        if row <= 0:
+            return
+        self._lb_swap_manual_items(row - 1, row)
+        self._lb_manual_list.setCurrentRow(row - 1)
+        self._lb_diag_label.setText("")
+
+    def _lb_move_manual_root_down(self) -> None:
+        """Lower the selected manual / RTFM row one position. No-op at bottom."""
+        row = self._lb_manual_list.currentRow()
+        last = self._lb_manual_list.count() - 1
+        if row < 0 or row >= last:
+            return
+        self._lb_swap_manual_items(row, row + 1)
+        self._lb_manual_list.setCurrentRow(row + 1)
+        self._lb_diag_label.setText("")
+
+    def _lb_swap_manual_items(self, a: int, b: int) -> None:
+        """Swap manual / RTFM list items ``a`` and ``b`` (text + user data).
+
+        ``takeItem`` shrinks the list, so both items must be taken against
+        the ORIGINAL order: remove the higher row first, then the lower one
+        (correct for any ``a != b``; callers pass adjacent rows).
+        """
+        lo, hi = (a, b) if a < b else (b, a)
+        ih = self._lb_manual_list.takeItem(hi)
+        il = self._lb_manual_list.takeItem(lo)
+        if ih is None or il is None:
+            # Defensive: put back whatever we took and abort the swap.
+            if il is not None:
+                self._lb_manual_list.insertItem(lo, il)
+            if ih is not None:
+                self._lb_manual_list.insertItem(hi, ih)
+            return
+        self._lb_manual_list.insertItem(lo, ih)
+        self._lb_manual_list.insertItem(hi, il)
 
     def _lb_media_mappings(self) -> list[dict]:
         out: list[dict] = []

@@ -959,6 +959,13 @@ class LocalMediaProvider:
         # Flat candidate index, populated by discover().
         self._index: list[LocalMediaCandidate] = []
         self._discovered = False
+        # GH-23 "first entry wins": the precedence order of configured roots.
+        # Built in discover() from the config's scan order (legacy ``roots``
+        # first, then typed ``media_roots`` in list order). Within-category
+        # selection breaks ties by ROOT order, not path, so the user's GUI
+        # reorder actually changes which image wins. Path stays as the
+        # deterministic tiebreaker *within* a single root.
+        self._root_order: dict[str, int] = {}
 
     # -- discovery (read-only) ------------------------------------------------
 
@@ -975,6 +982,11 @@ class LocalMediaProvider:
         by :func:`scan_launchbox_roots`, never deleted).
         """
         self._index = []
+        self._root_order = {}
+        for _i, root in enumerate(self.config.roots):
+            self._root_order[str(Path(root))] = _i
+        for _i, media_root in enumerate(self.config.media_roots):
+            self._root_order[str(Path(media_root.path))] = len(self.config.roots) + _i
         for root in self.config.roots:
             rpath = Path(root)
             try:
@@ -1095,7 +1107,18 @@ class LocalMediaProvider:
             cat_cands = [c for c in self._index if c.category == category]
             if not cat_cands:
                 continue
-            cat_cands.sort(key=lambda c: str(c.path))
+            # GH-23: within a category, the first-configured root wins. Order
+            # by configured root position (legacy ``roots`` first, then typed
+            # ``media_roots``, each in list order) with the candidate path as
+            # the deterministic tiebreaker *within* one root. Sorting by path
+            # alone would let reordering the user's root list fail to change
+            # the winner.
+            cat_cands.sort(
+                key=lambda c: (
+                    self._root_order.get(str(c.root), len(self._root_order)),
+                    str(c.path),
+                )
+            )
             for cand in cat_cands:
                 method, score = self._score(cand, identities)
                 diag = {

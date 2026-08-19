@@ -367,3 +367,53 @@ round-trip; and an offline assertion (socket monkeypatched).
 Windows runtime (offscreen): multi-mapping add with distinct asset types,
 Check-roots diagnostic, persist-restore across close/reopen, and the
 missing-path diagnostic — each a hard-fail step.
+
+## 14. Issue #23 — ordered multiple metadata roots per asset type
+
+Operators can now configure **multiple** artwork (image/media) roots and
+multiple manual / RTFM roots — including several roots carrying the **same**
+LaunchBox asset type (for example a native Windows LaunchBox *and* a curated
+SMB copy, both holding `Box - Front`).
+
+### Precedence: list order is the priority order
+
+* **The list order of the configured roots IS the precedence order.** When the
+  same asset type (artwork category) is found in more than one root, the
+  **first root in the list wins** the conflict; the remaining roots of that
+  category are only consulted for games the first root does not cover.
+* Reordering the list therefore changes *which* image wins. (Pre-#23,
+  same-category candidates were tie-broken by path string alone, so a GUI
+  reorder could not change the winner — that was the defect.)
+* **Within a single root**, the path string remains the deterministic
+  tiebreaker, so resolution is fully deterministic run to run.
+* Legacy `roots` entries are scanned before typed `media_roots` entries (each
+  group in its own list order); a legacy root holding a category wins over a
+  typed root of the same category regardless of path sorting.
+
+### GUI (LaunchBox tab)
+
+* The **Artwork roots** group box (formerly "Image / media roots") and the
+  **Manuals / RTFM roots** group box (formerly "Manual roots") both state the
+  precedence rule in their tooltips.
+* **Move Up / Move Down** buttons on each control raise/lower the selected
+  root's priority (one position; no-op at the top/bottom, safe with no
+  selection). For artwork rows the *whole row* moves (folder + asset type),
+  so the asset type travels with its folder.
+
+### Missing roots: retained, never deleted
+
+A configured root that does not exist (or is unreadable) is **skipped at
+discovery and retained in the config** — it is surfaced by the Check-roots
+diagnostics and by `scan_launchbox_roots`, never deleted or pruned. The next
+existing root in the list still wins for the games it covers.
+
+### Tests
+
+`tests/test_gui_issue23_ordered_roots.py` covers: first-configured-root-wins
+with reversed-list reversal; configured order beating path-sort order;
+legacy-`roots`-precede-`media_roots`; missing-root skip with next-root-wins
+and retention; within-root path tiebreak determinism; offline (socket
+blocked) resolution; GUI Move Up/Down whole-row reorder for both artwork and
+manual/RTFM lists; boundary no-ops; no-selection safety; relabeled group
+boxes; order surviving the settings/profile round trip (GH-20/GH-33
+regression); and no secret material in a profile carrying ordered roots.
