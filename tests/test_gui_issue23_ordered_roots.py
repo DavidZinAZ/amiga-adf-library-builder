@@ -391,6 +391,11 @@ def test_reordered_order_persists_through_profile_round_trip(
     a, b = str(tmp_path / "media_a"), str(tmp_path / "media_b")
     for p in (a, b):
         Path(p).mkdir(parents=True, exist_ok=True)
+    # The manual roots must EXIST on disk too: _load_profile warns modally
+    # about missing profile paths (GH-20), and a modal loop cannot complete
+    # offscreen. Creating them keeps this test focused on order round-trip.
+    for name in ("manuals_2", "manuals_1"):
+        Path(tmp_path / name).mkdir(parents=True, exist_ok=True)
 
     _add_media_row(mw, a, "Box - Front")
     _add_media_row(mw, b, "Box - Front")

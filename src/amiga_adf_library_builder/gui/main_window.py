@@ -808,11 +808,19 @@ class MainWindow(QMainWindow):
         self._lb_diag_label.setText("")
 
     def _lb_swap_media_rows(self, a: int, b: int) -> None:
-        """Swap artwork rows ``a`` and ``b`` (path item + asset-type combo)."""
+        """Swap artwork rows ``a`` and ``b`` (path item + asset-type combo).
+
+        The whole row moves as a unit so each folder keeps its asset type.
+        QTableWidget has no ``takeWidget``; ``setCellWidget(r, c, None)``
+        detaches the cell widget without deleting it (its parent is the
+        window, not the table), so both widgets can be re-placed crossed.
+        """
         pa = self._lb_media_table.takeItem(a, 0)
         pb = self._lb_media_table.takeItem(b, 0)
-        wa = self._lb_media_table.takeWidget(a, 1)
-        wb = self._lb_media_table.takeWidget(b, 1)
+        wa = self._lb_media_table.cellWidget(a, 1)
+        wb = self._lb_media_table.cellWidget(b, 1)
+        self._lb_media_table.setCellWidget(a, 1, None)
+        self._lb_media_table.setCellWidget(b, 1, None)
         self._lb_media_table.setItem(a, 0, pb)
         self._lb_media_table.setItem(b, 0, pa)
         self._lb_media_table.setCellWidget(a, 1, wb)
@@ -838,18 +846,24 @@ class MainWindow(QMainWindow):
         self._lb_diag_label.setText("")
 
     def _lb_swap_manual_items(self, a: int, b: int) -> None:
-        """Swap manual / RTFM list items ``a`` and ``b`` (text + user data)."""
-        ia = self._lb_manual_list.takeItem(a)
-        ib = self._lb_manual_list.takeItem(b)
-        if ia is None or ib is None:
+        """Swap manual / RTFM list items ``a`` and ``b`` (text + user data).
+
+        ``takeItem`` shrinks the list, so both items must be taken against
+        the ORIGINAL order: remove the higher row first, then the lower one
+        (correct for any ``a != b``; callers pass adjacent rows).
+        """
+        lo, hi = (a, b) if a < b else (b, a)
+        ih = self._lb_manual_list.takeItem(hi)
+        il = self._lb_manual_list.takeItem(lo)
+        if ih is None or il is None:
             # Defensive: put back whatever we took and abort the swap.
-            if ia is not None:
-                self._lb_manual_list.insertItem(a, ia)
-            if ib is not None:
-                self._lb_manual_list.insertItem(b, ib)
+            if il is not None:
+                self._lb_manual_list.insertItem(lo, il)
+            if ih is not None:
+                self._lb_manual_list.insertItem(hi, ih)
             return
-        self._lb_manual_list.insertItem(a, ib)
-        self._lb_manual_list.insertItem(b, ia)
+        self._lb_manual_list.insertItem(lo, ih)
+        self._lb_manual_list.insertItem(hi, il)
 
     def _lb_media_mappings(self) -> list[dict]:
         out: list[dict] = []
