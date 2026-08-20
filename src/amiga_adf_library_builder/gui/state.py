@@ -237,7 +237,13 @@ def build_pipeline_kwargs(
     ``activity`` (issue #21): optional live-log callback forwarded to the
     pipeline as a plain-language activity hook. Omitted (absent) when ``None``,
     so CLI<->GUI equivalence and non-GUI callers are unchanged.
+
+    Verified artwork dimensions: the CLI passes the upstream hard limits
+    (``ARTWORK_MAX_W``/``ARTWORK_MAX_H`` = 2000x2000) to satisfy the exporter
+    gate. The GUI does the same so CLI/GUI equivalence holds for the export
+    gate evaluation.
     """
+    from ..artwork import ARTWORK_MAX_W, ARTWORK_MAX_H
     provider_cfg = state.provider_config_path or config_path or None
     local_media_cfg = resolve_local_media_config_path(
         state, config_path=config_path, cache_dir=cache_dir
@@ -253,6 +259,9 @@ def build_pipeline_kwargs(
         "include_manuals_rtfm": bool(state.include_manuals_rtfm),
         "export": (state.run_mode == "export"),
         "verify_only": bool(state.verify_only),
+        # CLI-equivalent verified artwork dimensions for the exporter gate.
+        "verified_artwork_width": ARTWORK_MAX_W,
+        "verified_artwork_height": ARTWORK_MAX_H,
         # (GH-33) GUI LaunchBox mappings take precedence for local media;
         # otherwise identical to the CLI's provider-config behavior.
         "local_media_config_path": local_media_cfg,

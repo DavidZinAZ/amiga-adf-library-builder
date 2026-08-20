@@ -160,14 +160,17 @@ def test_equiv_build_produces_identical_artifacts(tmp_path: Path):
     # 1) The pipeline invocation inputs are equivalent. The GUI's
     #    build_pipeline_kwargs always sets export/verify_only/require_artwork
     #    (to their run_pipeline defaults: False) plus include_artwork /
-    #    include_manuals_rtfm (to their run_pipeline defaults: True, GH-24); the
-    #    CLI build handler omits all five and relies on those same defaults. Both
-    #    resolve to the identical effective call. Prove the GUI adds exactly
-    #    those five default-only keys and that every CLI-passed key matches.
+    #    include_manuals_rtfm (to their run_pipeline defaults: True, GH-24) and
+    #    verified_artwork_width/height (CLI-equivalent defaults for the exporter
+    #    gate; harmless on build); the CLI build handler omits all seven and
+    #    relies on those same defaults. Both resolve to the identical effective
+    #    call. Prove the GUI adds exactly those seven default-only keys and that
+    #    every CLI-passed key matches.
     gui_only_keys = set(gui_kwargs) - set(cli_kwargs)
     assert gui_only_keys == {
         "export", "verify_only", "require_artwork",
         "include_artwork", "include_manuals_rtfm",
+        "verified_artwork_width", "verified_artwork_height",
     }
     assert gui_kwargs["export"] is False
     assert gui_kwargs["verify_only"] is False

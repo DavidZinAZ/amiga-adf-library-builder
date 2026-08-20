@@ -54,6 +54,14 @@ def run_activity_line(text: str, when: Optional[datetime] = None) -> str:
 
 
 def _fmt_count(value: Any) -> str:
+    """Format a count value for the summary.
+
+    Handles ints, lists, tuples, and None. For collections, returns the length.
+    """
+    if value is None:
+        return "?"
+    if isinstance(value, (list, tuple)):
+        return str(len(value))
     try:
         return str(int(value))
     except (TypeError, ValueError):
@@ -133,6 +141,13 @@ def render_run_summary(
                 "Export: skipped. The app's export safety check is not "
                 f"clear{why}."
             )
+    elif export.get("errors") and export.get("releases_exported", 0) == 0:
+        # Gate closed inside export_all: export ran but produced nothing.
+        why = f" -- {export['errors'][0]}" if export.get("errors") else ""
+        lines.append(
+            "Export: skipped. The app's export safety check is not "
+            f"clear{why}."
+        )
     else:
         lines.append(
             "Export: completed. "
