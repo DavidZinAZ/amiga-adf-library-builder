@@ -128,6 +128,10 @@ carries a `candidates_evaluated` list with per-candidate method/score/path.
 3. public-domain/CC0 local collections (future)
 4. manual-review queue
 5. optional external providers — only when separately installed + configured
+   * IGDB metadata/artwork provider (OPTIONAL, DISABLED by default, requires Twitch OAuth)
+   * Playmatch ROM-hash identity resolver (OPTIONAL, DISABLED by default)
+   * Hasheous ROM-hash identity resolver (OPTIONAL, DISABLED by default)
+   * Wikipedia / RAWG fallback (existing online metadata providers)
 
 The provider never hard-requires a network source.
 

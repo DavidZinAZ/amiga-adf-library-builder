@@ -69,6 +69,7 @@ def run_pipeline(
     rtfm_config_path: Optional[str] = None,
     playmatch_config_path: Optional[str] = None,
     hasheous_config_path: Optional[str] = None,
+    igdb_config_path: Optional[str] = None,
     activity: Optional[Callable[[str], None]] = None,
 ) -> dict:
     """Execute phases 2-4, 5 (optional), and 6. Returns a result summary dict.
@@ -140,12 +141,10 @@ def run_pipeline(
     # existing offline + online artwork paths are unchanged. A provider failure
     # must never break the run -- we degrade to the standard enrich path.
     local_media_provider = None
-    mobygames_enabled = False
-    mobygames_api_key_env = "MOBYGAMES_API_KEY"
     if local_media_config_path:
-        from . import local_media as lm
-
         try:
+            from . import local_media as lm
+
             lm_cfg = lm.load_local_media_config(local_media_config_path)
             if lm_cfg.enabled:
                 lm.assert_read_only_roots(lm_cfg)
@@ -215,6 +214,36 @@ def run_pipeline(
                 hasheous_provider.discover()
         except Exception:  # provider failure must not break the pipeline
             hasheous_provider = None
+    # Optional IGDB metadata/artwork provider. OPTIONAL and DISABLED by
+    # default; only built when an [igdb] config is present AND enabled.
+    # The provider uses title + Amiga platform search (not hash-first).
+    # Credentials (client_id, client_secret) come from the SecretStore
+    # / environment variables, never from config files.
+    igdb_provider = None
+    if igdb_config_path:
+        try:
+            from . import igdb as igdb_mod
+            from .paths import load_igdb_config
+
+            igdb_cfg = igdb_mod.IgdbConfig.from_dict(
+                load_igdb_config(igdb_config_path)
+            )
+            if igdb_cfg.enabled:
+                # Credentials from environment / SecretStore
+                import os
+                client_id = os.environ.get("IGDB_CLIENT_ID", "").strip()
+                client_secret = os.environ.get("IGDB_CLIENT_SECRET", "").strip()
+                if client_id and client_secret:
+                    igdb_provider = igdb_mod.IgdbProvider(
+                        igdb_cfg, cfg.metadata_cache_dir,
+                        client_id=client_id, client_secret=client_secret
+                    )
+                    igdb_provider.discover()
+                else:
+                    # Missing credentials - provider stays disabled
+                    igdb_provider = None
+        except Exception:  # provider failure must not break the pipeline
+            igdb_provider = None
     _act(
         f"Filling in missing metadata for {len(groups)} release(s) "
         + ("from online sources (this can take a while)."
@@ -234,8 +263,7 @@ def run_pipeline(
         local_media_provider=local_media_provider,
         playmatch_provider=playmatch_provider,
         hasheous_provider=hasheous_provider,
-        mobygames_enabled=mobygames_enabled,
-        mobygames_api_key_env=mobygames_api_key_env,
+        igdb_provider=igdb_provider,
         include_artwork=include_artwork,
         activity=activity,
     )
