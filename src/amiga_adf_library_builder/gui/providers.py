@@ -420,6 +420,201 @@ class HasheousProvider(Provider):
         secret_store.delete_secret("hasheous_token")
 
 
+# --- IGDB provider adapter ---------------------------------------------------
+
+
+def _igdb_field_defaults() -> list[ProviderField]:
+    return [
+        ProviderField(
+            key="base_url",
+            label="IGDB API endpoint",
+            default="https://api.igdb.com/v4",
+            placeholder="https://api.igdb.com/v4",
+            help_text=(
+                "IGDB API endpoint. Only change if using a self-hosted/enterprise "
+                "IGDB-compatible instance."
+            ),
+        ),
+        ProviderField(
+            key="timeout_seconds",
+            label="Time limit per request (seconds)",
+            default="10.0",
+            help_text="How long to wait for the server before giving up (capped at 30 seconds).",
+        ),
+        ProviderField(
+            key="max_response_bytes",
+            label="Maximum response size (bytes)",
+            default="1000000",
+            help_text="Refuse to read more than this from the server (protection against oversized replies).",
+        ),
+        ProviderField(
+            key="max_concurrency",
+            label="Maximum concurrent requests",
+            default="1",
+            help_text="Maximum number of concurrent API requests (capped at 8).",
+        ),
+        ProviderField(
+            key="confidence_threshold",
+            label="Minimum match confidence",
+            default="0.9",
+            help_text="A result is accepted automatically only if the match confidence is at least this (0–1).",
+        ),
+        ProviderField(
+            key="token_cache_ttl",
+            label="OAuth token cache TTL (seconds)",
+            default="5000000",
+            help_text="How long to cache the Twitch OAuth token (~58 days default). <= 0 disables reuse.",
+        ),
+        ProviderField(
+            key="respect_rate_limit",
+            label="Honor rate limits (429 Retry-After)",
+            default="true",
+            help_text="Pause and retry once when the server asks us to slow down (ToS compliance).",
+        ),
+        ProviderField(
+            key="rate_limit_backoff_seconds",
+            label="Rate limit backoff (seconds)",
+            default="1.0",
+            help_text="Default wait when server sends no Retry-After header (capped at 5s).",
+        ),
+    ]
+
+
+def _build_igdb_config_dict(*, enabled: bool, base_url: str, timeout_seconds: str,
+                            max_response_bytes: str, max_concurrency: str,
+                            confidence_threshold: str, token_cache_ttl: str,
+                            respect_rate_limit: str, rate_limit_backoff_seconds: str) -> dict:
+    """Build a typed ``[igdb]`` TOML table (mirrors IgdbConfig)."""
+    return {
+        "enabled": enabled,
+        "base_url": base_url or "https://api.igdb.com/v4",
+        "timeout_seconds": float(timeout_seconds or 10.0),
+        "max_response_bytes": int(max_response_bytes or 1_000_000),
+        "max_concurrency": int(max_concurrency or 1),
+        "confidence_threshold": float(confidence_threshold or 0.9),
+        "token_cache_ttl": float(token_cache_ttl or 5_000_000),
+        "respect_rate_limit": (respect_rate_limit == "true" or respect_rate_limit is True),
+        "rate_limit_backoff_seconds": float(rate_limit_backoff_seconds or 1.0),
+    }
+
+
+class IgdbProvider(Provider):
+    """Generic GUI adapter over the core IGDB metadata/artwork provider.
+
+    The provider is OPTIONAL and DISABLED by default. Its credentials
+    (client_id, client_secret) live in the SecretStore under the keys
+    ``igdb_client_id`` and ``igdb_client_secret`` -- never in config.
+    The base URL and bounds are non-secret and rendered by the generic panel.
+    """
+
+    def __init__(self) -> None:
+        self.metadata = ProviderMetadata(
+            id="igdb",
+            name="IGDB",
+            description=(
+                "Optional metadata and artwork lookup via IGDB (Internet Game Database). "
+                "Searches by title filtered to Amiga platform. Requires Twitch OAuth "
+                "credentials (client_id, client_secret) from Twitch Developer Console. "
+                "Disabled by default."
+            ),
+            auth_required="required",
+            fields=_igdb_field_defaults(),
+            capabilities=[
+                ProviderCapability.ONLINE_LOOKUP,
+                ProviderCapability.METADATA,
+                ProviderCapability.ARTWORK,
+            ],
+            requires_secret=True,
+        )
+        self._enabled = False
+        self._base_url = "https://api.igdb.com/v4"
+        self._timeout_seconds = "10.0"
+        self._max_response_bytes = "1000000"
+        self._max_concurrency = "1"
+        self._confidence_threshold = "0.9"
+        self._token_cache_ttl = "5000000"
+        self._respect_rate_limit = "true"
+        self._rate_limit_backoff_seconds = "1.0"
+        self._lock = threading.RLock()
+
+    # --- config ---------------------------------------------------------------
+    def is_configured(self) -> bool:
+        with self._lock:
+            return bool(self._base_url and self._base_url.strip())
+
+    def enabled(self) -> bool:
+        with self._lock:
+            return self._enabled and self.is_configured()
+
+    def set_field(self, key: str, value: str) -> None:
+        with self._lock:
+            if key == "base_url":
+                self._base_url = (value or "").rstrip("/")
+            elif key == "timeout_seconds":
+                self._timeout_seconds = value
+            elif key == "max_response_bytes":
+                self._max_response_bytes = value
+            elif key == "max_concurrency":
+                self._max_concurrency = value
+            elif key == "confidence_threshold":
+                self._confidence_threshold = value
+            elif key == "token_cache_ttl":
+                self._token_cache_ttl = value
+            elif key == "respect_rate_limit":
+                self._respect_rate_limit = value
+            elif key == "rate_limit_backoff_seconds":
+                self._rate_limit_backoff_seconds = value
+            elif key == "enabled":
+                self._enabled = (value == "true" or value is True)
+            else:
+                raise KeyError(f"unknown igdb field: {key}")
+
+    def set_enabled(self, enabled: bool) -> None:
+        with self._lock:
+            self._enabled = bool(enabled)
+
+    def to_config_dict(self) -> dict:
+        with self._lock:
+            return _build_igdb_config_dict(
+                enabled=self._enabled,
+                base_url=self._base_url,
+                timeout_seconds=self._timeout_seconds,
+                max_response_bytes=self._max_response_bytes,
+                max_concurrency=self._max_concurrency,
+                confidence_threshold=self._confidence_threshold,
+                token_cache_ttl=self._token_cache_ttl,
+                respect_rate_limit=self._respect_rate_limit,
+                rate_limit_backoff_seconds=self._rate_limit_backoff_seconds,
+            )
+
+    # --- status ---------------------------------------------------------------
+    def status(self) -> ProviderStatus:
+        with self._lock:
+            if not self._enabled:
+                return ProviderStatus(ok=True, message="Turned off", configured=self.is_configured())
+            if not self.is_configured():
+                return ProviderStatus(ok=False, message="Not set up yet — enter the API endpoint below", configured=False)
+            return ProviderStatus(ok=True, message="Ready", configured=True)
+
+    def test_connection(self) -> ProviderStatus:
+        # The core provider performs the real SSRF-guarded fetch lazily; the GUI
+        # does not open sockets here. We report configured status only.
+        return self.status()
+
+    # --- secrets --------------------------------------------------------------
+    def add_credentials(self, secret_store: Any, **secrets: str) -> None:
+        client_id = secrets.get("client_id")
+        client_secret = secrets.get("client_secret")
+        if client_id:
+            secret_store.set_secret("igdb_client_id", client_id)
+        if client_secret:
+            secret_store.set_secret("igdb_client_secret", client_secret)
+
+    def remove_credentials(self, secret_store: Any) -> None:
+        secret_store.delete_secret("igdb_client_id")
+        secret_store.delete_secret("igdb_client_secret")
+
+
 # --- Registry ----------------------------------------------------------------
 
 
@@ -456,8 +651,9 @@ class ProviderRegistry:
 
 
 def default_registry() -> ProviderRegistry:
-    """Return a registry pre-loaded with the two core online resolvers."""
+    """Return a registry pre-loaded with the three core online resolvers."""
     reg = ProviderRegistry()
     reg.register(PlaymatchProvider())
     reg.register(HasheousProvider())
+    reg.register(IgdbProvider())
     return reg

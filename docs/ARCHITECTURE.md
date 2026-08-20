@@ -82,8 +82,24 @@ unique release name so it never breaks the Gotek flat layout.
 - `grouper.py` — clustering / ordering
 - `catalog.py` — persistent catalogue + cache
 - `enrich.py` — metadata/artwork (offline NFO; `--online` hook to online providers)
+- `igdb.py` — optional IGDB metadata/artwork provider (OPTIONAL, DISABLED by default)
 - `exporter.py` — Gotek tree writer
 - `quarantine.py` — review/unknown routing
+- `playmatch.py` — optional Playmatch ROM-hash identity resolver (OPTIONAL, DISABLED by default)
+- `hasheous.py` — optional Hasheous ROM-hash identity resolver (OPTIONAL, DISABLED by default)
+- `local_media.py` — local-media artwork provider (offline, read-only)
+- `rtfm.py` — deterministic manual sidecar build (offline, NO-AI)
+- `metadata.py` — online metadata providers (Wikipedia, RAWG) + cache/provenance
+- `artwork.py` — artwork processing / resize
+- `nfo_render.py` — Gotek-facing NFO rendering
+- `manual_approvals.py` — operator manual approvals
+- `naming.py` — release basename generation
+- `paths.py` — portable path configuration
+- `models.py` — core data models
+- `logging_utils.py` — structured logging / redaction
+- `exporter_guard.py` — export safety gate
+- `activity_log.py` — live activity log (issue #21)
+- `gui/` — PySide6 Windows GUI (optional extra)
 
 ## Safety properties
 

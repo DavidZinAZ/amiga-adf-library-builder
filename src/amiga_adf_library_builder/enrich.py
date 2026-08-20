@@ -18,6 +18,7 @@ from .logging_utils import redact
 from .metadata import MetadataRecord, cache_key, guard_url, lookup_metadata
 from .playmatch import PlaymatchMatchMethod
 from .hasheous import HasheousMatchMethod
+from .igdb import IgdbMatchMethod
 from .models import ReleaseGroup, ScanRecord
 from .naming import release_basename
 from .nfo_render import render_gotek_nfo
@@ -79,6 +80,9 @@ class EnrichCategory(str, Enum):
     HASHEOUS = "hasheous"
     HASHEOUS_MISS = "hasheous_miss"
     HASHEOUS_REVIEW = "hasheous_review"
+    IGDB = "igdb"
+    IGDB_MISS = "igdb_miss"
+    IGDB_REVIEW = "igdb_review"
 
 
 @dataclass
@@ -446,9 +450,7 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                  metadata_cache_dir: Optional[Path] = None, curated_metadata_dir: Optional[Path] = None,
                  online: bool = False, refresh: bool = False,
                  local_media_provider=None, playmatch_provider=None,
-                 hasheous_provider=None,
-                 mobygames_enabled: bool = False,
-                 mobygames_api_key_env: str = "MOBYGAMES_API_KEY",
+                 hasheous_provider=None, igdb_provider=None,
                  include_artwork: bool = True,
                  activity: Optional[Callable[[str], None]] = None) -> EnrichResult:
     metadata_cache_dir = Path(metadata_cache_dir or (Path(nfo_dir).parent / "metadata-cache"))
@@ -494,8 +496,6 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
             metadata, provider, relevance_events = lookup_metadata(
                 lookup_title, cache_dir=metadata_cache_dir,
                 curated_dir=curated_metadata_dir, refresh=refresh, group=group,
-                mobygames_enabled=mobygames_enabled,
-                mobygames_api_key_env=mobygames_api_key_env,
             )
             # Surface online relevance fall-through decisions as structured
             # diagnostics (bounded: one event per rejected/reviewed candidate).
@@ -695,6 +695,79 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
             events.append(EnrichEvent(
                 category=EnrichCategory.HASHEOUS_MISS,
                 detail=f"hasheous resolve raised: {exc}",
+                ok=False, error=str(exc),
+            ))
+
+    # Optional IGDB metadata/artwork provider. Title + Amiga platform search.
+    # Non-hash-first; runs independently of Playmatch/Hasheous.
+    _igdb_success_event: Optional[EnrichEvent] = None
+    _igdb_success_note: Optional[str] = None
+    igdb_result = None
+    if igdb_provider is not None:
+        try:
+            igdb_result = igdb_provider.resolve(group)
+            if igdb_result is not None:
+                if igdb_result.found:
+                    _igdb_success_event = EnrichEvent(
+                        category=EnrichCategory.IGDB,
+                        detail=(f"resolved via {igdb_result.match_method.value} "
+                                f"conf={igdb_result.confidence:.2f} "
+                                f"provider_id={igdb_result.provider_id}"),
+                        ok=True,
+                    )
+                    if igdb_result.provider_id:
+                        _igdb_success_note = (
+                            f"igdb provider_id: {igdb_result.provider_id}"
+                        )
+                    # Merge IGDB metadata into the main metadata record if it improves things
+                    if igdb_result.metadata and (not metadata or igdb_result.confidence > (metadata.confidence or 0.0)):
+                        # Use IGDB metadata as primary source
+                        if metadata is None:
+                            metadata = MetadataRecord(canonical_title=lookup_title or group.title or "Unknown")
+                        # Merge fields - IGDB is authoritative for online metadata
+                        md = igdb_result.metadata
+                        if md.get("canonical_title"):
+                            metadata.canonical_title = md["canonical_title"]
+                        if md.get("description"):
+                            metadata.description = md["description"]
+                        if md.get("year"):
+                            metadata.year = md["year"]
+                        if md.get("genres"):
+                            metadata.genres = md["genres"]
+                        if md.get("platforms"):
+                            metadata.platforms = md["platforms"]
+                        if md.get("source_url"):
+                            metadata.source_url = md["source_url"]
+                        if md.get("provider_id"):
+                            metadata.provider_id = md["provider_id"]
+                        metadata.provider = "igdb"
+                        metadata.confidence = max(metadata.confidence, igdb_result.confidence)
+                        # Artwork URLs from IGDB
+                        if md.get("artwork_urls"):
+                            metadata.artwork_page_urls = md["artwork_urls"]
+                            metadata.artwork_provider = md.get("artwork_provider", "igdb")
+                        # External IDs
+                        if igdb_result.external_ids:
+                            # Store external IDs for potential downstream use
+                            pass
+                elif igdb_result.needs_manual_review:
+                    events.append(EnrichEvent(
+                        category=EnrichCategory.IGDB_REVIEW,
+                        detail=(f"igdb needs manual review: "
+                                f"{igdb_result.manual_review_reason}"),
+                        ok=False, error=igdb_result.manual_review_reason,
+                    ))
+                    notes.append("igdb: routed to manual review")
+                else:
+                    events.append(EnrichEvent(
+                        category=EnrichCategory.IGDB_MISS,
+                        detail="igdb: no identity match",
+                        cache="miss",
+                    ))
+        except Exception as exc:  # defensive: never break enrich
+            events.append(EnrichEvent(
+                category=EnrichCategory.IGDB_MISS,
+                detail=f"igdb resolve raised: {exc}",
                 ok=False, error=str(exc),
             ))
 
@@ -915,12 +988,18 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
         needs_manual_review
         or (playmatch_result is not None and playmatch_result.needs_manual_review)
         or (hasheous_result is not None and hasheous_result.needs_manual_review)
+        or (igdb_result is not None and igdb_result.needs_manual_review)
         or any(e.category in (
             EnrichCategory.PLAYMATCH_REVIEW,
             EnrichCategory.HASHEOUS_REVIEW,
+            EnrichCategory.IGDB_REVIEW,
             EnrichCategory.LOCAL_MEDIA_REVIEW,
         ) for e in events)
     )
+    if _igdb_success_event is not None:
+        events.append(_igdb_success_event)
+        if _igdb_success_note is not None:
+            notes.append(_igdb_success_note)
     return EnrichResult(nfo_path, master, processed, processed is not None, notes, metadata_path, provider, processed is None, events, needs_manual_review=needs_manual_review)
 
 
@@ -930,9 +1009,7 @@ def enrich_all(groups: list[ReleaseGroup], *, nfo_dir: Path, scans: list[ScanRec
                curated_metadata_dir: Optional[Path] = None,
                online: bool = False, refresh: bool = False,
                local_media_provider=None, playmatch_provider=None,
-               hasheous_provider=None,
-               mobygames_enabled: bool = False,
-               mobygames_api_key_env: str = "MOBYGAMES_API_KEY",
+               hasheous_provider=None, igdb_provider=None,
                include_artwork: bool = True,
                activity: Optional[Callable[[str], None]] = None) -> list[EnrichResult]:
     scan_map = {s.filename: s for s in scans}
@@ -958,8 +1035,7 @@ def enrich_all(groups: list[ReleaseGroup], *, nfo_dir: Path, scans: list[ScanRec
                      local_media_provider=local_media_provider,
                      playmatch_provider=playmatch_provider,
                      hasheous_provider=hasheous_provider,
-                     mobygames_enabled=mobygames_enabled,
-                     mobygames_api_key_env=mobygames_api_key_env,
+                     igdb_provider=igdb_provider,
                      include_artwork=include_artwork,
                      activity=activity))
     return results

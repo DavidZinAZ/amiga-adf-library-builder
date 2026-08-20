@@ -112,7 +112,6 @@ enabled = false
 # confidence_threshold = 0.9
 # cache_ttl = 0  # seconds; <= 0 disables canonical-reuse cache
 
-
 # --- Issue #14 LaunchBox Games Database online provider (BLOCKED) --------------
 # FEASIBILITY: INFEASIBLE / BLOCKED — see docs/issue14-launchbox-gamesdb-feasibility.md
 #
@@ -156,3 +155,27 @@ enabled = false
 # preferred_image_types = ["cover", "screenshot", "box"]
 # timeout = 20.0
 
+# --- IGDB metadata/artwork provider (OPTIONAL, DISABLED by default) -----------
+# Opt-in metadata and artwork lookup via IGDB (Internet Game Database).
+# Requires a Twitch OAuth client credentials pair (client_id, client_secret)
+# from the Twitch Developer Console. Credentials are NEVER stored in config
+# files; they come from the SecretStore / environment variables
+# (IGDB_CLIENT_ID, IGDB_CLIENT_SECRET) only.
+#
+# The provider searches IGDB by game title filtered to the Amiga platform (ID 12).
+# Exact title + platform matches are preferred; fuzzy matches route to review
+# when ambiguous. Cover artwork and screenshots are fetched from IGDB's CDN.
+#
+# The provider is OFFLINE at import time. No network calls occur until a real
+# fetch with --online. Tests inject fake openers; no live network in test suite.
+# All outbound requests are guarded by the existing SSRF guard (metadata.guard_url).
+[igdb]
+enabled = false
+# base_url = "https://api.igdb.com/v4"
+# timeout_seconds = 10.0
+# max_response_bytes = 1000000
+# max_concurrency = 1
+# confidence_threshold = 0.9
+# token_cache_ttl = 5000000  # seconds; ~58 days, <= 0 disables token reuse
+# respect_rate_limit = true
+# rate_limit_backoff_seconds = 1.0
