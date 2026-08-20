@@ -369,9 +369,11 @@ class MainWindow(QMainWindow):
         tabs.addTab(self._build_launchbox_tab(), "LaunchBox media")
         tabs.addTab(self._build_diagnostics_tab(), "Diagnostics")
 
-        # --- run controls ---
-        run_box = QGroupBox("Run")
+        # --- run/export settings (consolidated) ---
+        run_box = QGroupBox("Run / Export Settings")
         run_layout = QVBoxLayout(run_box)
+
+        # Run mode: Build vs Export
         mode_row = QHBoxLayout()
         self._mode_build = QCheckBox("Build the library (scan, organize, prepare)")
         self._mode_build.setChecked(True)
@@ -382,12 +384,51 @@ class MainWindow(QMainWindow):
         self._mode_export = QCheckBox("Export the library (writes the final files)")
         self._mode_export.setToolTip(
             "Builds the library and then writes the final export files to the "
-            "export destination. A confirmation is requested before files are "
-            "written."
+            "export destination. Requires 'Allow export' to be checked."
         )
         mode_row.addWidget(self._mode_build)
         mode_row.addWidget(self._mode_export)
         run_layout.addLayout(mode_row)
+
+        # Export gating controls (from Advanced tab) - now visible in Run/Export area
+        gate_row = QHBoxLayout()
+        self._cb_gate = QCheckBox("Allow export")
+        self._cb_gate.setToolTip(
+            "Confirm that you want to write the export files. The export is "
+            "refused until this box is checked."
+        )
+        self._cb_verify = QCheckBox("Check only — don't change files")
+        self._cb_verify.setToolTip(
+            "Run the full build/export check without writing any files. "
+            "Useful to verify your library and settings before a real export."
+        )
+        gate_row.addWidget(self._cb_gate)
+        gate_row.addWidget(self._cb_verify)
+        gate_row.addStretch(1)
+        run_layout.addLayout(gate_row)
+
+        # Export requirements (from Options tab) - now visible in Run/Export area
+        req_box = QGroupBox("Export Requirements")
+        req_layout = QVBoxLayout(req_box)
+        self._cb_artwork = QCheckBox("Require artwork before export")
+        self._cb_artwork.setToolTip(
+            "Stop the export if any release is missing its cover artwork, "
+            "instead of exporting with missing covers."
+        )
+        req_layout.addWidget(self._cb_artwork)
+        run_layout.addWidget(req_box)
+
+        # Destination preview when export mode is selected
+        self._export_dest_label = QLabel("")
+        self._export_dest_label.setWordWrap(True)
+        self._export_dest_label.setStyleSheet("color: #666; font-size: 11px;")
+        run_layout.addWidget(self._export_dest_label)
+
+        # Pre-run export state summary
+        self._export_state_label = QLabel("")
+        self._export_state_label.setWordWrap(True)
+        self._export_state_label.setStyleSheet("font-weight: bold;")
+        run_layout.addWidget(self._export_state_label)
 
         self._progress = QProgressBar(self)
         self._progress.setRange(0, 100)
@@ -410,6 +451,14 @@ class MainWindow(QMainWindow):
         btn_row.addStretch(1)
         run_layout.addLayout(btn_row)
         root.addWidget(run_box)
+
+        # Connect mode checkboxes to update export state display
+        self._mode_build.stateChanged.connect(self._update_export_state_display)
+        self._mode_export.stateChanged.connect(self._update_export_state_display)
+        self._cb_gate.stateChanged.connect(self._update_export_state_display)
+        self._cb_verify.stateChanged.connect(self._update_export_state_display)
+        self._cb_artwork.stateChanged.connect(self._update_export_state_display)
+        self._le_output_dir.textChanged.connect(self._update_export_state_display)
 
     def _dir_row(self, label: str, line_edit: QLineEdit, tooltip: str = "") -> QHBoxLayout:
         row = QHBoxLayout()
@@ -483,11 +532,6 @@ class MainWindow(QMainWindow):
             "from the last run. Slower; only needed if a lookup came back "
             "wrong."
         )
-        self._cb_artwork = QCheckBox("Require artwork before export")
-        self._cb_artwork.setToolTip(
-            "Stop the export if any release is missing its cover artwork, "
-            "instead of exporting with missing covers."
-        )
         # (GH-24) Independent artwork selection: whether to SEARCH for artwork
         # at all. Distinct from "Require artwork before export" (which gates
         # the export). Default ON.
@@ -508,7 +552,7 @@ class MainWindow(QMainWindow):
             "this run. On by default."
         )
         for cb in (
-            self._cb_online, self._cb_refresh, self._cb_artwork,
+            self._cb_online, self._cb_refresh,
             self._cb_include_artwork, self._cb_include_manuals,
         ):
             routine_layout.addWidget(cb)
@@ -521,23 +565,12 @@ class MainWindow(QMainWindow):
             "leave them alone unless you know what you are changing."
         )
         advanced_layout = QVBoxLayout(advanced_box)
-        self._cb_verify = QCheckBox("Check only — don't change files")
-        self._cb_verify.setToolTip(
-            "Run the full build/export check without writing any files. "
-            "Useful to verify your library and settings before a real export."
-        )
-        self._cb_gate = QCheckBox("Allow export")
-        self._cb_gate.setToolTip(
-            "Confirm that you want to write the export files. The export is "
-            "refused until this box is checked."
-        )
         self._cb_advanced = QCheckBox("Remember these settings")
         self._cb_advanced.setToolTip(
             "Keep the choices in this group so they are restored the next "
             "time you start the app. Off by default."
         )
-        for cb in (self._cb_verify, self._cb_gate, self._cb_advanced):
-            advanced_layout.addWidget(cb)
+        advanced_layout.addWidget(self._cb_advanced)
         layout.addWidget(advanced_box)
         layout.addStretch(1)
         return w
@@ -1320,6 +1353,46 @@ class MainWindow(QMainWindow):
         self._cb_include_manuals.setChecked(s.include_manuals_rtfm)
         self._lb_restore_mappings(s)
         apply_theme(s.theme or "system", themes_dir=self._paths.themes_dir)
+        self._update_export_state_display()
+
+    def _update_export_state_display(self) -> None:
+        """Update the pre-run export state summary label and destination preview."""
+        # Update destination preview
+        if self._mode_export.isChecked():
+            output_dir = self._le_output_dir.text().strip()
+            if output_dir:
+                self._export_dest_label.setText(f"Export destination: {output_dir}")
+            else:
+                self._export_dest_label.setText("Export destination: (using default from configuration)")
+        else:
+            self._export_dest_label.setText("")
+
+        # Build export state summary
+        reasons: list[str] = []
+        will_export = False
+
+        if not self._mode_export.isChecked():
+            reasons.append("Build-only mode selected (Export not checked)")
+        else:
+            if not self._cb_gate.isChecked():
+                reasons.append("'Allow export' is not checked")
+            if self._cb_verify.isChecked():
+                reasons.append("'Check only' mode enabled (no files written)")
+
+            if not reasons:
+                will_export = True
+
+        # Check for missing output directory (warning, not blocking)
+        if will_export and not self._le_output_dir.text().strip():
+            reasons.append("Output directory not set (will use default)")
+
+        if will_export:
+            self._export_state_label.setText("Files WILL be exported")
+            self._export_state_label.setStyleSheet("font-weight: bold; color: #2e7d32;")
+        else:
+            reason_text = "; ".join(reasons) if reasons else "Export blocked"
+            self._export_state_label.setText(f"Files will NOT be exported: {reason_text}")
+            self._export_state_label.setStyleSheet("font-weight: bold; color: #c62828;")
 
     # --- (GH-33) LaunchBox mappings: restore from persisted settings ----------
     def _lb_restore_mappings(self, s: "Settings") -> None:
