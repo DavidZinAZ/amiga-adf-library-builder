@@ -385,6 +385,10 @@ def _resolve_local_media_master(group: ReleaseGroup, provider) -> tuple[Optional
     is surfaced as a manual-review event (nothing is silently accepted); a miss
     emits a quiet miss event. Never mutates the source library (the provider
     guarantees read-only access).
+
+    Emits detailed per-candidate diagnostics for QA and security review:
+    each candidate is logged with its matching key/strategy, score, and
+    rejection reason (matched/rejected/unmatched).
     """
     from . import local_media as lm
 
@@ -403,16 +407,87 @@ def _resolve_local_media_master(group: ReleaseGroup, provider) -> tuple[Optional
         ))
         return None, events
 
+    # Emit detailed per-candidate diagnostics for each evaluated candidate
+    # This exposes the matching key/strategy for every match attempt
+    candidates_evaluated = getattr(result, "candidates_evaluated", []) or []
+    matched_count = 0
+    rejected_count = 0
+    unmatched_count = 0
+
+    for cand_diag in candidates_evaluated:
+        method = cand_diag.get("method", "none")
+        score = cand_diag.get("score", 0.0)
+        path = cand_diag.get("path", "")
+        category = cand_diag.get("category", "")
+        norm_stem = cand_diag.get("norm_stem", "")
+
+        # Determine if this candidate was the matched one
+        is_matched = (
+            result.found
+            and result.cached_path is not None
+            and Path(path).name == Path(result.cached_path).name
+            and method == result.match_method.value
+        )
+
+        if is_matched:
+            matched_count += 1
+            events.append(EnrichEvent(
+                category=EnrichCategory.LOCAL_MEDIA,
+                detail=(
+                    f"matched {method} in {category!r} (conf {score:.2f}); "
+                    f"stem={norm_stem!r}; source={Path(path).name}"
+                ),
+                cache="hit", ok=True,
+            ))
+        elif method != "none" and score >= getattr(provider.config, "confidence_threshold", lm.AUTO_ACCEPT_MIN_CONF):
+            # Confident match that wasn't selected (lower priority category)
+            rejected_count += 1
+            events.append(EnrichEvent(
+                category=EnrichCategory.LOCAL_MEDIA,
+                detail=(
+                    f"rejected {method} in {category!r} (conf {score:.2f}); "
+                    f"stem={norm_stem!r}; source={Path(path).name}; "
+                    f"lower priority than selected match"
+                ),
+                cache="miss", ok=False,
+                error="lower priority category",
+            ))
+        elif method in ("fuzzy", "fuzzy_manual"):
+            # Fuzzy candidate that didn't meet threshold
+            rejected_count += 1
+            events.append(EnrichEvent(
+                category=EnrichCategory.LOCAL_MEDIA_REVIEW,
+                detail=(
+                    f"rejected fuzzy {method} in {category!r} (conf {score:.2f}); "
+                    f"stem={norm_stem!r}; source={Path(path).name}; "
+                    f"below confidence threshold"
+                ),
+                cache="miss", ok=False,
+                error="below confidence threshold",
+            ))
+        else:
+            # No match at all
+            unmatched_count += 1
+            events.append(EnrichEvent(
+                category=EnrichCategory.LOCAL_MEDIA_MISS,
+                detail=(
+                    f"unmatched in {category!r} (method={method}, score={score:.2f}); "
+                    f"stem={norm_stem!r}; source={Path(path).name}"
+                ),
+                cache="miss", ok=True,
+            ))
+
+    # Summary event with counts
+    events.append(EnrichEvent(
+        category=EnrichCategory.LOCAL_MEDIA,
+        detail=(
+            f"local-media scan: {len(candidates_evaluated)} candidates evaluated; "
+            f"{matched_count} matched; {rejected_count} rejected; {unmatched_count} unmatched"
+        ),
+        cache="hit" if result.found else "miss", ok=True,
+    ))
+
     if result.found and result.cached_path is not None:
-        events.append(EnrichEvent(
-            category=EnrichCategory.LOCAL_MEDIA,
-            detail=(
-                f"matched {result.match_method.value} in "
-                f"{result.category!r} (conf {result.confidence:.2f}); "
-                f"cached {Path(result.cached_path).name}"
-            ),
-            cache="hit", ok=True,
-        ))
         return Path(result.cached_path), events
     if result.needs_manual_review:
         events.append(EnrichEvent(

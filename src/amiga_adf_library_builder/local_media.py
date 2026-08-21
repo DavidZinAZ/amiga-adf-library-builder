@@ -1084,6 +1084,10 @@ class LocalMediaProvider:
         Honors exact category priority: every candidate in category 1 is scored
         before category 2 is considered. Returns a small record
         ``(candidate, method, confidence, evaluated, reason)``.
+
+        For diagnostics, ALL candidates across ALL categories are scored and
+        recorded in ``evaluated`` so the per-candidate audit trail shows every
+        match attempt with its method, score, and rejection reason.
         """
 
         @dataclass
@@ -1100,9 +1104,25 @@ class LocalMediaProvider:
         # Precompute the group's matching identities.
         identities = self._group_identities(group)
 
+        # First pass: score ALL candidates across ALL categories for diagnostics.
+        # We need the full audit trail even though selection respects priority.
+        all_cands = list(self._index)
+        all_cands.sort(key=lambda c: (self.config.preferred_image_types.index(c.category) if c.category in self.config.preferred_image_types else 999, str(c.path)))
+        for cand in all_cands:
+            method, score = self._score(cand, identities)
+            diag = {
+                "path": str(cand.path),
+                "category": cand.category,
+                "method": method.value,
+                "score": round(score, 4),
+                "norm_stem": cand.norm_stem,
+            }
+            evaluated.append(diag)
+
+        # Second pass: actual selection respecting priority order.
         # Iterate categories in strict priority order. For each category we
-        # score ALL its candidates first; only if none is confident do we move
-        # on. A confident hit in an earlier category wins immediately.
+        # score its candidates (already done above, but we check the threshold).
+        # A confident hit in an earlier category wins immediately.
         for category in self.config.preferred_image_types:
             cat_cands = [c for c in self._index if c.category == category]
             if not cat_cands:
@@ -1121,14 +1141,6 @@ class LocalMediaProvider:
             )
             for cand in cat_cands:
                 method, score = self._score(cand, identities)
-                diag = {
-                    "path": str(cand.path),
-                    "category": cand.category,
-                    "method": method.value,
-                    "score": round(score, 4),
-                    "norm_stem": cand.norm_stem,
-                }
-                evaluated.append(diag)
                 if method != MatchMethod.NONE and score >= self.config.confidence_threshold:
                     pick.candidate = cand
                     pick.method = method
