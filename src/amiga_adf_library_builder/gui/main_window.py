@@ -1186,7 +1186,10 @@ class MainWindow(QMainWindow):
         )
 
     def _on_open_logs(self) -> None:
-        path = self._paths.logs_dir
+        # Use the same logs_dir that write_run_log writes to (cfg.logs_dir)
+        # which is under library_root/logs, not the portable app's logs dir.
+        # We need to get it from the last successful run's PathConfig.
+        path = getattr(self, "_last_run_logs_dir", None) or self._paths.logs_dir
         try:
             from PySide6.QtGui import QDesktopServices
             from PySide6.QtCore import QUrl
@@ -1697,7 +1700,7 @@ class MainWindow(QMainWindow):
         self._progress.setValue(percent)
         self._status_label.setText(phase + (f" — {redact(detail)}" if detail else ""))
 
-    def _on_finished(self, result, error: str, cancelled: bool) -> None:
+    def _on_finished(self, result, error: str, cancelled: bool, cfg=None) -> None:
         self._run_in_progress = False
         self._run_button.setEnabled(True)
         self._cancel_button.setEnabled(False)
@@ -1722,6 +1725,29 @@ class MainWindow(QMainWindow):
         ):
             self._append_diag(line)
         self._run_marker("=== RUN END (done) ===")
+
+        # structured logging: persist a per-run diagnostic log under logs_dir.
+        # This mirrors the CLI's _emit() behavior. Failures are swallowed.
+        if cfg is not None:
+            from ..logging_utils import write_run_log
+            from datetime import datetime, timezone
+
+            started_at = datetime.now(timezone.utc).isoformat()
+            # The worker emits activity lines but doesn't track argv/command;
+            # use minimal values for the GUI context.
+            write_run_log(
+                logs_dir=cfg.logs_dir,
+                run_id=result.get("run_id") or "unknown",
+                config_label="gui",
+                cfg=cfg,
+                argv=["gui"],
+                command=self._run_mode,
+                result=result,
+                started_at=started_at,
+                return_code=0,
+            )
+            # Remember the logs_dir so the "Open Logs" button opens the right place.
+            self._last_run_logs_dir = cfg.logs_dir
 
     # --- close ----------------------------------------------------------------
     def closeEvent(self, event: QEvent) -> None:
