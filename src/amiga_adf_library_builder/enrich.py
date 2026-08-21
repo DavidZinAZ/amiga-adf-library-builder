@@ -389,6 +389,11 @@ def _resolve_local_media_master(group: ReleaseGroup, provider) -> tuple[Optional
     Emits detailed per-candidate diagnostics for QA and security review:
     each candidate is logged with its matching key/strategy, score, and
     rejection reason (matched/rejected/unmatched).
+
+    GH-49: Supports three outcomes:
+    - auto_match: cached and ready
+    - needs_review: flagged for manual review, not cached
+    - no_match: nothing found
     """
     from . import local_media as lm
 
@@ -413,6 +418,7 @@ def _resolve_local_media_master(group: ReleaseGroup, provider) -> tuple[Optional
     matched_count = 0
     rejected_count = 0
     unmatched_count = 0
+    needs_review_count = 0
 
     for cand_diag in candidates_evaluated:
         method = cand_diag.get("method", "none")
@@ -421,15 +427,22 @@ def _resolve_local_media_master(group: ReleaseGroup, provider) -> tuple[Optional
         category = cand_diag.get("category", "")
         norm_stem = cand_diag.get("norm_stem", "")
 
-        # Determine if this candidate was the matched one
-        is_matched = (
-            result.found
+        # GH-49: Determine outcome for this candidate based on result.outcome
+        is_auto_match = (
+            result.outcome == "auto_match"
+            and result.found
             and result.cached_path is not None
             and Path(path).name == Path(result.cached_path).name
             and method == result.match_method.value
         )
+        is_manual_lock = (
+            result.outcome == "auto_match"
+            and result.found
+            and result.manual_review_reason == "manually locked (protected from auto-overwrite)"
+        )
+        is_needs_review = result.outcome == "needs_review" and method == result.match_method.value
 
-        if is_matched:
+        if is_auto_match or is_manual_lock:
             matched_count += 1
             events.append(EnrichEvent(
                 category=EnrichCategory.LOCAL_MEDIA,
@@ -451,6 +464,19 @@ def _resolve_local_media_master(group: ReleaseGroup, provider) -> tuple[Optional
                 ),
                 cache="miss", ok=False,
                 error="lower priority category",
+            ))
+        elif is_needs_review:
+            # Candidate routed to review
+            needs_review_count += 1
+            events.append(EnrichEvent(
+                category=EnrichCategory.LOCAL_MEDIA_REVIEW,
+                detail=(
+                    f"routed to review {method} in {category!r} (conf {score:.2f}); "
+                    f"stem={norm_stem!r}; source={Path(path).name}; "
+                    f"{result.manual_review_reason or 'requires review'}"
+                ),
+                cache="miss", ok=False,
+                error="needs manual review",
             ))
         elif method in ("fuzzy", "fuzzy_manual"):
             # Fuzzy candidate that didn't meet threshold
@@ -482,14 +508,16 @@ def _resolve_local_media_master(group: ReleaseGroup, provider) -> tuple[Optional
         category=EnrichCategory.LOCAL_MEDIA,
         detail=(
             f"local-media scan: {len(candidates_evaluated)} candidates evaluated; "
-            f"{matched_count} matched; {rejected_count} rejected; {unmatched_count} unmatched"
+            f"{matched_count} matched; {rejected_count} rejected; "
+            f"{needs_review_count} needs review; {unmatched_count} unmatched"
         ),
-        cache="hit" if result.found else "miss", ok=True,
+        cache="hit" if result.outcome == "auto_match" else "miss", ok=True,
     ))
 
-    if result.found and result.cached_path is not None:
+    # GH-49: Handle three outcomes
+    if result.outcome == "auto_match" and result.found and result.cached_path is not None:
         return Path(result.cached_path), events
-    if result.needs_manual_review:
+    if result.outcome == "needs_review":
         events.append(EnrichEvent(
             category=EnrichCategory.LOCAL_MEDIA_REVIEW,
             detail=(
