@@ -61,6 +61,9 @@ EXPECTED_ELLIPSIS_BUTTONS = (
     "Set credentials…",
 )
 
+#: Expected success message for connection check (GH-42).
+EXPECTED_CONNECTION_SUCCESS = "Connection successful"
+
 
 @pytest.fixture
 def qt_offscreen(tmp_path: Path):
@@ -212,3 +215,39 @@ def test_old_settings_file_still_round_trips(tmp_path: Path):
         assert f'{key} = ' in content or f'{key}=' in content, (
             f"key {key!r} missing from serialized settings"
         )
+
+
+def test_connection_success_wording(qt_offscreen: Path):
+    """GH-42: Check Connection success shows explicit 'Connection successful' message."""
+    mw = _make_window(qt_offscreen)
+    # Access the providers registry and test connection on a configured provider
+    registry = mw._registry
+    
+    # Test Playmatch provider
+    playmatch = registry.get("playmatch")
+    assert playmatch is not None
+    playmatch.set_field("base_url", "https://test.example.com")
+    playmatch.set_enabled(True)
+    status = playmatch.test_connection()
+    assert status.ok is True
+    assert status.message == EXPECTED_CONNECTION_SUCCESS, f"Expected '{EXPECTED_CONNECTION_SUCCESS}', got '{status.message}'"
+    
+    # Test Hasheous provider
+    hasheous = registry.get("hasheous")
+    assert hasheous is not None
+    hasheous.set_field("base_url", "https://test.example.com")
+    hasheous.set_enabled(True)
+    status = hasheous.test_connection()
+    assert status.ok is True
+    assert status.message == EXPECTED_CONNECTION_SUCCESS, f"Expected '{EXPECTED_CONNECTION_SUCCESS}', got '{status.message}'"
+    
+    # Test IGDB provider
+    igdb = registry.get("igdb")
+    assert igdb is not None
+    igdb.set_field("base_url", "https://test.example.com")
+    igdb.set_enabled(True)
+    status = igdb.test_connection()
+    assert status.ok is True
+    assert status.message == EXPECTED_CONNECTION_SUCCESS, f"Expected '{EXPECTED_CONNECTION_SUCCESS}', got '{status.message}'"
+    
+    mw.close()
