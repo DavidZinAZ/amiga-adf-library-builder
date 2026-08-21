@@ -6,6 +6,19 @@ This project is designed as a companion utility for the excellent [Gotek Touchsc
 
 > **Important:** the application never writes directly to the SD-card output during `export`. It writes to a run-owned staging directory so the result can be reviewed before publishing.
 
+## Download Windows App
+
+**No Python required.** The standalone Windows application is distributed as a portable ZIP and a single EXE.
+
+### Quick start
+1. Go to the [latest release](https://github.com/DavidZinAZ/amiga-adf-library-builder/releases/latest).
+2. Download either:
+   - **`amiga-adf-gui-portable.zip`** — extract anywhere, run `AmigaADFLibraryBuilder/AmigaADFLibraryBuilder.exe`
+   - **`amiga-adf-gui.exe`** — single portable executable, run directly
+3. No installation, no Python, no dependencies. All runtime state (config, cache, logs) stays under the portable folder.
+
+Each release page shows the version tag, release notes, and the exact source commit the artifacts were built from.
+
 ## What it does
 
 - scans immutable `.adf` and `.dsk` originals;
