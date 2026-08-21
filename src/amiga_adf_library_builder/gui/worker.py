@@ -35,8 +35,8 @@ class PipelineWorker(QObject):
 
     #: (phase_label, percent 0-100, detail_text)
     progress = Signal(str, int, str)
-    #: (result_dict_or_None, error_message_or_empty, cancelled_bool)
-    finished = Signal(object, str, bool)
+    #: (result_dict_or_None, error_message_or_empty, cancelled_bool, path_config_or_None)
+    finished = Signal(object, str, bool, object)
     #: (text,) -- one plain-language, redacted activity line for the live
     #: Diagnostics log (issue #21). The GUI appends it with a timestamp.
     activity = Signal(str)
@@ -77,7 +77,7 @@ class PipelineWorker(QObject):
 
     def _cancelled(self) -> bool:
         if self._cancel.is_set():
-            self.finished.emit(None, "", True)
+            self.finished.emit(None, "", True, None)
             return True
         return False
 
@@ -138,10 +138,10 @@ class PipelineWorker(QObject):
                 return
 
             self.progress.emit("Finishing up", 95, "")
-            self.finished.emit(result, "", False)
+            self.finished.emit(result, "", False, cfg)
         except Exception as exc:  # never let a pipeline error kill the GUI thread
             self._act(f"Run stopped with an error: {redact(str(exc))}")
-            self.finished.emit(None, str(exc), False)
+            self.finished.emit(None, str(exc), False, None)
         finally:
             if self._thread is not None:
                 self._thread.quit()
