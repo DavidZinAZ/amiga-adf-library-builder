@@ -122,10 +122,17 @@ CAT_SET_SKIP: frozenset[str] = frozenset(
 
 #: Minimum fuzzy ratio before a candidate is even worth manual review.
 FUZZY_MIN_RATIO = 0.80
-#: Default confidence floor for auto-acceptance (no manual review). Exact and
-#: tag-stripped canonical-reuse matches score >= 0.97 and clear this floor;
-#: lower-scoring fuzzy hits route to manual review instead.
-AUTO_ACCEPT_MIN_CONF = 0.95
+
+#: GH-49 configurable thresholds (defaults only; actual values come from config)
+#: Default auto-match threshold: 90% confidence or higher -> Auto Match
+DEFAULT_AUTO_MATCH_THRESHOLD = 0.90
+#: Default review threshold: 70% confidence or higher -> Needs Review (below -> No Match)
+DEFAULT_REVIEW_THRESHOLD = 0.70
+#: Default near-tie difference: 3% - if top two candidates within this, force Needs Review
+DEFAULT_NEAR_TIE_DIFFERENCE = 0.03
+
+#: Legacy alias for backward compatibility (was 0.95)
+AUTO_ACCEPT_MIN_CONF = DEFAULT_AUTO_MATCH_THRESHOLD
 
 # Release-tag tokens removed when deriving a canonical "base" title for
 # cross-variant reuse (cracks, trainers, alt dumps, language, chipset,
@@ -254,6 +261,11 @@ class LocalMediaConfig:
     ``media_roots`` and ``manual_roots`` are the issue #33 LaunchBox mappings:
     multiple image/media roots, each with an explicit asset type, plus multiple
     manual roots for PDF/TXT documents.
+
+    GH-49: configurable matching thresholds.
+    ``auto_match_threshold``: confidence >= this -> Auto Match (default 0.90)
+    ``review_threshold``: confidence >= this -> Needs Review (default 0.70), below -> No Match
+    ``near_tie_difference``: if top two candidates within this -> force Needs Review (default 0.03)
     """
 
     enabled: bool = False
@@ -262,6 +274,10 @@ class LocalMediaConfig:
     preferred_image_types: tuple[str, ...] = DEFAULT_PREFERRED_TYPES
     recursive: bool = True
     confidence_threshold: float = AUTO_ACCEPT_MIN_CONF
+    # GH-49 thresholds
+    auto_match_threshold: float = DEFAULT_AUTO_MATCH_THRESHOLD
+    review_threshold: float = DEFAULT_REVIEW_THRESHOLD
+    near_tie_difference: float = DEFAULT_NEAR_TIE_DIFFERENCE
     media_roots: tuple[MediaRoot, ...] = ()
     manual_roots: tuple[ManualRoot, ...] = ()
 
@@ -292,6 +308,24 @@ class LocalMediaConfig:
             threshold = float(raw.get("confidence_threshold", AUTO_ACCEPT_MIN_CONF))
         except (TypeError, ValueError):
             threshold = AUTO_ACCEPT_MIN_CONF
+        # GH-49: parse new thresholds with validation
+        try:
+            auto_match = float(raw.get("auto_match_threshold", DEFAULT_AUTO_MATCH_THRESHOLD))
+        except (TypeError, ValueError):
+            auto_match = DEFAULT_AUTO_MATCH_THRESHOLD
+        try:
+            review = float(raw.get("review_threshold", DEFAULT_REVIEW_THRESHOLD))
+        except (TypeError, ValueError):
+            review = DEFAULT_REVIEW_THRESHOLD
+        try:
+            near_tie = float(raw.get("near_tie_difference", DEFAULT_NEAR_TIE_DIFFERENCE))
+        except (TypeError, ValueError):
+            near_tie = DEFAULT_NEAR_TIE_DIFFERENCE
+        # Validate: review_threshold < auto_match_threshold
+        if review >= auto_match:
+            # Swap to sensible defaults rather than silently accepting invalid config
+            auto_match = DEFAULT_AUTO_MATCH_THRESHOLD
+            review = DEFAULT_REVIEW_THRESHOLD
         return cls(
             enabled=enabled,
             roots=roots,
@@ -299,6 +333,9 @@ class LocalMediaConfig:
             preferred_image_types=pit,
             recursive=recursive,
             confidence_threshold=threshold,
+            auto_match_threshold=auto_match,
+            review_threshold=review,
+            near_tie_difference=near_tie,
             media_roots=_parse_media_roots(raw.get("media_roots")),
             manual_roots=_parse_manual_roots(raw.get("manual_roots")),
         )
@@ -521,10 +558,18 @@ class LocalMediaCandidate:
 
 @dataclass
 class LocalMediaResult:
-    """Outcome of resolving artwork for one release group."""
+    """Outcome of resolving artwork for one release group.
+
+    GH-49: Three possible outcomes:
+    - Auto Match: confidence >= auto_match_threshold, cached and ready
+    - Needs Review: confidence >= review_threshold but < auto_match_threshold, OR near-tie detected
+    - No Match: confidence < review_threshold
+    """
 
     group_title: Optional[str]
     group_release_key: str
+    # GH-49 outcome: "auto_match" | "needs_review" | "no_match"
+    outcome: str = "no_match"
     found: bool = False
     cached_path: Optional[Path] = None
     category: Optional[str] = None
@@ -535,11 +580,14 @@ class LocalMediaResult:
     provenance: Optional[LocalMediaProvenance] = None
     # Structured per-candidate diagnostics for QA and security reviewers audit.
     candidates_evaluated: list = field(default_factory=list)
+    # GH-49: top two candidates for near-tie detection
+    top_candidates: list = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
             "group_title": self.group_title,
             "group_release_key": self.group_release_key,
+            "outcome": self.outcome,
             "found": self.found,
             "cached_path": str(self.cached_path) if self.cached_path else None,
             "category": self.category,
@@ -549,6 +597,7 @@ class LocalMediaResult:
             "manual_review_reason": self.manual_review_reason,
             "provenance": self.provenance.to_dict() if self.provenance else None,
             "candidates_evaluated": list(self.candidates_evaluated),
+            "top_candidates": list(self.top_candidates),
         }
 
 
@@ -966,6 +1015,170 @@ class LocalMediaProvider:
         # reorder actually changes which image wins. Path stays as the
         # deterministic tiebreaker *within* a single root.
         self._root_order: dict[str, int] = {}
+        # GH-49: Review queue for ambiguous matches (persisted across restarts)
+        self._review_queue: list[ManualReviewItem] = []
+        self._review_queue_path = self.cache_dir / "review_queue.json"
+        # GH-49: Manual-lock registry (persisted across restarts)
+        self._manual_locks: dict[str, dict] = {}
+        self._manual_locks_path = self.cache_dir / "manual_locks.json"
+        # Load persisted state
+        self._load_review_queue()
+        self._load_manual_locks()
+
+    def _load_review_queue(self) -> None:
+        """Load persisted review queue from disk."""
+        if self._review_queue_path.exists():
+            try:
+                data = json.loads(self._review_queue_path.read_text(encoding="utf-8"))
+                for item in data.get("items", []):
+                    self._review_queue.append(ManualReviewItem(
+                        group_title=item.get("group_title"),
+                        group_release_key=item.get("group_release_key", ""),
+                        candidate_path=item.get("candidate_path", ""),
+                        category=item.get("category", ""),
+                        confidence=item.get("confidence", 0.0),
+                        reason=item.get("reason", ""),
+                    ))
+            except (OSError, json.JSONDecodeError, KeyError):
+                # Corrupted or unreadable queue - start fresh
+                self._review_queue = []
+
+    def _save_review_queue(self) -> None:
+        """Persist review queue to disk atomically."""
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        data = {
+            "schema": "local-media-review-queue/1",
+            "items": [
+                {
+                    "group_title": item.group_title,
+                    "group_release_key": item.group_release_key,
+                    "candidate_path": item.candidate_path,
+                    "category": item.category,
+                    "confidence": item.confidence,
+                    "reason": item.reason,
+                }
+                for item in self._review_queue
+            ],
+        }
+        tmp = self._review_queue_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        tmp.replace(self._review_queue_path)
+
+    def _load_manual_locks(self) -> None:
+        """Load persisted manual locks from disk."""
+        if self._manual_locks_path.exists():
+            try:
+                data = json.loads(self._manual_locks_path.read_text(encoding="utf-8"))
+                self._manual_locks = data.get("locks", {})
+            except (OSError, json.JSONDecodeError, KeyError):
+                self._manual_locks = {}
+
+    def _save_manual_locks(self) -> None:
+        """Persist manual locks to disk atomically."""
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        data = {
+            "schema": "local-media-manual-locks/1",
+            "locks": self._manual_locks,
+        }
+        tmp = self._manual_locks_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        tmp.replace(self._manual_locks_path)
+
+    def add_to_review_queue(self, result: LocalMediaResult) -> None:
+        """Add a result needing review to the persistent queue."""
+        if result.outcome != "needs_review" or not result.candidates_evaluated:
+            return
+        # Get the best candidate from top_candidates
+        if not result.top_candidates:
+            return
+        top = result.top_candidates[0]
+        item = ManualReviewItem(
+            group_title=result.group_title,
+            group_release_key=result.group_release_key,
+            candidate_path=top.get("path", ""),
+            category=result.category or "",
+            confidence=result.confidence,
+            reason=result.manual_review_reason or "requires review",
+        )
+        # Check if already in queue (by release_key + candidate_path)
+        for existing in self._review_queue:
+            if (existing.group_release_key == item.group_release_key and
+                    existing.candidate_path == item.candidate_path):
+                return  # already queued
+        self._review_queue.append(item)
+        self._save_review_queue()
+
+    def get_review_queue(self) -> list[ManualReviewItem]:
+        """Get the current review queue."""
+        return list(self._review_queue)
+
+    def remove_from_review_queue(self, group_release_key: str, candidate_path: str) -> bool:
+        """Remove an item from the review queue after manual resolution."""
+        for i, item in enumerate(self._review_queue):
+            if (item.group_release_key == group_release_key and
+                    item.candidate_path == candidate_path):
+                del self._review_queue[i]
+                self._save_review_queue()
+                return True
+        return False
+
+    def lock_manual_selection(self, release_key: str, selected_candidate_path: str,
+                               method: str, confidence: float, source_root: str) -> None:
+        """Record a manual selection as locked (protected from auto-overwrite)."""
+        import datetime
+        self._manual_locks[release_key] = {
+            "release_id": release_key,
+            "asset_type": "artwork",  # or "manual" for manuals
+            "selected_asset": selected_candidate_path,
+            "method": method,
+            "confidence": confidence,
+            "source_root": source_root,
+            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "provenance": {
+                "release_id": release_key,
+                "asset_type": "artwork",
+                "selected_asset": selected_candidate_path,
+                "method": method,
+                "confidence": confidence,
+                "source_root": source_root,
+                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "manual_lock": True,
+            },
+            "manual_lock": True,
+        }
+        self._save_manual_locks()
+
+    def is_manually_locked(self, release_key: str) -> bool:
+        """Check if a release key has a manual lock."""
+        return release_key in self._manual_locks and self._manual_locks[release_key].get("manual_lock", False)
+
+    def get_manual_lock(self, release_key: str) -> Optional[dict]:
+        """Get the manual lock record for a release key."""
+        return self._manual_locks.get(release_key)
+
+    def remove_manual_lock(self, release_key: str) -> bool:
+        """Remove a manual lock (explicit opt-in to reconsider)."""
+        if release_key in self._manual_locks:
+            del self._manual_locks[release_key]
+            self._save_manual_locks()
+            return True
+        return False
+
+    def clear_review_queue(self) -> int:
+        """Clear the entire review queue (e.g., after batch review). Returns count cleared."""
+        count = len(self._review_queue)
+        self._review_queue = []
+        self._save_review_queue()
+        return count
+
+    def get_outcome_summary(self) -> dict:
+        """Get summary counts of outcomes (for UI display)."""
+        # This would typically be computed across all groups in a run
+        # For the provider, we just expose the review queue count
+        return {
+            "needs_review_count": len(self._review_queue),
+            "manual_locks_count": len(self._manual_locks),
+        }
 
     # -- discovery (read-only) ------------------------------------------------
 
@@ -1021,10 +1234,17 @@ class LocalMediaProvider:
     def resolve(self, group) -> LocalMediaResult:
         """Find the best artwork for ``group`` and copy it into the cache.
 
-        Returns a :class:`LocalMediaResult`. On a confident match the selected
-        source is copied into ``cache_dir`` and a provenance sidecar is written
-        next to it. On an uncertain match the result is flagged for manual
-        review and NOTHING is copied. Never modifies the source library.
+        Returns a :class:`LocalMediaResult` with GH-49 three outcomes:
+        - Auto Match: confidence >= auto_match_threshold, no near-tie -> cached and ready
+        - Needs Review: confidence >= review_threshold but < auto_match_threshold, OR near-tie -> flagged for review, NOT cached
+        - No Match: confidence < review_threshold -> no action
+
+        On a confident Auto Match the selected source is copied into ``cache_dir``
+        and a provenance sidecar is written next to it. On Needs Review or No Match,
+        NOTHING is copied. Never modifies the source library.
+
+        GH-49: Checks for manual locks before auto-matching. If manually locked,
+        the lock is preserved unless explicitly opted out.
         """
         if not self.config.enabled:
             raise LocalMediaDisabled("local_media provider is disabled in config")
@@ -1037,43 +1257,59 @@ class LocalMediaProvider:
             group_title=title, group_release_key=release_key
         )
 
+        # GH-49: Check for existing manual lock
+        if self.is_manually_locked(release_key):
+            lock = self.get_manual_lock(release_key)
+            result.outcome = "auto_match"
+            result.found = True
+            result.category = lock.get("asset_type", "artwork")
+            result.match_method = MatchMethod.MANUAL_REVIEW
+            result.confidence = lock.get("confidence", 1.0)
+            result.manual_review_reason = "manually locked (protected from auto-overwrite)"
+            result.needs_manual_review = False
+            return result
+
         best = self._select(group)
         result.candidates_evaluated = best.evaluated
+        result.top_candidates = best.top_candidates
+        result.outcome = best.outcome
 
         if best.candidate is None:
+            result.outcome = "no_match"
             return result
 
         method = best.method
         conf = best.confidence
 
-        # Manual review bucket: fuzzy below the auto-accept floor.
-        if method in (MatchMethod.FUZZY_MANUAL, MatchMethod.MANUAL_REVIEW):
+        # GH-49: Apply outcome-based logic
+        if best.outcome == "auto_match":
+            # Auto Match: cache the candidate
+            cached = self._cache_candidate(best.candidate, method, conf)
+            result.found = True
+            result.cached_path = cached.path
+            result.category = best.candidate.category
+            result.match_method = method
+            result.confidence = conf
+            result.provenance = cached.provenance
+            result.outcome = "auto_match"
+        elif best.outcome == "needs_review":
+            # Needs Review: flag for manual review, do NOT cache
             result.needs_manual_review = True
-            result.manual_review_reason = best.reason
+            result.manual_review_reason = best.reason or f"confidence {conf:.3f} requires review"
             result.match_method = method
             result.confidence = conf
             result.category = best.candidate.category
-            return result
-
-        # Confident enough to cache.
-        if conf < self.config.confidence_threshold:
-            result.needs_manual_review = True
-            result.manual_review_reason = (
-                f"confidence {conf:.3f} below threshold "
-                f"{self.config.confidence_threshold:.3f}"
-            )
-            result.match_method = MatchMethod.MANUAL_REVIEW
+            result.outcome = "needs_review"
+            # Add to persistent review queue
+            self.add_to_review_queue(result)
+        else:
+            # No Match: nothing found
+            result.outcome = "no_match"
+            result.match_method = method
             result.confidence = conf
-            result.category = best.candidate.category
-            return result
+            if best.candidate:
+                result.category = best.candidate.category
 
-        cached = self._cache_candidate(best.candidate, method, best.confidence)
-        result.found = True
-        result.cached_path = cached.path
-        result.category = best.candidate.category
-        result.match_method = method
-        result.confidence = conf
-        result.provenance = cached.provenance
         return result
 
     # -- selection / scoring -------------------------------------------------
@@ -1081,9 +1317,14 @@ class LocalMediaProvider:
     def _select(self, group):
         """Return the highest-priority confident candidate for ``group``.
 
+        GH-49: Implements three-outcome logic with near-tie detection.
+        - Auto Match: confidence >= auto_match_threshold, no near-tie
+        - Needs Review: confidence >= review_threshold but < auto_match_threshold, OR near-tie
+        - No Match: confidence < review_threshold
+
         Honors exact category priority: every candidate in category 1 is scored
         before category 2 is considered. Returns a small record
-        ``(candidate, method, confidence, evaluated, reason)``.
+        ``(candidate, method, confidence, evaluated, reason, outcome, top_candidates)``.
 
         For diagnostics, ALL candidates across ALL categories are scored and
         recorded in ``evaluated`` so the per-candidate audit trail shows every
@@ -1097,6 +1338,8 @@ class LocalMediaProvider:
             confidence: float = 0.0
             evaluated: list = field(default_factory=list)
             reason: Optional[str] = None
+            outcome: str = "no_match"  # "auto_match" | "needs_review" | "no_match"
+            top_candidates: list = field(default_factory=list)
 
         pick = _Pick()
         evaluated: list = []
@@ -1123,6 +1366,20 @@ class LocalMediaProvider:
         # Iterate categories in strict priority order. For each category we
         # score its candidates (already done above, but we check the threshold).
         # A confident hit in an earlier category wins immediately.
+        auto_match_threshold = self.config.auto_match_threshold
+        review_threshold = self.config.review_threshold
+        near_tie_diff = self.config.near_tie_difference
+
+        best_overall = None
+        best_overall_method = MatchMethod.NONE
+        best_overall_score = 0.0
+        best_overall_category = None
+        second_best_overall = None
+        second_best_score = 0.0
+
+        # Track the best candidate per category for near-tie analysis
+        category_best = {}
+
         for category in self.config.preferred_image_types:
             cat_cands = [c for c in self._index if c.category == category]
             if not cat_cands:
@@ -1130,9 +1387,7 @@ class LocalMediaProvider:
             # GH-23: within a category, the first-configured root wins. Order
             # by configured root position (legacy ``roots`` first, then typed
             # ``media_roots``, each in list order) with the candidate path as
-            # the deterministic tiebreaker *within* one root. Sorting by path
-            # alone would let reordering the user's root list fail to change
-            # the winner.
+            # the deterministic tiebreaker *within* one root.
             cat_cands.sort(
                 key=lambda c: (
                     self._root_order.get(str(c.root), len(self._root_order)),
@@ -1141,33 +1396,142 @@ class LocalMediaProvider:
             )
             for cand in cat_cands:
                 method, score = self._score(cand, identities)
+                if method != MatchMethod.NONE:
+                    # Track best overall
+                    if score > best_overall_score:
+                        second_best_overall = best_overall
+                        second_best_score = best_overall_score
+                        best_overall = cand
+                        best_overall_method = method
+                        best_overall_score = score
+                        best_overall_category = category
+                    elif score > second_best_score and cand != best_overall:
+                        second_best_overall = cand
+                        second_best_score = score
+                    # Track best in this category
+                    if category not in category_best or score > category_best[category][2]:
+                        category_best[category] = (cand, method, score)
+
+                # Check for confident match in this category
                 if method != MatchMethod.NONE and score >= self.config.confidence_threshold:
-                    pick.candidate = cand
-                    pick.method = method
-                    pick.confidence = score
-                    pick.evaluated = evaluated
-                    return pick
+                    # Found confident match in this priority category
+                    # Now check for near-tie within the same category or with next category
+                    near_tie = False
+
+                    # Check for near-tie WITHIN this category
+                    cat_scores = [c[2] for c in category_best.values() if c[0].category == category]
+                    cat_scores.sort(reverse=True)
+                    if len(cat_scores) >= 2:
+                        if cat_scores[0] - cat_scores[1] < near_tie_diff:
+                            near_tie = True
+
+                    # Also check for near-tie with best of next category (if any)
+                    if not near_tie:
+                        next_cat_idx = self.config.preferred_image_types.index(category) + 1
+                        if next_cat_idx < len(self.config.preferred_image_types):
+                            next_cat = self.config.preferred_image_types[next_cat_idx]
+                            if next_cat in category_best:
+                                next_score = category_best[next_cat][2]
+                                if best_overall_score - next_score < near_tie_diff:
+                                    near_tie = True
+
+                    if score >= auto_match_threshold and not near_tie:
+                        # Auto Match: high confidence, no near-tie
+                        pick.candidate = cand
+                        pick.method = method
+                        pick.confidence = score
+                        pick.outcome = "auto_match"
+                        # Build top_candidates for diagnostics
+                        top_candidates = []
+                        # Add this candidate
+                        top_candidates.append({
+                            "path": str(cand.path),
+                            "category": cand.category,
+                            "method": method.value,
+                            "score": round(score, 4),
+                            "norm_stem": cand.norm_stem,
+                        })
+                        # Add second-best in category if exists
+                        if len(cat_scores) >= 2:
+                            for c, m, s in category_best.values():
+                                if c.category == category and c != cand:
+                                    top_candidates.append({
+                                        "path": str(c.path),
+                                        "category": c.category,
+                                        "method": m.value,
+                                        "score": round(s, 4),
+                                        "norm_stem": c.norm_stem,
+                                    })
+                                    break
+                        pick.top_candidates = top_candidates
+                        pick.evaluated = evaluated
+                        return pick
+                    else:
+                        # Near-tie detected OR score in review range
+                        pick.candidate = cand
+                        pick.method = method
+                        pick.confidence = score
+                        pick.outcome = "needs_review"
+                        if near_tie:
+                            pick.reason = f"near-tie with next candidate (diff < {near_tie_diff:.0%})"
+                        elif method in (MatchMethod.FUZZY, MatchMethod.FUZZY_MANUAL):
+                            pick.reason = f"fuzzy candidate {cand.path.name!r} scored {score:.3f} (below auto-match threshold)"
+                        else:
+                            pick.reason = f"confidence {score:.3f} below auto-match threshold {auto_match_threshold:.3f}"
+                        # Build top_candidates
+                        top_candidates = [{
+                            "path": str(cand.path),
+                            "category": cand.category,
+                            "method": method.value,
+                            "score": round(score, 4),
+                            "norm_stem": cand.norm_stem,
+                        }]
+                        if second_best_overall:
+                            top_candidates.append({
+                                "path": str(second_best_overall.path),
+                                "category": second_best_overall.category,
+                                "method": best_overall_method.value if second_best_overall == best_overall else method.value,
+                                "score": round(second_best_score, 4),
+                                "norm_stem": second_best_overall.norm_stem,
+                            })
+                        pick.top_candidates = top_candidates
+                        pick.evaluated = evaluated
+                        return pick
             # Finished current category with no confident match; advance.
 
-        # No confident hit. If we ever had a fuzzy candidate worth review,
-        # surface the best one for manual review (deterministic: highest score).
-        best_fuzzy = None
-        best_fuzzy_score = 0.0
-        for cand in self._index:
-            method, score = self._score(cand, identities)
-            if method in (MatchMethod.FUZZY, MatchMethod.FUZZY_MANUAL) and score > best_fuzzy_score:
-                best_fuzzy = cand
-                best_fuzzy_score = score
-        if best_fuzzy is not None:
-            pick.candidate = best_fuzzy
-            pick.method = MatchMethod.FUZZY_MANUAL
-            pick.confidence = best_fuzzy_score
-            pick.reason = (
-                f"fuzzy candidate {best_fuzzy.path.name!r} scored "
-                f"{best_fuzzy_score:.3f} (below auto-accept floor)"
-            )
-            pick.evaluated = evaluated
-            return pick
+        # No confident hit in any category. Check if we have any candidates for review.
+        if best_overall is not None:
+            # We have some match, but below confidence_threshold
+            if best_overall_score >= review_threshold:
+                pick.candidate = best_overall
+                pick.method = best_overall_method
+                pick.confidence = best_overall_score
+                pick.outcome = "needs_review"
+                # Check for near-tie with second best
+                if best_overall_score - second_best_score < near_tie_diff:
+                    pick.reason = f"near-tie with next candidate (diff < {near_tie_diff:.0%})"
+                elif best_overall_method in (MatchMethod.FUZZY, MatchMethod.FUZZY_MANUAL):
+                    pick.reason = f"fuzzy candidate {best_overall.path.name!r} scored {best_overall_score:.3f} (below auto-match threshold)"
+                else:
+                    pick.reason = f"confidence {best_overall_score:.3f} below auto-match threshold {auto_match_threshold:.3f}"
+                pick.top_candidates = [
+                    {"path": str(best_overall.path), "category": best_overall_category, "method": best_overall_method.value, "score": round(best_overall_score, 4), "norm_stem": best_overall.norm_stem},
+                ]
+                if second_best_overall:
+                    pick.top_candidates.append({
+                        "path": str(second_best_overall.path),
+                        "category": second_best_overall.category,
+                        "method": best_overall_method.value,
+                        "score": round(second_best_score, 4),
+                        "norm_stem": second_best_overall.norm_stem,
+                    })
+            else:
+                # Below review threshold -> No Match
+                pick.outcome = "no_match"
+                pick.reason = f"best candidate {best_overall.path.name!r} scored {best_overall_score:.3f} below review threshold {review_threshold:.3f}"
+                pick.top_candidates = [
+                    {"path": str(best_overall.path), "category": best_overall_category, "method": best_overall_method.value, "score": round(best_overall_score, 4), "norm_stem": best_overall.norm_stem},
+                ]
 
         pick.evaluated = evaluated
         return pick
