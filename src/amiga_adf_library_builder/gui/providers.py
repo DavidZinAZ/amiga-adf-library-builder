@@ -257,7 +257,11 @@ class PlaymatchProvider(Provider):
     def test_connection(self) -> ProviderStatus:
         # The core provider performs the real SSRF-guarded fetch lazily; the GUI
         # does not open sockets here. We report configured status only.
-        return self.status()
+        status = self.status()
+        if status.ok and status.message == "Ready":
+            # Explicit success wording for connection check (GH-42)
+            return ProviderStatus(ok=True, message="Connection successful", configured=status.configured, reachable=status.reachable)
+        return status
 
     # --- secrets --------------------------------------------------------------
     def add_credentials(self, secret_store: Any, **secrets: str) -> None:
@@ -408,7 +412,11 @@ class HasheousProvider(Provider):
 
     def test_connection(self) -> ProviderStatus:
         # Real fetch is performed lazily by the core provider under SSRF guards.
-        return self.status()
+        status = self.status()
+        if status.ok and status.message == "Ready":
+            # Explicit success wording for connection check (GH-42)
+            return ProviderStatus(ok=True, message="Connection successful", configured=status.configured, reachable=status.reachable)
+        return status
 
     # --- secrets --------------------------------------------------------------
     def add_credentials(self, secret_store: Any, **secrets: str) -> None:
@@ -599,7 +607,11 @@ class IgdbProvider(Provider):
     def test_connection(self) -> ProviderStatus:
         # The core provider performs the real SSRF-guarded fetch lazily; the GUI
         # does not open sockets here. We report configured status only.
-        return self.status()
+        status = self.status()
+        if status.ok and status.message == "Ready":
+            # Explicit success wording for connection check (GH-42)
+            return ProviderStatus(ok=True, message="Connection successful", configured=status.configured, reachable=status.reachable)
+        return status
 
     # --- secrets --------------------------------------------------------------
     def add_credentials(self, secret_store: Any, **secrets: str) -> None:
