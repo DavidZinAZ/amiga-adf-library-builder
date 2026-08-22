@@ -180,6 +180,10 @@ def test_settings_keys_unchanged():
         # GH-33: LaunchBox local folder mappings (local paths, non-sensitive).
         "launchbox_media_roots",
         "launchbox_manual_roots",
+        # GH-54: Local Asset Matching thresholds.
+        "auto_match_threshold",
+        "review_threshold",
+        "near_tie_difference",
     )
     # The dataclass still exposes the same attribute names (used by the
     # GUI and the real-Windows QA driver).

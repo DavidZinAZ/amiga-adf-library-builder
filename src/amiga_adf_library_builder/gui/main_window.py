@@ -1346,9 +1346,9 @@ class MainWindow(QMainWindow):
                 "launchbox_media_roots": self._lb_media_mappings(),
                 "launchbox_manual_roots": self._lb_manual_mappings(),
                 # (GH-54) Local Asset Matching thresholds.
-                "auto_match_threshold": self._parse_threshold(self._le_auto_match.text()),
-                "review_threshold": self._parse_threshold(self._le_review.text()),
-                "near_tie_difference": self._parse_threshold(self._le_near_tie.text()),
+                "auto_match_threshold": _parse_threshold(self._le_auto_match.text()),
+                "review_threshold": _parse_threshold(self._le_review.text()),
+                "near_tie_difference": _parse_threshold(self._le_near_tie.text()),
             }
             geometry = self._current_persist_geometry()
             if geometry is not None:
@@ -1552,9 +1552,9 @@ class MainWindow(QMainWindow):
             launchbox_media_roots=self._lb_media_mappings(),
             launchbox_manual_roots=self._lb_manual_mappings(),
             # (GH-54) Local Asset Matching thresholds.
-            auto_match_threshold=self._parse_threshold(self._le_auto_match.text()),
-            review_threshold=self._parse_threshold(self._le_review.text()),
-            near_tie_difference=self._parse_threshold(self._le_near_tie.text()),
+            auto_match_threshold=_parse_threshold(self._le_auto_match.text()),
+            review_threshold=_parse_threshold(self._le_review.text()),
+            near_tie_difference=_parse_threshold(self._le_near_tie.text()),
         )
 
     def _last_profile_name(self) -> str:
@@ -1795,6 +1795,35 @@ class MainWindow(QMainWindow):
         self._progress.setValue(100)
         groups = result.get("groups", 0) if result else 0
         self._status_label.setText(f"Done. {groups} group(s) processed.")
+        # (Issue #21) end-of-run result summary: outcome, counts, destinations.
+        for line in activity_log.render_run_summary(
+            result, run_mode=getattr(self, "_run_mode", "build")
+        ):
+            self._append_diag(line)
+        self._run_marker("=== RUN END (done) ===")
+
+        # structured logging: persist a per-run diagnostic log under logs_dir.
+        # This mirrors the CLI's _emit() behavior. Failures are swallowed.
+        if cfg is not None:
+            from ..logging_utils import write_run_log
+            from datetime import datetime, timezone
+
+            started_at = datetime.now(timezone.utc).isoformat()
+            # The worker emits activity lines but doesn't track argv/command;
+            # use minimal values for the GUI context.
+            write_run_log(
+                logs_dir=cfg.logs_dir,
+                run_id=result.get("run_id") or "unknown",
+                config_label="gui",
+                cfg=cfg,
+                argv=["gui"],
+                command=self._run_mode,
+                result=result,
+                started_at=started_at,
+                return_code=0,
+            )
+            # Remember the logs_dir so the "Open Logs" button opens the right place.
+            self._last_run_logs_dir = cfg.logs_dir
         # (GH-54) Match Review dialog --------------------------------------------------
     def _open_match_review(self) -> None:
         """Open the non-modal Match Review window for ambiguous matches."""
@@ -1830,6 +1859,17 @@ class MainWindow(QMainWindow):
         """Update the Review button text and enabled state based on queue count."""
         self._review_button.setText(f"Review {count} ambiguous match{'es' if count != 1 else ''}")
         self._review_button.setEnabled(count > 0)
+
+    # --- close ----------------------------------------------------------------
+    def closeEvent(self, event: QEvent) -> None:
+        # (Issue #17) Persist current folder/option defaults on normal exit so a
+        # session that never started a run still survives the close/reopen cycle;
+        # (Issue #18) the same call also persists the window geometry. Never
+        # blocks or crashes the close (see _persist_defaults).
+        self._persist_defaults()
+        if self._cancel_event is not None:
+            self._cancel_event.set()
+        super().closeEvent(event)
 
 
 class MatchReviewDialog(QDialog):
@@ -2063,65 +2103,3 @@ class MatchReviewDialog(QDialog):
         else:
             # Queue exhausted
             self.close()
-
-
-# (Issue #21) end-of-run result summary: outcome, counts, destinations.
-    def _on_finished(self, result, error: str, cancelled: bool, cfg=None) -> None:
-        self._run_in_progress = False
-        self._run_button.setEnabled(True)
-        self._cancel_button.setEnabled(False)
-        if cancelled:
-            self._status_label.setText("Cancelled.")
-            self._run_marker("Run cancelled by the operator.")
-            self._run_marker("=== RUN END (cancelled) ===")
-            return
-        if error:
-            # Errors never contain secret values; they are core/CLI messages.
-            self._status_label.setText("Failed.")
-            self._append_diag(f"ERROR: {error}")
-            self._run_marker("=== RUN END (failed) ===")
-            QMessageBox.critical(self, "Run failed", error)
-            return
-        self._progress.setValue(100)
-        groups = result.get("groups", 0) if result else 0
-        self._status_label.setText(f"Done. {groups} group(s) processed.")
-        # (Issue #21) end-of-run result summary: outcome, counts, destinations.
-        for line in activity_log.render_run_summary(
-            result, run_mode=getattr(self, "_run_mode", "build")
-        ):
-            self._append_diag(line)
-        self._run_marker("=== RUN END (done) ===")
-
-        # structured logging: persist a per-run diagnostic log under logs_dir.
-        # This mirrors the CLI's _emit() behavior. Failures are swallowed.
-        if cfg is not None:
-            from ..logging_utils import write_run_log
-            from datetime import datetime, timezone
-
-            started_at = datetime.now(timezone.utc).isoformat()
-            # The worker emits activity lines but doesn't track argv/command;
-            # use minimal values for the GUI context.
-            write_run_log(
-                logs_dir=cfg.logs_dir,
-                run_id=result.get("run_id") or "unknown",
-                config_label="gui",
-                cfg=cfg,
-                argv=["gui"],
-                command=self._run_mode,
-                result=result,
-                started_at=started_at,
-                return_code=0,
-            )
-            # Remember the logs_dir so the "Open Logs" button opens the right place.
-            self._last_run_logs_dir = cfg.logs_dir
-
-    # --- close ----------------------------------------------------------------
-    def closeEvent(self, event: QEvent) -> None:
-        # (Issue #17) Persist current folder/option defaults on normal exit so a
-        # session that never started a run still survives the close/reopen cycle;
-        # (Issue #18) the same call also persists the window geometry. Never
-        # blocks or crashes the close (see _persist_defaults).
-        self._persist_defaults()
-        if self._cancel_event is not None:
-            self._cancel_event.set()
-        super().closeEvent(event)
