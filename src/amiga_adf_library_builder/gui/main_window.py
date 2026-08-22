@@ -145,6 +145,22 @@ def _sanitize_geometry(rect: QRect) -> QRect:
     return _default_window_geometry()
 
 
+def _parse_threshold(text: str) -> float:
+    """Parse a percentage threshold string (e.g. \"90\" -> 0.90).
+
+    Returns a float between 0.0 and 1.0. Invalid/empty input returns 0.0.
+    """
+    try:
+        val = float(text.strip())
+        if val <= 0:
+            return 0.0
+        if val > 100:
+            val = 100.0
+        return val / 100.0
+    except (ValueError, AttributeError):
+        return 0.0
+
+
 def _encode_geometry(rect: QRect, maximized: bool) -> str:
     """Serialize geometry + maximized flag to the versioned JSON payload."""
     payload = {
@@ -445,9 +461,17 @@ class MainWindow(QMainWindow):
         self._cancel_button.clicked.connect(self._on_cancel)
         self._open_log_button = QPushButton("Open log files…")
         self._open_log_button.clicked.connect(self._on_open_logs)
+        # (GH-54) Match Review button - visible when review items exist
+        self._review_button = QPushButton("Review 0 ambiguous matches")
+        self._review_button.setToolTip(
+            "Open the Match Review window to resolve ambiguous artwork/manual matches."
+        )
+        self._review_button.setEnabled(False)
+        self._review_button.clicked.connect(self._open_match_review)
         btn_row.addWidget(self._run_button)
         btn_row.addWidget(self._cancel_button)
         btn_row.addWidget(self._open_log_button)
+        btn_row.addWidget(self._review_button)
         btn_row.addStretch(1)
         run_layout.addLayout(btn_row)
         root.addWidget(run_box)
@@ -572,6 +596,42 @@ class MainWindow(QMainWindow):
         )
         advanced_layout.addWidget(self._cb_advanced)
         layout.addWidget(advanced_box)
+
+        # --- Local Asset Matching thresholds (GH-54) ---------------------------
+        matching_box = QGroupBox("Local Asset Matching")
+        matching_box.setToolTip(
+            "Confidence thresholds for automatic local artwork/manual matching. "
+            "Values are percentages (0-100). Review threshold must be lower than "
+            "Auto-match threshold. Changes persist across restarts and are "
+            "included in named configuration Save/Load."
+        )
+        matching_layout = QFormLayout(matching_box)
+
+        self._le_auto_match = QLineEdit(self)
+        self._le_auto_match.setPlaceholderText("90")
+        self._le_auto_match.setToolTip(
+            "Auto-match threshold (%): confidence >= this -> Auto Match. "
+            "Default 90. Must be higher than Review threshold."
+        )
+        matching_layout.addRow("Auto-match threshold (%)", self._le_auto_match)
+
+        self._le_review = QLineEdit(self)
+        self._le_review.setPlaceholderText("70")
+        self._le_review.setToolTip(
+            "Review threshold (%): confidence >= this -> Needs Review, below -> No Match. "
+            "Default 70. Must be lower than Auto-match threshold."
+        )
+        matching_layout.addRow("Review threshold (%)", self._le_review)
+
+        self._le_near_tie = QLineEdit(self)
+        self._le_near_tie.setPlaceholderText("3")
+        self._le_near_tie.setToolTip(
+            "Near-tie difference (%): if top two candidates within this -> force Needs Review. "
+            "Default 3."
+        )
+        matching_layout.addRow("Near-tie difference (%)", self._le_near_tie)
+
+        layout.addWidget(matching_box)
         layout.addStretch(1)
         return w
 
@@ -1285,6 +1345,10 @@ class MainWindow(QMainWindow):
                 # paths; missing folders are kept, never deleted).
                 "launchbox_media_roots": self._lb_media_mappings(),
                 "launchbox_manual_roots": self._lb_manual_mappings(),
+                # (GH-54) Local Asset Matching thresholds.
+                "auto_match_threshold": self._parse_threshold(self._le_auto_match.text()),
+                "review_threshold": self._parse_threshold(self._le_review.text()),
+                "near_tie_difference": self._parse_threshold(self._le_near_tie.text()),
             }
             geometry = self._current_persist_geometry()
             if geometry is not None:
@@ -1354,6 +1418,10 @@ class MainWindow(QMainWindow):
         # (GH-24) independent metadata selection.
         self._cb_include_artwork.setChecked(s.include_artwork)
         self._cb_include_manuals.setChecked(s.include_manuals_rtfm)
+        # (GH-54) Local Asset Matching thresholds.
+        self._le_auto_match.setText(f"{int(s.auto_match_threshold * 100)}")
+        self._le_review.setText(f"{int(s.review_threshold * 100)}")
+        self._le_near_tie.setText(f"{int(s.near_tie_difference * 100)}")
         self._lb_restore_mappings(s)
         apply_theme(s.theme or "system", themes_dir=self._paths.themes_dir)
         self._update_export_state_display()
@@ -1483,6 +1551,10 @@ class MainWindow(QMainWindow):
             include_manuals_rtfm=state.include_manuals_rtfm,
             launchbox_media_roots=self._lb_media_mappings(),
             launchbox_manual_roots=self._lb_manual_mappings(),
+            # (GH-54) Local Asset Matching thresholds.
+            auto_match_threshold=self._parse_threshold(self._le_auto_match.text()),
+            review_threshold=self._parse_threshold(self._le_review.text()),
+            near_tie_difference=self._parse_threshold(self._le_near_tie.text()),
         )
 
     def _last_profile_name(self) -> str:
@@ -1612,6 +1684,10 @@ class MainWindow(QMainWindow):
         self._settings.include_manuals_rtfm = preset.include_manuals_rtfm
         self._settings.launchbox_media_roots = preset.launchbox_media_roots
         self._settings.launchbox_manual_roots = preset.launchbox_manual_roots
+        # (GH-54) Local Asset Matching thresholds.
+        self._settings.auto_match_threshold = preset.auto_match_threshold
+        self._settings.review_threshold = preset.review_threshold
+        self._settings.near_tie_difference = preset.near_tie_difference
         self._profile_name = name
         self._apply_settings_to_widgets()
 
@@ -1700,6 +1776,296 @@ class MainWindow(QMainWindow):
         self._progress.setValue(percent)
         self._status_label.setText(phase + (f" — {redact(detail)}" if detail else ""))
 
+    def _on_finished(self, result, error: str, cancelled: bool, cfg=None) -> None:
+        self._run_in_progress = False
+        self._run_button.setEnabled(True)
+        self._cancel_button.setEnabled(False)
+        if cancelled:
+            self._status_label.setText("Cancelled.")
+            self._run_marker("Run cancelled by the operator.")
+            self._run_marker("=== RUN END (cancelled) ===")
+            return
+        if error:
+            # Errors never contain secret values; they are core/CLI messages.
+            self._status_label.setText("Failed.")
+            self._append_diag(f"ERROR: {error}")
+            self._run_marker("=== RUN END (failed) ===")
+            QMessageBox.critical(self, "Run failed", error)
+            return
+        self._progress.setValue(100)
+        groups = result.get("groups", 0) if result else 0
+        self._status_label.setText(f"Done. {groups} group(s) processed.")
+        # (GH-54) Match Review dialog --------------------------------------------------
+    def _open_match_review(self) -> None:
+        """Open the non-modal Match Review window for ambiguous matches."""
+        from .local_media import LocalMediaProvider, load_local_media_config
+
+        if not hasattr(self, "_local_media_provider") or self._local_media_provider is None:
+            # Load local media config from the current settings
+            try:
+                cfg = load_local_media_config(self._config_path or str(self._paths.config_file()))
+                if cfg.enabled:
+                    self._local_media_provider = LocalMediaProvider(cfg, self._paths.cache_dir)
+            except Exception as exc:
+                QMessageBox.critical(self, "Match Review", f"Could not initialize local media provider: {exc}")
+                return
+
+        if self._local_media_provider is None:
+            QMessageBox.information(self, "Match Review", "Local media provider is not configured or enabled.")
+            return
+
+        queue = self._local_media_provider.get_review_queue()
+        if not queue:
+            QMessageBox.information(self, "Match Review", "No ambiguous matches to review.")
+            return
+
+        dialog = MatchReviewDialog(
+            self,
+            provider=self._local_media_provider,
+            queue=queue,
+        )
+        dialog.exec()
+
+    def update_review_button(self, count: int) -> None:
+        """Update the Review button text and enabled state based on queue count."""
+        self._review_button.setText(f"Review {count} ambiguous match{'es' if count != 1 else ''}")
+        self._review_button.setEnabled(count > 0)
+
+
+class MatchReviewDialog(QDialog):
+    """Non-modal review dialog for ambiguous local artwork/manual matches (GH-54).
+
+    Shows the release being matched, candidate files with confidence scores,
+    artwork preview where practical, and allows the user to select a candidate,
+    choose No Match, browse for a different file, and navigate the review queue.
+    """
+
+    def __init__(
+        self,
+        parent: QWidget,
+        provider: "LocalMediaProvider",
+        queue: list["ManualReviewItem"],
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Match Review")
+        self.resize(900, 700)
+        self._provider = provider
+        self._queue = queue
+        self._current_index = 0
+        self._build_ui()
+        self._load_current()
+
+    def _build_ui(self) -> None:
+        layout = QVBoxLayout(self)
+
+        # Header with queue position
+        header = QHBoxLayout()
+        self._position_label = QLabel("")
+        self._position_label.setStyleSheet("font-weight: bold; font-size: 14px;")
+        header.addWidget(self._position_label)
+        header.addStretch(1)
+        layout.addLayout(header)
+
+        # Main content area: left = info + candidates, right = preview
+        content = QHBoxLayout()
+
+        # Left side: release info + candidate list
+        left = QVBoxLayout()
+
+        # Release info
+        info_box = QGroupBox("Release")
+        info_layout = QFormLayout(info_box)
+        self._release_title = QLabel("")
+        self._release_title.setWordWrap(True)
+        self._release_key = QLabel("")
+        self._release_key.setStyleSheet("color: #666; font-family: monospace;")
+        info_layout.addRow("Title:", self._release_title)
+        info_layout.addRow("Release Key:", self._release_key)
+        left.addWidget(info_box)
+
+        # Candidates
+        cand_box = QGroupBox("Candidates")
+        cand_layout = QVBoxLayout(cand_box)
+        self._candidate_list = QListWidget()
+        self._candidate_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self._candidate_list.itemDoubleClicked.connect(self._on_candidate_selected)
+        cand_layout.addWidget(self._candidate_list)
+
+        # Candidate action buttons
+        cand_btn_row = QHBoxLayout()
+        self._select_btn = QPushButton("Select Candidate")
+        self._select_btn.setToolTip("Use the selected candidate for this release")
+        self._select_btn.clicked.connect(self._on_select_candidate)
+        self._no_match_btn = QPushButton("No Match")
+        self._no_match_btn.setToolTip("Mark this release as having no match")
+        self._no_match_btn.clicked.connect(self._on_no_match)
+        self._browse_btn = QPushButton("Browse…")
+        self._browse_btn.setToolTip("Browse for a different local file")
+        self._browse_btn.clicked.connect(self._on_browse)
+        cand_btn_row.addWidget(self._select_btn)
+        cand_btn_row.addWidget(self._no_match_btn)
+        cand_btn_row.addWidget(self._browse_btn)
+        cand_btn_row.addStretch(1)
+        cand_layout.addLayout(cand_btn_row)
+        left.addWidget(cand_box)
+
+        # Navigation
+        nav_row = QHBoxLayout()
+        self._prev_btn = QPushButton("Previous")
+        self._prev_btn.setToolTip("Go to the previous item in the review queue")
+        self._prev_btn.clicked.connect(self._on_prev)
+        self._next_btn = QPushButton("Apply & Next")
+        self._next_btn.setToolTip("Apply current selection and advance to next item")
+        self._next_btn.clicked.connect(self._on_next)
+        nav_row.addWidget(self._prev_btn)
+        nav_row.addStretch(1)
+        nav_row.addWidget(self._next_btn)
+        left.addLayout(nav_row)
+
+        content.addLayout(left, 2)
+
+        # Right side: artwork preview
+        right = QVBoxLayout()
+        preview_box = QGroupBox("Artwork Preview")
+        preview_layout = QVBoxLayout(preview_box)
+        self._preview_label = QLabel("No preview available")
+        self._preview_label.setAlignment(Qt.AlignCenter)
+        self._preview_label.setMinimumSize(300, 300)
+        self._preview_label.setStyleSheet("border: 1px solid #ccc; background: #f5f5f5;")
+        preview_layout.addWidget(self._preview_label)
+        right.addWidget(preview_box)
+        right.addStretch(1)
+        content.addLayout(right, 1)
+
+        layout.addLayout(content)
+
+        # Close button
+        close_row = QHBoxLayout()
+        close_row.addStretch(1)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.close)
+        close_row.addWidget(close_btn)
+        layout.addLayout(close_row)
+
+    def _load_current(self) -> None:
+        if not self._queue:
+            return
+        item = self._queue[self._current_index]
+        self._position_label.setText(
+            f"Review {self._current_index + 1} of {len(self._queue)}"
+        )
+        self._release_title.setText(item.group_title or "Unknown")
+        self._release_key.setText(item.group_release_key)
+
+        self._candidate_list.clear()
+        # Show the top candidate
+        self._candidate_list.addItem(
+            f"Top candidate: {Path(item.candidate_path).name} "
+            f"[{item.category}] — confidence {item.confidence:.0%}"
+        )
+        self._candidate_list.addItem(f"  Path: {item.candidate_path}")
+        self._candidate_list.addItem(f"  Reason: {item.reason}")
+
+        # Try to load preview
+        self._load_preview(item.candidate_path)
+
+    def _load_preview(self, path: str) -> None:
+        from PySide6.QtGui import QPixmap
+        try:
+            pixmap = QPixmap(path)
+            if not pixmap.isNull():
+                # Scale to fit preview area maintaining aspect ratio
+                scaled = pixmap.scaled(
+                    280, 280,
+                    Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation
+                )
+                self._preview_label.setPixmap(scaled)
+                self._preview_label.setText("")
+            else:
+                self._preview_label.setText("Cannot load image")
+        except Exception:
+            self._preview_label.setText("Preview unavailable")
+
+    def _on_candidate_selected(self, item: QListWidgetItem) -> None:
+        pass  # selection change
+
+    def _on_select_candidate(self) -> None:
+        if not self._queue:
+            return
+        current = self._queue[self._current_index]
+        # Lock the manual selection
+        self._provider.lock_manual_selection(
+            release_key=current.group_release_key,
+            selected_candidate_path=current.candidate_path,
+            method="manual_review",
+            confidence=current.confidence,
+            source_root="user_selected",
+        )
+        # Remove from review queue
+        self._provider.remove_from_review_queue(
+            current.group_release_key, current.candidate_path
+        )
+        self._advance_queue()
+
+    def _on_no_match(self) -> None:
+        if not self._queue:
+            return
+        current = self._queue[self._current_index]
+        # Remove from review queue without locking
+        self._provider.remove_from_review_queue(
+            current.group_release_key, current.candidate_path
+        )
+        self._advance_queue()
+
+    def _on_browse(self) -> None:
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Choose artwork/manual file", "",
+            "Images (*.jpg *.jpeg *.png *.gif *.bmp *.webp *.tif *.tiff);;"
+            "PDF (*.pdf);;Text (*.txt);;All files (*.*)"
+        )
+        if not file_path:
+            return
+        if not self._queue:
+            return
+        current = self._queue[self._current_index]
+        # Lock with the browsed file
+        self._provider.lock_manual_selection(
+            release_key=current.group_release_key,
+            selected_candidate_path=file_path,
+            method="manual_review",
+            confidence=current.confidence,
+            source_root="user_browsed",
+        )
+        self._provider.remove_from_review_queue(
+            current.group_release_key, current.candidate_path
+        )
+        self._advance_queue()
+
+    def _on_prev(self) -> None:
+        if self._current_index > 0:
+            self._current_index -= 1
+            self._load_current()
+
+    def _on_next(self) -> None:
+        self._advance_queue()
+
+    def _advance_queue(self) -> None:
+        # Update parent's review button count
+        if hasattr(self.parent(), "update_review_button"):
+            self.parent().update_review_button(
+                self._provider.get_outcome_summary().get("needs_review_count", 0)
+            )
+
+        if self._current_index + 1 < len(self._queue):
+            self._current_index += 1
+            self._load_current()
+        else:
+            # Queue exhausted
+            self.close()
+
+
+# (Issue #21) end-of-run result summary: outcome, counts, destinations.
     def _on_finished(self, result, error: str, cancelled: bool, cfg=None) -> None:
         self._run_in_progress = False
         self._run_button.setEnabled(True)
