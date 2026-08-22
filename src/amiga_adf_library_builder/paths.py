@@ -450,6 +450,31 @@ def load_igdb_config(config: Optional[str] = None) -> dict:
     return dict(igdb)
 
 
+def load_screenscraper_config(config: Optional[str] = None) -> dict:
+    """Return the ``[screenscraper]`` TOML table from the resolved config file.
+
+    Mirrors :func:`load_playmatch_config` EXACTLY: same precedence chain
+    (explicit ``config`` > env > XDG > system), returns ``{}`` when no config
+    file is found or no ``[screenscraper]`` table is present. ``screenscraper.py``
+    provides the typed :class:`~amiga_adf_library_builder.screenscraper.ScreenScraperConfig`
+    and the provider; this helper is the paths-layer entry point so the
+    precedence logic stays in one module.
+
+    The ScreenScraper provider is OPTIONAL and DISABLED by default; ``{}`` (no
+    table) means disabled, so nothing in the pipeline changes. Credentials
+    (devid, devpassword, softname, ssid, sspassword) are NEVER in config files
+    -- they come from the SecretStore / environment only.
+    """
+    path = _discover_config_file(config)
+    if path is None:
+        return {}
+    data = _read_config_file(path)
+    ss = data.get("screenscraper")
+    if not isinstance(ss, dict):
+        return {}
+    return dict(ss)
+
+
 # --- Discovery + precedence ---------------------------------------------------
 
 

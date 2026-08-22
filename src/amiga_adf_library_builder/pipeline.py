@@ -70,6 +70,7 @@ def run_pipeline(
     playmatch_config_path: Optional[str] = None,
     hasheous_config_path: Optional[str] = None,
     igdb_config_path: Optional[str] = None,
+    screenscraper_config_path: Optional[str] = None,
     activity: Optional[Callable[[str], None]] = None,
 ) -> dict:
     """Execute phases 2-4, 5 (optional), and 6. Returns a result summary dict.
@@ -244,6 +245,40 @@ def run_pipeline(
                     igdb_provider = None
         except Exception:  # provider failure must not break the pipeline
             igdb_provider = None
+    # Optional ScreenScraper metadata/artwork/manual provider. OPTIONAL and DISABLED by
+    # default; only built when a [screenscraper] config is present AND enabled.
+    # The provider uses hash-first (CRC/MD5/SHA1) lookup, then cached provider ID
+    # reuse, then title + system search. Credentials (devid, devpassword, softname,
+    # ssid, sspassword) come from environment variables / SecretStore only.
+    screenscraper_provider = None
+    if screenscraper_config_path:
+        try:
+            from . import screenscraper as ss_mod
+            from .paths import load_screenscraper_config
+
+            ss_cfg = ss_mod.ScreenScraperConfig.from_dict(
+                load_screenscraper_config(screenscraper_config_path)
+            )
+            if ss_cfg.enabled:
+                # Credentials from environment / SecretStore
+                import os
+                dev_id = os.environ.get("SCREENSCRAPER_DEV_ID", "").strip()
+                dev_password = os.environ.get("SCREENSCRAPER_DEV_PASSWORD", "").strip()
+                softname = os.environ.get("SCREENSCRAPER_SOFTNAME", "AmigaADFLibraryBuilder").strip()
+                ssid = os.environ.get("SCREENSCRAPER_SSID", "").strip()
+                sspassword = os.environ.get("SCREENSCRAPER_SSPASSWORD", "").strip()
+                if dev_id and dev_password:
+                    screenscraper_provider = ss_mod.ScreenScraperProvider(
+                        ss_cfg, cfg.metadata_cache_dir,
+                        dev_id=dev_id, dev_password=dev_password,
+                        softname=softname, ssid=ssid, sspassword=sspassword
+                    )
+                    # ScreenScraper provider doesn't have a discover() method
+                else:
+                    # Missing credentials - provider stays disabled
+                    screenscraper_provider = None
+        except Exception:  # provider failure must not break the pipeline
+            screenscraper_provider = None
     _act(
         f"Filling in missing metadata for {len(groups)} release(s) "
         + ("from online sources (this can take a while)."
@@ -264,6 +299,7 @@ def run_pipeline(
         playmatch_provider=playmatch_provider,
         hasheous_provider=hasheous_provider,
         igdb_provider=igdb_provider,
+        screenscraper_provider=screenscraper_provider,
         include_artwork=include_artwork,
         activity=activity,
     )
