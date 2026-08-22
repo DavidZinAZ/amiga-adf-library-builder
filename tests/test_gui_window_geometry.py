@@ -23,10 +23,19 @@ Headless: relies on ``QT_QPA_PLATFORM=offscreen`` (same pattern as
 tests/test_gui_folder_persistence.py). Deterministic on pytest tmp dirs.
 
 Offscreen-platform note (probed 2026-08-15): the offscreen platform clamps
-the window height to ``minimumSizeHint()`` (~732) on the first ``show()``,
-and ``normalGeometry()`` is invalid while a maximized window is hidden. The
+the window height to ``minimumSizeHint()`` on the first ``show()``, and
+``normalGeometry()`` is invalid while a maximized window is hidden. The
 tests therefore exercise the hidden-window path (setGeometry/close/restore),
 which is exactly what the persist/restore code path depends on.
+
+GH-40 (this fix): the providers tab used to stack every provider panel
+vertically, so its ``minimumSizeHint`` (~1393 px with 5 providers) pinned the
+window's minimum height and the window could not be shrunk vertically. The
+tab is now wrapped in a ``QScrollArea`` and the window declares an explicit
+``MIN_WINDOW_SIZE``. The new ``# --- GH-40`` tests cover: the sensible
+minimum, vertical resize (shrink + enlarge), a saved sub-minimum geometry
+clamping to the minimum on show, and the providers tab scrolling instead of
+pinning the window height.
 """
 
 from __future__ import annotations
@@ -43,6 +52,7 @@ from PySide6.QtWidgets import QApplication
 from amiga_adf_library_builder.gui import main_window as mw_module
 from amiga_adf_library_builder.gui.layout import PortablePaths
 from amiga_adf_library_builder.gui.main_window import (
+    MIN_WINDOW_SIZE,
     MainWindow,
     _decode_geometry,
 )
@@ -268,12 +278,14 @@ def test_restore_smaller_virtual_desktop_keeps_valid_position(
     qt_app, tmp_path: Path, monkeypatch
 ):
     """Same smaller desktop, but a saved position that STILL fits must be
-    restored verbatim (the guard must not clobber valid geometry)."""
-    fake = _FakeGuiApplication([_FakeScreen(0, 0, 600, 400)])
+    restored verbatim (the guard must not clobber valid geometry). The
+    saved size is >= ``MIN_WINDOW_SIZE`` (GH-40) and the desktop is large
+    enough for it, so the restore is exercised un-clamped."""
+    fake = _FakeGuiApplication([_FakeScreen(0, 0, 800, 600)])
     monkeypatch.setattr(mw_module, "QGuiApplication", fake)
     base = tmp_path / "issue18-smallvalid"
-    target = QRect(100, 50, 300, 250)
-    _write_payload(base, "100,50,300,250")
+    target = QRect(60, 40, 640, 480)
+    _write_payload(base, "60,40,640,480")
 
     mw = _make_window(base)
     assert mw.geometry() == target, (
@@ -331,3 +343,115 @@ def test_decode_geometry_round_trip(qt_app):
     rect, maximized = _decode_geometry(json.dumps({"v": 1, "geom": "5,6,700,500"}))
     assert rect == QRect(5, 6, 700, 500)
     assert maximized is False
+
+
+# --- GH-40: vertical resizability ----------------------------------------------
+def test_window_declares_sensible_minimum_size(qt_app, tmp_path: Path):
+    """GH-40: the window has an explicit, sensible minimum size so the
+    controls cannot collapse, and it is small enough to allow vertical
+    shrinking far below the old 1739 px content-driven floor."""
+    mw = _make_window(tmp_path / "gh40-min")
+    minsize = mw.minimumSize()
+    assert minsize == MIN_WINDOW_SIZE, (
+        f"window minimumSize {minsize} != declared {MIN_WINDOW_SIZE}"
+    )
+    assert minsize.height() <= 500, (
+        f"minimum height {minsize.height()} is too large for vertical resize"
+    )
+    # The minimum must never come from the content size hint: the providers
+    # tab content alone used to demand ~1393 px of minimum height.
+    assert mw.minimumSizeHint().height() < 1000, (
+        f"content minimumSizeHint {mw.minimumSizeHint()} still pins the height"
+    )
+    mw.close()
+
+
+def test_window_resizes_vertically(qt_app, tmp_path: Path):
+    """GH-40: the reported defect -- the window could not be made shorter.
+    After the fix a shown window accepts a smaller height (down to the
+    declared minimum) and a larger one, and reports the new size."""
+    mw = _make_window(tmp_path / "gh40-shrink")
+    mw.setGeometry(QRect(20, 20, 900, 680))
+    mw.show()
+    qt_app.processEvents()
+
+    # Shrink vertically well below the pre-fix 1739 px floor, to the minimum.
+    mw.resize(900, 480)
+    qt_app.processEvents()
+    assert mw.height() == 480, (
+        f"window refused vertical shrink: height={mw.height()} after "
+        f"resize to 480 (minimum {mw.minimumSize()})"
+    )
+
+    # Enlarge vertically past the default.
+    mw.resize(900, 760)
+    qt_app.processEvents()
+    assert mw.height() == 760, (
+        f"window refused vertical enlarge: height={mw.height()} after "
+        f"resize to 760"
+    )
+
+    # Shrink to the declared minimum and no further (the floor holds).
+    mw.resize(900, 100)
+    qt_app.processEvents()
+    assert mw.height() == MIN_WINDOW_SIZE.height(), (
+        f"window shrank below its declared minimum: {mw.height()} < "
+        f"{MIN_WINDOW_SIZE.height()}"
+    )
+    mw.close()
+
+
+def test_saved_subminimum_geometry_clamps_to_minimum_on_show(
+    qt_app, tmp_path: Path
+):
+    """GH-40: a saved geometry smaller than MIN_WINDOW_SIZE must not
+    collapse the controls on restore -- Qt clamps the shown window up to
+    the declared minimum."""
+    base = tmp_path / "gh40-submin"
+    _write_payload(base, "10,10,200,150")  # far below the 640x480 minimum
+
+    mw = _make_window(base)
+    mw.show()
+    qt_app.processEvents()
+    assert mw.width() >= MIN_WINDOW_SIZE.width(), (
+        f"restored width {mw.width()} below minimum {MIN_WINDOW_SIZE.width()}"
+    )
+    assert mw.height() >= MIN_WINDOW_SIZE.height(), (
+        f"restored height {mw.height()} below minimum {MIN_WINDOW_SIZE.height()}"
+    )
+    mw.close()
+
+
+def test_providers_tab_scrolls_instead_of_pinning_window(
+    qt_app, tmp_path: Path
+):
+    """GH-40 root cause: the providers tab's content used to demand ~1393 px
+    of minimum height, pinning the whole window. The tab is now a scroll
+    viewport: its own minimumSizeHint stays tiny and the tall content
+    scrolls inside the tab. (Regression guard: re-stacking the panels
+    without the scroll area fails this test.)"""
+    from PySide6.QtWidgets import QTabWidget
+
+    mw = _make_window(tmp_path / "gh40-scroll")
+    tabs = mw.findChild(QTabWidget)
+    assert tabs is not None, "main window lost its tab widget"
+    # Locate the Providers tab by text (tab order is stable: Library,
+    # Options, Providers, ...).
+    idx = None
+    for i in range(tabs.count()):
+        if tabs.tabText(i) == "Providers":
+            idx = i
+            break
+    assert idx is not None, "Providers tab missing"
+    provider_tab = tabs.widget(idx)
+
+    # The tab's own minimum hint must be small (scroll viewport), not the
+    # full stacked height of all provider panels.
+    tab_hint = provider_tab.minimumSizeHint()
+    assert tab_hint.height() < 400, (
+        f"providers tab minimumSizeHint {tab_hint} still pins the window "
+        "height (expected a small scroll viewport)"
+    )
+    # The window minimum must not be driven by that content either.
+    assert mw.minimumSize().height() == MIN_WINDOW_SIZE.height()
+    mw.close()

@@ -19,7 +19,7 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QEvent, QRect, Qt
+from PySide6.QtCore import QEvent, QRect, QSize, Qt
 from PySide6.QtGui import QGuiApplication, QRegion
 from PySide6.QtWidgets import (
     QApplication,
@@ -45,6 +45,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QTabWidget,
     QTextEdit,
     QTableWidget,
@@ -97,6 +98,15 @@ logger = logging.getLogger("amiga_adf_gui")
 # the display layout changed -- it is clamped back on-screen: the default
 # size repositioned to the center of the primary available area. The window
 # must never be restored entirely off-screen.
+
+
+# (GH-40) Explicit, sensible minimum window size. The window must stay
+# resizable vertically (the providers tab scrolls, see
+# ``_build_providers_tab``), but it must not shrink so far that the tab bar,
+# the Run / Export Settings area, and the controls collapse into an
+# unusable state. 640x480 keeps the Run / Export Settings group (minimum
+# hint width ~602 px) fully visible.
+MIN_WINDOW_SIZE = QSize(640, 480)
 
 
 def _default_window_geometry() -> QRect:
@@ -294,6 +304,11 @@ class MainWindow(QMainWindow):
         # (Issue #18) Default size; replaced below by the persisted geometry
         # restore when a valid saved geometry exists.
         self.resize(900, 680)
+        # (GH-40) Explicit minimum so the window can be resized vertically
+        # (the providers tab scrolls) but never collapses to an unusable
+        # size. Applied before geometry restore so a saved smaller rect is
+        # clamped by Qt instead of shrinking the controls.
+        self.setMinimumSize(MIN_WINDOW_SIZE)
 
         self._paths = portable_paths or PortablePaths()
         self._paths.ensure_all()
@@ -636,11 +651,28 @@ class MainWindow(QMainWindow):
         return w
 
     def _build_providers_tab(self) -> QWidget:
+        # (GH-40) The providers panel stacks EVERY provider panel vertically,
+        # so its minimumSizeHint grows with the provider count (5 providers
+        # ~= 1393 px on stock DPI). Without a scroll viewport that height
+        # propagates to the central widget and the main window, pinning the
+        # window's minimum height and making it impossible to shrink
+        # vertically. A QScrollArea caps the tab's own minimum to the
+        # viewport; the tall content scrolls inside the tab instead.
         w = QWidget(self)
-        layout = QVBoxLayout(w)
+        outer = QVBoxLayout(w)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        scroll = QScrollArea(w)
+        scroll.setWidgetResizable(True)
+
+        inner = QWidget(self)
+        layout = QVBoxLayout(inner)
         for provider in self._registry.all():
             layout.addWidget(self._build_provider_panel(provider))
         layout.addStretch(1)
+
+        scroll.setWidget(inner)
+        outer.addWidget(scroll)
         return w
 
     def _build_provider_panel(self, provider: Provider) -> QWidget:
