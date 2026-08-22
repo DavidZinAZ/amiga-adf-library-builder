@@ -522,6 +522,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             rtfm_config_path=getattr(args, "config", None),
             playmatch_config_path=getattr(args, "playmatch_config", None) or getattr(args, "config", None),
             hasheous_config_path=getattr(args, "hasheous_config", None) or getattr(args, "config", None),
+            screenscraper_config_path=getattr(args, "config", None),
         )
         return _emit(
             result,
@@ -555,6 +556,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 rtfm_config_path=getattr(args, "config", None),
                 playmatch_config_path=getattr(args, "playmatch_config", None) or getattr(args, "config", None),
                 hasheous_config_path=getattr(args, "hasheous_config", None) or getattr(args, "config", None),
+                screenscraper_config_path=getattr(args, "config", None),
             )
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)

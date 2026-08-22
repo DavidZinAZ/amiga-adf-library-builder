@@ -179,3 +179,38 @@ enabled = false
 # token_cache_ttl = 5000000  # seconds; ~58 days, <= 0 disables token reuse
 # respect_rate_limit = true
 # rate_limit_backoff_seconds = 1.0
+
+# --- ScreenScraper metadata/artwork/manual provider (OPTIONAL, DISABLED by default) --
+# Opt-in metadata, artwork, and manual lookup via ScreenScraper WebAPI.
+# Requires developer credentials (devid, devpassword, softname) from ScreenScraper.
+# Member credentials (ssid, sspassword) are optional for higher limits.
+# Credentials are NEVER stored in config files; they come from the SecretStore
+# / environment variables (SCREENSCRAPER_DEV_ID, SCREENSCRAPER_DEV_PASSWORD,
+# SCREENSCRAPER_SOFTNAME, SCREENSCRAPER_SSID, SCREENSCRAPER_SSPASSWORD) only.
+#
+# The provider supports three lookup methods in precedence order:
+# 1. Hash-first: ROM hash lookup using CRC/MD5/SHA1 (exact match, highest confidence)
+# 2. Provider ID reuse: cached ScreenScraper game ID from prior successful match
+# 3. Title + system search: validated title + Amiga system search (relevance-gated)
+#
+# Artwork selection respects configured region preference. PDF manuals are retrieved
+# via the mediaManuelJeu.php endpoint and fed into the existing RTFM pipeline.
+#
+# The provider is OFFLINE at import time. No network calls occur until a real
+# fetch with --online. Tests inject fake openers; no live network in test suite.
+# All outbound requests are guarded by the existing SSRF guard (metadata.guard_url).
+# Rate limits and quotas are respected with a single bounded retry.
+[screenscraper]
+enabled = false
+# base_url = "https://www.screenscraper.fr/api2/"
+# timeout_seconds = 15.0
+# max_response_bytes = 2000000
+# max_concurrency = 1
+# confidence_threshold = 0.85
+# preferred_regions = ["us", "eu", "wor"]
+# download_metadata = true
+# download_artwork = true
+# download_manuals = true
+# cache_ttl = 86400  # seconds; <= 0 disables reuse
+# respect_rate_limit = true
+# rate_limit_backoff_seconds = 5.0

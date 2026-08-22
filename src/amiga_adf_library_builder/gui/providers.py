@@ -627,6 +627,276 @@ class IgdbProvider(Provider):
         secret_store.delete_secret("igdb_client_secret")
 
 
+# --- ScreenScraper provider adapter ----------------------------------------
+
+
+def _screenscraper_field_defaults() -> list[ProviderField]:
+    return [
+        ProviderField(
+            key="base_url",
+            label="ScreenScraper API endpoint",
+            default="https://www.screenscraper.fr/api2/",
+            placeholder="https://www.screenscraper.fr/api2/",
+            help_text=(
+                "ScreenScraper WebAPI endpoint. Only change if using a mirror or "
+                "self-hosted proxy."
+            ),
+        ),
+        ProviderField(
+            key="timeout_seconds",
+            label="Time limit per request (seconds)",
+            default="15.0",
+            help_text="How long to wait for the server before giving up (capped at 30 seconds).",
+        ),
+        ProviderField(
+            key="max_response_bytes",
+            label="Maximum response size (bytes)",
+            default="2000000",
+            help_text="Refuse to read more than this from the server (protection against oversized replies).",
+        ),
+        ProviderField(
+            key="max_concurrency",
+            label="Maximum concurrent requests",
+            default="1",
+            help_text="Maximum number of concurrent API requests (capped at 4; ScreenScraper has thread limits).",
+        ),
+        ProviderField(
+            key="confidence_threshold",
+            label="Minimum match confidence",
+            default="0.85",
+            help_text="A result is accepted automatically only if the match confidence is at least this (0–1).",
+        ),
+        ProviderField(
+            key="preferred_regions",
+            label="Preferred regions (comma-separated)",
+            default="us,eu,wor",
+            help_text="Region preference for artwork/manual selection (e.g., us, eu, wor, jp).",
+        ),
+        ProviderField(
+            key="download_metadata",
+            label="Download metadata",
+            default="true",
+            help_text="Enable metadata retrieval from ScreenScraper.",
+        ),
+        ProviderField(
+            key="download_artwork",
+            label="Download artwork",
+            default="true",
+            help_text="Enable artwork retrieval from ScreenScraper.",
+        ),
+        ProviderField(
+            key="download_manuals",
+            label="Download manuals (PDF)",
+            default="true",
+            help_text="Enable PDF manual retrieval from ScreenScraper.",
+        ),
+        ProviderField(
+            key="cache_ttl",
+            label="Cache TTL (seconds)",
+            default="86400",
+            help_text="How long to cache successful lookups (<= 0 disables).",
+        ),
+        ProviderField(
+            key="respect_rate_limit",
+            label="Honor rate limits (429 Retry-After)",
+            default="true",
+            help_text="Pause and retry once when the server asks us to slow down (ToS compliance).",
+        ),
+        ProviderField(
+            key="rate_limit_backoff_seconds",
+            label="Rate limit backoff (seconds)",
+            default="5.0",
+            help_text="Default wait when server sends no Retry-After header (capped at 60s).",
+        ),
+    ]
+
+
+def _build_screenscraper_config_dict(
+    *,
+    enabled: bool,
+    base_url: str,
+    timeout_seconds: str,
+    max_response_bytes: str,
+    max_concurrency: str,
+    confidence_threshold: str,
+    preferred_regions: str,
+    download_metadata: str,
+    download_artwork: str,
+    download_manuals: str,
+    cache_ttl: str,
+    respect_rate_limit: str,
+    rate_limit_backoff_seconds: str,
+) -> dict:
+    """Build a typed ``[screenscraper]`` TOML table (mirrors ScreenScraperConfig)."""
+    return {
+        "enabled": enabled,
+        "base_url": base_url or "https://www.screenscraper.fr/api2/",
+        "timeout_seconds": float(timeout_seconds or 15.0),
+        "max_response_bytes": int(max_response_bytes or 2_000_000),
+        "max_concurrency": int(max_concurrency or 1),
+        "confidence_threshold": float(confidence_threshold or 0.85),
+        "preferred_regions": [r.strip().lower() for r in preferred_regions.split(",") if r.strip()],
+        "download_metadata": (download_metadata == "true" or download_metadata is True),
+        "download_artwork": (download_artwork == "true" or download_artwork is True),
+        "download_manuals": (download_manuals == "true" or download_manuals is True),
+        "cache_ttl": float(cache_ttl or 86400.0),
+        "respect_rate_limit": (respect_rate_limit == "true" or respect_rate_limit is True),
+        "rate_limit_backoff_seconds": float(rate_limit_backoff_seconds or 5.0),
+    }
+
+
+class ScreenScraperProvider(Provider):
+    """Generic GUI adapter over the core ScreenScraper metadata/artwork/manual provider.
+
+    The provider is OPTIONAL and DISABLED by default. Its credentials
+    (devid, devpassword, softname, ssid, sspassword) live in the SecretStore
+    under the keys ``screenscraper_dev_id``, ``screenscraper_dev_password``,
+    ``screenscraper_softname``, ``screenscraper_ssid``, ``screenscraper_sspassword``
+    -- never in config. The base URL and bounds are non-secret and rendered
+    by the generic panel.
+    """
+
+    def __init__(self) -> None:
+        self.metadata = ProviderMetadata(
+            id="screenscraper",
+            name="ScreenScraper",
+            description=(
+                "Optional metadata, artwork, and manual provider via ScreenScraper WebAPI. "
+                "Supports hash-first (CRC/MD5/SHA1) lookup, cached provider ID reuse, "
+                "and title + Amiga system search. Requires developer credentials "
+                "(devid, devpassword, softname) from ScreenScraper. Member credentials "
+                "(ssid, sspassword) are optional for higher limits. Disabled by default."
+            ),
+            auth_required="required",
+            fields=_screenscraper_field_defaults(),
+            capabilities=[
+                ProviderCapability.ONLINE_LOOKUP,
+                ProviderCapability.HASH_RESOLUTION,
+                ProviderCapability.METADATA,
+                ProviderCapability.ARTWORK,
+            ],
+            requires_secret=True,
+        )
+        self._enabled = False
+        self._base_url = "https://www.screenscraper.fr/api2/"
+        self._timeout_seconds = "15.0"
+        self._max_response_bytes = "2000000"
+        self._max_concurrency = "1"
+        self._confidence_threshold = "0.85"
+        self._preferred_regions = "us,eu,wor"
+        self._download_metadata = "true"
+        self._download_artwork = "true"
+        self._download_manuals = "true"
+        self._cache_ttl = "86400"
+        self._respect_rate_limit = "true"
+        self._rate_limit_backoff_seconds = "5.0"
+        self._lock = threading.RLock()
+
+    # --- config ---------------------------------------------------------------
+    def is_configured(self) -> bool:
+        with self._lock:
+            return bool(self._base_url and self._base_url.strip())
+
+    def enabled(self) -> bool:
+        with self._lock:
+            return self._enabled and self.is_configured()
+
+    def set_field(self, key: str, value: str) -> None:
+        with self._lock:
+            if key == "base_url":
+                self._base_url = (value or "").rstrip("/")
+            elif key == "timeout_seconds":
+                self._timeout_seconds = value
+            elif key == "max_response_bytes":
+                self._max_response_bytes = value
+            elif key == "max_concurrency":
+                self._max_concurrency = value
+            elif key == "confidence_threshold":
+                self._confidence_threshold = value
+            elif key == "preferred_regions":
+                self._preferred_regions = value
+            elif key == "download_metadata":
+                self._download_metadata = value
+            elif key == "download_artwork":
+                self._download_artwork = value
+            elif key == "download_manuals":
+                self._download_manuals = value
+            elif key == "cache_ttl":
+                self._cache_ttl = value
+            elif key == "respect_rate_limit":
+                self._respect_rate_limit = value
+            elif key == "rate_limit_backoff_seconds":
+                self._rate_limit_backoff_seconds = value
+            elif key == "enabled":
+                self._enabled = (value == "true" or value is True)
+            else:
+                raise KeyError(f"unknown screenscraper field: {key}")
+
+    def set_enabled(self, enabled: bool) -> None:
+        with self._lock:
+            self._enabled = bool(enabled)
+
+    def to_config_dict(self) -> dict:
+        with self._lock:
+            return _build_screenscraper_config_dict(
+                enabled=self._enabled,
+                base_url=self._base_url,
+                timeout_seconds=self._timeout_seconds,
+                max_response_bytes=self._max_response_bytes,
+                max_concurrency=self._max_concurrency,
+                confidence_threshold=self._confidence_threshold,
+                preferred_regions=self._preferred_regions,
+                download_metadata=self._download_metadata,
+                download_artwork=self._download_artwork,
+                download_manuals=self._download_manuals,
+                cache_ttl=self._cache_ttl,
+                respect_rate_limit=self._respect_rate_limit,
+                rate_limit_backoff_seconds=self._rate_limit_backoff_seconds,
+            )
+
+    # --- status ---------------------------------------------------------------
+    def status(self) -> ProviderStatus:
+        with self._lock:
+            if not self._enabled:
+                return ProviderStatus(ok=True, message="Turned off", configured=self.is_configured())
+            if not self.is_configured():
+                return ProviderStatus(ok=False, message="Not set up yet — enter the API endpoint below", configured=False)
+            return ProviderStatus(ok=True, message="Ready", configured=True)
+
+    def test_connection(self) -> ProviderStatus:
+        # Real fetch is performed lazily by the core provider under SSRF guards.
+        status = self.status()
+        if status.ok and status.message == "Ready":
+            # Explicit success wording for connection check (GH-42)
+            return ProviderStatus(ok=True, message="Connection successful", configured=status.configured, reachable=status.reachable)
+        return status
+
+    # --- secrets --------------------------------------------------------------
+    def add_credentials(self, secret_store: Any, **secrets: str) -> None:
+        dev_id = secrets.get("dev_id")
+        dev_password = secrets.get("dev_password")
+        softname = secrets.get("softname")
+        ssid = secrets.get("ssid")
+        sspassword = secrets.get("sspassword")
+        if dev_id:
+            secret_store.set_secret("screenscraper_dev_id", dev_id)
+        if dev_password:
+            secret_store.set_secret("screenscraper_dev_password", dev_password)
+        if softname:
+            secret_store.set_secret("screenscraper_softname", softname)
+        if ssid:
+            secret_store.set_secret("screenscraper_ssid", ssid)
+        if sspassword:
+            secret_store.set_secret("screenscraper_sspassword", sspassword)
+
+    def remove_credentials(self, secret_store: Any) -> None:
+        secret_store.delete_secret("screenscraper_dev_id")
+        secret_store.delete_secret("screenscraper_dev_password")
+        secret_store.delete_secret("screenscraper_softname")
+        secret_store.delete_secret("screenscraper_ssid")
+        secret_store.delete_secret("screenscraper_sspassword")
+
+
 # --- Registry ----------------------------------------------------------------
 
 
@@ -663,9 +933,10 @@ class ProviderRegistry:
 
 
 def default_registry() -> ProviderRegistry:
-    """Return a registry pre-loaded with the three core online resolvers."""
+    """Return a registry pre-loaded with the core online resolvers."""
     reg = ProviderRegistry()
     reg.register(PlaymatchProvider())
     reg.register(HasheousProvider())
     reg.register(IgdbProvider())
+    reg.register(ScreenScraperProvider())
     return reg

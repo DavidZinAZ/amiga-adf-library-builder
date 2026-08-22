@@ -19,9 +19,11 @@ from .metadata import MetadataRecord, cache_key, guard_url, lookup_metadata
 from .playmatch import PlaymatchMatchMethod
 from .hasheous import HasheousMatchMethod
 from .igdb import IgdbMatchMethod
+from . import screenscraper as ss_mod
 from .models import ReleaseGroup, ScanRecord
 from .naming import release_basename
 from .nfo_render import render_gotek_nfo
+import os
 
 # Retained for exporter-gate compatibility. Artwork policy is aspect-fit within
 # 150x150, never cropped or upscaled; there is no minimum source dimension.
@@ -83,6 +85,9 @@ class EnrichCategory(str, Enum):
     IGDB = "igdb"
     IGDB_MISS = "igdb_miss"
     IGDB_REVIEW = "igdb_review"
+    SCREENSCRAPER = "screenscraper"
+    SCREENSCRAPER_MISS = "screenscraper_miss"
+    SCREENSCRAPER_REVIEW = "screenscraper_review"
 
 
 @dataclass
@@ -554,6 +559,7 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                  online: bool = False, refresh: bool = False,
                  local_media_provider=None, playmatch_provider=None,
                  hasheous_provider=None, igdb_provider=None,
+                 screenscraper_provider=None,
                  include_artwork: bool = True,
                  activity: Optional[Callable[[str], None]] = None) -> EnrichResult:
     metadata_cache_dir = Path(metadata_cache_dir or (Path(nfo_dir).parent / "metadata-cache"))
@@ -874,6 +880,92 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                 ok=False, error=str(exc),
             ))
 
+    # Optional ScreenScraper metadata/artwork/manual provider. Hash-first (CRC/MD5/SHA1),
+    # then cached provider ID reuse, then title + system search.
+    # Non-fatal; failures are caught and logged as structured events.
+    _ss_success_event: Optional[EnrichEvent] = None
+    _ss_success_note: Optional[str] = None
+    screenscraper_result = None
+    if screenscraper_provider is not None:
+        try:
+            # Use the enrich_group_with_screenscraper high-level function
+            screenscraper_result = ss_mod.enrich_group_with_screenscraper(
+                group, scans, ss_mod.ScreenScraperConfig.from_dict({}),
+                metadata_cache_dir,
+                dev_id=os.environ.get("SCREENSCRAPER_DEV_ID", "").strip(),
+                dev_password=os.environ.get("SCREENSCRAPER_DEV_PASSWORD", "").strip(),
+                softname=os.environ.get("SCREENSCRAPER_SOFTNAME", "AmigaADFLibraryBuilder").strip(),
+                ssid=os.environ.get("SCREENSCRAPER_SSID", "").strip(),
+                sspassword=os.environ.get("SCREENSCRAPER_SSPASSWORD", "").strip(),
+                online=online,
+                opener=None,  # Uses default opener
+                resolve_urls=False,
+            )
+            if screenscraper_result is not None:
+                if screenscraper_result.found:
+                    _ss_success_event = EnrichEvent(
+                        category=EnrichCategory.SCREENSCRAPER,
+                        detail=(f"resolved via {screenscraper_result.match_method.value} "
+                                f"conf={screenscraper_result.confidence:.2f} "
+                                f"provider_id={screenscraper_result.provider_id}"),
+                        ok=True,
+                    )
+                    if screenscraper_result.provider_id:
+                        _ss_success_note = (
+                            f"screenscraper provider_id: {screenscraper_result.provider_id}"
+                        )
+                    # Merge ScreenScraper metadata into the main metadata record if it improves things
+                    if screenscraper_result.provider_id and (not metadata or screenscraper_result.confidence > (metadata.confidence or 0.0)):
+                        # Use ScreenScraper metadata as primary source
+                        if metadata is None:
+                            metadata = MetadataRecord(canonical_title=lookup_title or group.title or "Unknown")
+                        # Merge fields
+                        if screenscraper_result.canonical_title:
+                            metadata.canonical_title = screenscraper_result.canonical_title
+                        if screenscraper_result.description:
+                            metadata.description = screenscraper_result.description
+                        if screenscraper_result.year:
+                            metadata.year = screenscraper_result.year
+                        if screenscraper_result.genre:
+                            metadata.genres = [screenscraper_result.genre]
+                        if screenscraper_result.developer:
+                            metadata.developer = screenscraper_result.developer
+                        if screenscraper_result.publisher:
+                            metadata.publisher = screenscraper_result.publisher
+                        if screenscraper_result.artwork_source_url:
+                            metadata.source_url = screenscraper_result.artwork_source_url
+                        if screenscraper_result.provider_id:
+                            metadata.provider_id = screenscraper_result.provider_id
+                        metadata.provider = "screenscraper"
+                        metadata.confidence = max(metadata.confidence, screenscraper_result.confidence)
+                        # Artwork URLs from ScreenScraper
+                        if screenscraper_result.artwork_url:
+                            metadata.artwork_page_urls = [screenscraper_result.artwork_url]
+                            metadata.artwork_provider = screenscraper_result.artwork_provider
+                        # External IDs
+                        if screenscraper_result.external_ids:
+                            pass  # Store for potential downstream use
+                elif screenscraper_result.needs_manual_review:
+                    events.append(EnrichEvent(
+                        category=EnrichCategory.SCREENSCRAPER_REVIEW,
+                        detail=(f"screenscraper needs manual review: "
+                                f"{screenscraper_result.relevance_category or 'ambiguous match'}"),
+                        ok=False, error=screenscraper_result.relevance_category or "ambiguous match",
+                    ))
+                    notes.append("screenscraper: routed to manual review")
+                else:
+                    events.append(EnrichEvent(
+                        category=EnrichCategory.SCREENSCRAPER_MISS,
+                        detail="screenscraper: no identity match",
+                        cache="miss",
+                    ))
+        except Exception as exc:  # defensive: never break enrich
+            events.append(EnrichEvent(
+                category=EnrichCategory.SCREENSCRAPER_MISS,
+                detail=f"screenscraper resolve raised: {exc}",
+                ok=False, error=str(exc),
+            ))
+
     # --- Cross-provider exact-hash fail-safe (issue #11/#12 hash-first posture) ---
     # When BOTH hash-first providers are enabled and each resolves the SAME
     # sha256 to an EXACT-HASH identity (match_method == EXACT_HASH, conf 1.0),
@@ -929,6 +1021,8 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
             _pm_success_note = None
             _hs_success_event = None
             _hs_success_note = None
+            _ss_success_event = None
+            _ss_success_note = None
 
     if _pm_success_event is not None:
         events.append(_pm_success_event)
@@ -938,6 +1032,10 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
         events.append(_hs_success_event)
         if _hs_success_note is not None:
             notes.append(_hs_success_note)
+    if _ss_success_event is not None:
+        events.append(_ss_success_event)
+        if _ss_success_note is not None:
+            notes.append(_ss_success_note)
 
     master = None
     processed: Optional[Path] = None
@@ -1092,10 +1190,12 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
         or (playmatch_result is not None and playmatch_result.needs_manual_review)
         or (hasheous_result is not None and hasheous_result.needs_manual_review)
         or (igdb_result is not None and igdb_result.needs_manual_review)
+        or (screenscraper_result is not None and screenscraper_result.needs_manual_review)
         or any(e.category in (
             EnrichCategory.PLAYMATCH_REVIEW,
             EnrichCategory.HASHEOUS_REVIEW,
             EnrichCategory.IGDB_REVIEW,
+            EnrichCategory.SCREENSCRAPER_REVIEW,
             EnrichCategory.LOCAL_MEDIA_REVIEW,
         ) for e in events)
     )
@@ -1113,6 +1213,7 @@ def enrich_all(groups: list[ReleaseGroup], *, nfo_dir: Path, scans: list[ScanRec
                online: bool = False, refresh: bool = False,
                local_media_provider=None, playmatch_provider=None,
                hasheous_provider=None, igdb_provider=None,
+               screenscraper_provider=None,
                include_artwork: bool = True,
                activity: Optional[Callable[[str], None]] = None) -> list[EnrichResult]:
     scan_map = {s.filename: s for s in scans}
@@ -1139,6 +1240,7 @@ def enrich_all(groups: list[ReleaseGroup], *, nfo_dir: Path, scans: list[ScanRec
                      playmatch_provider=playmatch_provider,
                      hasheous_provider=hasheous_provider,
                      igdb_provider=igdb_provider,
+                     screenscraper_provider=screenscraper_provider,
                      include_artwork=include_artwork,
                      activity=activity))
     return results
