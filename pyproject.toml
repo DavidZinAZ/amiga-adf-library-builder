@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "amiga-adf-library-builder"
-version = "0.2.3"
+version = "0.2.5"
 description = "Preservation-first Amiga ADF catalogue and Gotek SD-card builder"
 readme = "README.md"
 requires-python = ">=3.11"

@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.5 — 2026-08-21
+
+- GH-49: Configurable local matching confidence and ambiguous review system
+  - Three configurable thresholds in LocalMediaConfig:
+    - `auto_match_threshold` (default 0.90): confidence ≥ this → Auto Match
+    - `review_threshold` (default 0.70): confidence ≥ this → Needs Review, below → No Match
+    - `near_tie_difference` (default 0.03): top two candidates within this → force Needs Review
+  - Validation ensures `review_threshold < auto_match_threshold`
+  - Three-outcome resolution logic: Auto Match / Needs Review / No Match
+  - Near-tie detection within and across categories (artwork/manual)
+  - Persistent review queue (ManualReviewItem) at cache_dir/review_queue.json
+  - Manual-lock registry at cache_dir/manual_locks.json with provenance
+  - Manual locks protect selections from auto-overwrite on refresh/re-scan
+  - Explicit opt-in (remove_manual_lock) allows reconsideration
+  - LocalMediaResult extended with outcome field and top_candidates
+  - Comprehensive tests for thresholds, boundaries, near-ties, persistence, locking, review queue
+  - All existing GH-45 behavior preserved
+
 ## 0.2.3 — 2026-08-07
 
 - Preserve-first Amiga ADF catalogue and Gotek SD-card builder: scan, parse,
