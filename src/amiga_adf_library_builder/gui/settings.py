@@ -47,6 +47,10 @@ SETTINGS_KEYS = (
     # (GH-33) LaunchBox local folder mappings (non-sensitive local paths).
     "launchbox_media_roots",
     "launchbox_manual_roots",
+    # (GH-54) Local Asset Matching thresholds.
+    "auto_match_threshold",
+    "review_threshold",
+    "near_tie_difference",
 )
 
 
@@ -124,6 +128,13 @@ class Settings:
     # without these keys load with empty lists (no mappings).
     launchbox_media_roots: list[dict] = field(default_factory=list)
     launchbox_manual_roots: list[str] = field(default_factory=list)
+    # (GH-54) Local Asset Matching thresholds (match backend defaults).
+    # Auto-match threshold: confidence >= this -> Auto Match (default 0.90 = 90%)
+    auto_match_threshold: float = 0.90
+    # Review threshold: confidence >= this -> Needs Review (default 0.70 = 70%)
+    review_threshold: float = 0.70
+    # Near-tie difference: if top two candidates within this -> force Needs Review (default 0.03 = 3%)
+    near_tie_difference: float = 0.03
     presets: dict[str, "Preset"] = field(default_factory=dict)
 
     def as_dict(self) -> dict:
@@ -151,6 +162,10 @@ class Settings:
             "launchbox_manual_roots": _clean_manual_root_entries(
                 self.launchbox_manual_roots
             ),
+            # (GH-54) Local Asset Matching thresholds.
+            "auto_match_threshold": self.auto_match_threshold,
+            "review_threshold": self.review_threshold,
+            "near_tie_difference": self.near_tie_difference,
         }
         if self.presets:
             out["presets"] = {name: p.as_dict() for name, p in self.presets.items()}
@@ -186,6 +201,10 @@ class Settings:
         s.launchbox_manual_roots = _clean_manual_root_entries(
             gui.get("launchbox_manual_roots")
         )
+        # (GH-54) Local Asset Matching thresholds (match backend defaults).
+        s.auto_match_threshold = float(gui.get("auto_match_threshold", 0.90))
+        s.review_threshold = float(gui.get("review_threshold", 0.70))
+        s.near_tie_difference = float(gui.get("near_tie_difference", 0.03))
         raw_presets = gui.get("presets")
         if isinstance(raw_presets, dict):
             for name, val in raw_presets.items():
@@ -215,6 +234,10 @@ class Preset:
     # (GH-33) LaunchBox local folder mappings captured with the preset.
     launchbox_media_roots: list[dict] = field(default_factory=list)
     launchbox_manual_roots: list[str] = field(default_factory=list)
+    # (GH-54) Local Asset Matching thresholds captured with the preset.
+    auto_match_threshold: float = 0.90
+    review_threshold: float = 0.70
+    near_tie_difference: float = 0.03
 
     def as_dict(self) -> dict:
         return {
@@ -237,6 +260,10 @@ class Preset:
             "launchbox_manual_roots": _clean_manual_root_entries(
                 self.launchbox_manual_roots
             ),
+            # (GH-54) Local Asset Matching thresholds.
+            "auto_match_threshold": self.auto_match_threshold,
+            "review_threshold": self.review_threshold,
+            "near_tie_difference": self.near_tie_difference,
         }
 
     @classmethod
@@ -262,6 +289,10 @@ class Preset:
             launchbox_manual_roots=_clean_manual_root_entries(
                 data.get("launchbox_manual_roots")
             ),
+            # (GH-54) Local Asset Matching thresholds.
+            auto_match_threshold=float(data.get("auto_match_threshold", 0.90)),
+            review_threshold=float(data.get("review_threshold", 0.70)),
+            near_tie_difference=float(data.get("near_tie_difference", 0.03)),
         )
 
 
