@@ -71,6 +71,7 @@ def run_pipeline(
     hasheous_config_path: Optional[str] = None,
     igdb_config_path: Optional[str] = None,
     screenscraper_config_path: Optional[str] = None,
+    retrokit_config_path: Optional[str] = None,
     activity: Optional[Callable[[str], None]] = None,
 ) -> dict:
     """Execute phases 2-4, 5 (optional), and 6. Returns a result summary dict.
@@ -322,8 +323,42 @@ def run_pipeline(
 
             rtfm_cfg = rtfm_mod.RtfmConfig.from_dict(load_rtfm_config(rtfm_config_path))
             if rtfm_cfg.enabled:
+                # Optional RetroKit / Archive.org manual provider (GH-10).
+                # OPTIONAL and DISABLED by default; only built when a
+                # [retrokit_manuals] config is present AND enabled AND the run
+                # is online. The provider performs network fetches (index +
+                # manual artifact), so --online is the operator's explicit
+                # network-authorization signal, exactly like the other online
+                # providers; an offline run never touches the network and the
+                # deterministic RTFM build is unchanged. No credentials are
+                # required (Archive.org is public). The cache lives under the
+                # managed metadata cache dir. A provider failure, miss, or
+                # outage degrades to extra_sources=None so the deterministic
+                # offline RTFM build is unchanged.
+                retrokit_sources = None
+                if online and retrokit_config_path:
+                    try:
+                        from . import retrokit as rk_mod
+                        from .paths import load_retrokit_config
+
+                        rk_cfg = rk_mod.RetroKitConfig.from_dict(
+                            load_retrokit_config(retrokit_config_path)
+                        )
+                        if rk_cfg.enabled:
+                            rk_provider = rk_mod.RetroKitProvider(
+                                rk_cfg, metadata_cache_dir
+                            )
+                            rk_results = [
+                                rk_provider.resolve_and_acquire(g) for g in groups
+                            ]
+                            retrokit_sources = rk_mod.to_rtfm_sources(rk_results)
+                    except Exception:  # provider failure must not break the pipeline
+                        retrokit_sources = None
                 rtfm_results = rtfm_mod.build_rtfm_all(
-                    groups, cfg=rtfm_cfg, rtfm_dir=rtfm_dir
+                    groups,
+                    cfg=rtfm_cfg,
+                    rtfm_dir=rtfm_dir,
+                    extra_sources=retrokit_sources,
                 )
         except Exception:  # RTFM build failure must not break the pipeline
             rtfm_results = []

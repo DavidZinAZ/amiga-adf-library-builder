@@ -1689,11 +1689,24 @@ def build_rtfm_all(
     *,
     cfg: RtfmConfig,
     rtfm_dir: Path,
+    extra_sources: Optional[list[RtfmSource]] = None,
 ) -> list[RtfmResult]:
-    """Build ``.rtfm`` sidecars for every release group (deterministic, offline)."""
+    """Build ``.rtfm`` sidecars for every release group (deterministic, offline).
+
+    ``extra_sources`` (GH-10): an optional list of already-resolved
+    :class:`RtfmSource` entries (e.g. cached online manuals from the RetroKit
+    / Archive.org provider) to UNION with the locally discovered sources. The
+    existing scoring, near-tie, dedupe, and synthesis rules apply unchanged:
+    an online PDF colliding with a higher-fidelity local source is suppressed
+    (recorded as ``deduped`` in provenance), never double-composed.
+    """
     rtfm_dir = Path(rtfm_dir)
     # Discover once, then match per group (one shared .rtfm per group key).
     sources = discover_sources(cfg)
+    if extra_sources:
+        # Append (after local sources) so local sources keep their existing
+        # ordering and any near-tie/precedence decisions stay deterministic.
+        sources = list(sources) + list(extra_sources)
     results: list[RtfmResult] = []
     seen_keys: set[str] = set()
     for g in groups:

@@ -268,6 +268,7 @@ def build_pipeline_kwargs(
         "rtfm_config_path": provider_cfg,
         "playmatch_config_path": provider_cfg,
         "hasheous_config_path": provider_cfg,
+        "retrokit_config_path": provider_cfg,
     }
     if activity is not None:
         kwargs["activity"] = activity
