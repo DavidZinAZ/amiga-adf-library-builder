@@ -9,6 +9,7 @@ on:
       - 'v*'
   pull_request:
     branches:
+      - main
       - feat/issue15-windows-gui
       - feat/issue17-folder-persistence
 
