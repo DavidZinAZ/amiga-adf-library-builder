@@ -56,6 +56,7 @@ def _cli_build_kwargs(library_root: str, original_dir: str) -> dict:
         or getattr(args, "config", None),
         "hasheous_config_path": getattr(args, "hasheous_config", None)
         or getattr(args, "config", None),
+        "retrokit_config_path": getattr(args, "config", None),
     }
 
 

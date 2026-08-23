@@ -214,3 +214,32 @@ enabled = false
 # cache_ttl = 86400  # seconds; <= 0 disables reuse
 # respect_rate_limit = true
 # rate_limit_backoff_seconds = 5.0
+
+# ---------------------------------------------------------------------------
+# Optional RetroKit / Archive.org MANUAL provider (GH-10). MANUALS ONLY --
+# this is NOT a metadata or artwork provider. Disabled by default; the base
+# application is fully functional with no Archive.org availability and no
+# network. No credentials are required (Archive.org is public).
+#
+# The provider resolves each release group's manual against the RetroKit
+# per-system TSV index (retrokit-manuals/<system>/<system>-sources.tsv),
+# downloads the single selected artifact (never the multi-GB bundle), caches
+# it UNMUTATED under the managed cache dir, and feeds it into the existing
+# RTFM (Issue #5) PDF extraction path. Deterministic, conservative matching:
+# exact/canonical identity auto-accepts; ambiguous or low-confidence matches
+# are routed for review. A miss, outage, rate-limit, or corrupt artifact is
+# NON-FATAL and degrades to the offline RTFM build.
+#
+# Tests inject fake openers; no live network in the test suite.
+[retrokit_manuals]
+enabled = false
+# item_id = "retrokit-manuals"
+# system = "amiga"
+# preferred_languages = ["en"]
+# prefer_original = true
+# max_manual_bytes = 8388608
+# index_ttl_seconds = 604800
+# negative_ttl_seconds = 86400
+# timeout_seconds = 30.0
+# respect_rate_limit = true
+# rate_limit_backoff_seconds = 5.0

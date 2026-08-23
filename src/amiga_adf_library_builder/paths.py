@@ -475,6 +475,32 @@ def load_screenscraper_config(config: Optional[str] = None) -> dict:
     return dict(ss)
 
 
+def load_retrokit_config(config: Optional[str] = None) -> dict:
+    """Return the ``[retrokit_manuals]`` TOML table from the resolved config file.
+
+    Mirrors :func:`load_playmatch_config` EXACTLY: same precedence chain
+    (explicit ``config`` > env > XDG > system), returns ``{}`` when no config
+    file is found or no ``[retrokit_manuals]`` table is present.
+    ``retrokit.py`` provides the typed
+    :class:`~amiga_adf_library_builder.retrokit.RetroKitConfig` and the
+    provider; this helper is the paths-layer entry point so the precedence
+    logic stays in one module.
+
+    The RetroKit / Archive.org manual provider is OPTIONAL and DISABLED by
+    default; ``{}`` (no table) means disabled, so nothing in the pipeline
+    changes. No credentials are required (Archive.org is public); nothing
+    sensitive is ever sent.
+    """
+    path = _discover_config_file(config)
+    if path is None:
+        return {}
+    data = _read_config_file(path)
+    rk = data.get("retrokit_manuals")
+    if not isinstance(rk, dict):
+        return {}
+    return dict(rk)
+
+
 # --- Discovery + precedence ---------------------------------------------------
 
 
