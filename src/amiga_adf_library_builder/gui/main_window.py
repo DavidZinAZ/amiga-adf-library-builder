@@ -414,19 +414,25 @@ class MainWindow(QMainWindow):
         )
         self._mode_export = QCheckBox("Export the library (writes the final files)")
         self._mode_export.setToolTip(
-            "Builds the library and then writes the final export files to the "
-            "export destination. Requires 'Allow export' to be checked."
+            "The one switch that decides whether this run exports files. When "
+            "checked (and 'Check only' is not), the run writes the final export "
+            "files to the export destination after the safety acknowledgement "
+            "below is confirmed."
         )
         mode_row.addWidget(self._mode_build)
         mode_row.addWidget(self._mode_export)
         run_layout.addLayout(mode_row)
 
-        # Export gating controls (from Advanced tab) - now visible in Run/Export area
+        # (GH-43) Safety acknowledgement + check-only controls. There is exactly
+        # one primary choice above ('Export the library'); this second box is
+        # the explicit write-files acknowledgement, worded unmistakably, and is
+        # only relevant while export mode is selected (disabled otherwise).
         gate_row = QHBoxLayout()
-        self._cb_gate = QCheckBox("Allow export")
+        self._cb_gate = QCheckBox("I understand this run will write files")
         self._cb_gate.setToolTip(
-            "Confirm that you want to write the export files. The export is "
-            "refused until this box is checked."
+            "Required safety acknowledgement for an export run. Confirming it "
+            "allows this run to write the export files. Only applies when "
+            "'Export the library' is checked."
         )
         self._cb_verify = QCheckBox("Check only — don't change files")
         self._cb_verify.setToolTip(
@@ -492,8 +498,8 @@ class MainWindow(QMainWindow):
         root.addWidget(run_box)
 
         # Connect mode checkboxes to update export state display
-        self._mode_build.stateChanged.connect(self._update_export_state_display)
-        self._mode_export.stateChanged.connect(self._update_export_state_display)
+        self._mode_build.stateChanged.connect(self._sync_export_controls)
+        self._mode_export.stateChanged.connect(self._sync_export_controls)
         self._cb_gate.stateChanged.connect(self._update_export_state_display)
         self._cb_verify.stateChanged.connect(self._update_export_state_display)
         self._cb_artwork.stateChanged.connect(self._update_export_state_display)
@@ -1414,6 +1420,17 @@ class MainWindow(QMainWindow):
         )
         return state
 
+    def _sync_export_controls(self, _state: object = None) -> None:
+        """(GH-43) Keep the write-files acknowledgement available iff export mode
+        is selected. Outside export mode the acknowledgement has no meaning, so
+        it is disabled to prevent contradictory combinations; it never holds a
+        stale value that a later export run could silently pick up."""
+        export_selected = self._mode_export.isChecked()
+        self._cb_gate.setEnabled(export_selected)
+        if not export_selected:
+            self._cb_gate.setChecked(False)
+        self._update_export_state_display()
+
     def _apply_settings_to_widgets(self) -> None:
         s = self._settings
         # (Issue #17) Persisted folder paths that do not exist on THIS machine
@@ -1444,7 +1461,10 @@ class MainWindow(QMainWindow):
         self._cb_refresh.setChecked(s.refresh_metadata)
         self._cb_artwork.setChecked(s.require_artwork)
         self._cb_verify.setChecked(s.verify_only)
-        self._cb_gate.setChecked(s.export_gate_acknowledged)
+        # (GH-43) The acknowledgement only applies while export mode is
+        # selected; enforce the enabled state from the current mode.
+        self._cb_gate.setChecked(s.export_gate_acknowledged and self._mode_export.isChecked())
+        self._cb_gate.setEnabled(self._mode_export.isChecked())
         self._cb_advanced.setChecked(s.advanced_mode)
         self._cb_show_live_log.setChecked(s.show_live_log)
         # (GH-24) independent metadata selection.
@@ -1470,32 +1490,46 @@ class MainWindow(QMainWindow):
         else:
             self._export_dest_label.setText("")
 
-        # Build export state summary
+        # Build export state summary. Exactly one primary choice decides the
+        # outcome ('Export the library'); the acknowledgement and 'Check only'
+        # refine it and are explained here before Run is pressed (GH-43).
         reasons: list[str] = []
         will_export = False
 
         if not self._mode_export.isChecked():
-            reasons.append("Build-only mode selected (Export not checked)")
-        else:
-            if not self._cb_gate.isChecked():
-                reasons.append("'Allow export' is not checked")
-            if self._cb_verify.isChecked():
-                reasons.append("'Check only' mode enabled (no files written)")
+            self._export_state_label.setText(
+                "Build-only run: this run will NOT export files (only scan, "
+                "organize, and prepare)."
+            )
+            self._export_state_label.setStyleSheet("font-weight: bold; color: #1565c0;")
+            return
 
-            if not reasons:
-                will_export = True
+        if self._cb_verify.isChecked():
+            self._export_state_label.setText(
+                "Check-only run: files will NOT be written; the export is "
+                "verified only."
+            )
+            self._export_state_label.setStyleSheet("font-weight: bold; color: #e65100;")
+            return
 
-        # Check for missing output directory (warning, not blocking)
+        if not self._cb_gate.isChecked():
+            self._export_state_label.setText(
+                "Files will NOT be exported: confirm 'I understand this run "
+                "will write files' to allow this run to write files."
+            )
+            self._export_state_label.setStyleSheet("font-weight: bold; color: #c62828;")
+            return
+
+        will_export = True
         if will_export and not self._le_output_dir.text().strip():
-            reasons.append("Output directory not set (will use default)")
+            reasons.append("output directory not set (the default will be used)")
 
         if will_export:
-            self._export_state_label.setText("Files WILL be exported")
+            self._export_state_label.setText(
+                "Files WILL be exported"
+                + (f" — {('; '.join(reasons))}" if reasons else "")
+            )
             self._export_state_label.setStyleSheet("font-weight: bold; color: #2e7d32;")
-        else:
-            reason_text = "; ".join(reasons) if reasons else "Export blocked"
-            self._export_state_label.setText(f"Files will NOT be exported: {reason_text}")
-            self._export_state_label.setStyleSheet("font-weight: bold; color: #c62828;")
 
     # --- (GH-33) LaunchBox mappings: restore from persisted settings ----------
     def _lb_restore_mappings(self, s: "Settings") -> None:
