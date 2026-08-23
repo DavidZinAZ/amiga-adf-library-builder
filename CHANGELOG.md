@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- GH-43: Duplicate export controls clarified (Run / Export Settings)
+  - 'Export the library (writes the final files)' is now the ONE obvious
+    primary choice that determines whether the run will export files.
+  - The ambiguous 'Allow export' checkbox is replaced by the unmistakable
+    safety acknowledgement 'I understand this run will write files'.
+    Internal settings key `export_gate_acknowledged` and the CLI
+    `--export-gate-acknowledged` flag are unchanged.
+  - The acknowledgement is disabled (and never holds a stale checked value)
+    while build-only mode is selected, preventing contradictory combinations;
+    a run that writes files always gets a fresh, explicit confirmation.
+  - The pre-Run state label now explains exactly why the run will or will not
+    write files (build-only / export pending acknowledgement / check-only /
+    files will be exported) before Run is pressed.
+  - Regression coverage: tests/test_gui_issue43_export_controls.py.
+
 ## 0.2.5 — 2026-08-21
 
 - GH-49: Configurable local matching confidence and ambiguous review system
