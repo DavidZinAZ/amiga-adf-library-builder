@@ -36,6 +36,16 @@ tab is now wrapped in a ``QScrollArea`` and the window declares an explicit
 minimum, vertical resize (shrink + enlarge), a saved sub-minimum geometry
 clamping to the minimum on show, and the providers tab scrolling instead of
 pinning the window height.
+
+GH-58 (regression lock-in): the issue reports the Providers page being
+crushed and unscrollable in an old Windows package. Probing the current
+main (BASE 6d09d6c) shows the GH-40 fix already resolves it -- the
+viewport is healthy (>=187 px) at every probed size and the scrollbar
+works. The ``# --- GH-58`` tests pin the issue's acceptance criteria
+against regressions: the viewport is never reduced to a sliver at the
+default or minimum window size, the scrollbar reaches the last provider
+panel, and provider controls keep a readable height (>= their font
+metrics height) when the window is at its minimum.
 """
 
 from __future__ import annotations
@@ -47,7 +57,7 @@ from typing import Optional
 
 import pytest
 from PySide6.QtCore import QRect, Qt
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QScrollArea, QWidget
 
 from amiga_adf_library_builder.gui import main_window as mw_module
 from amiga_adf_library_builder.gui.layout import PortablePaths
@@ -454,4 +464,145 @@ def test_providers_tab_scrolls_instead_of_pinning_window(
     )
     # The window minimum must not be driven by that content either.
     assert mw.minimumSize().height() == MIN_WINDOW_SIZE.height()
+    mw.close()
+
+
+def _providers_scroll_area(providers_tab: QWidget) -> QScrollArea:
+    """Return the QScrollArea that wraps the Providers tab content (GH-40).
+
+    Fails loudly if the tab ever loses the scroll wrapper: that is exactly
+    the regression GH-58's acceptance criteria guard against.
+    """
+    scroll = providers_tab.findChild(QScrollArea)
+    assert scroll is not None, (
+        "Providers tab no longer contains a QScrollArea -- the GH-40 "
+        "scroll wrapper is gone and the providers stack will pin the "
+        "window height again (GH-58 regression)"
+    )
+    assert scroll.widgetResizable(), (
+        "Providers QScrollArea is not resizable; tall content will not "
+        "be reachable by scrolling"
+    )
+    return scroll
+
+
+def test_providers_viewport_keeps_real_height_at_min_window(
+    qt_app, tmp_path: Path
+):
+    """GH-58: with the window at its minimum size and the Providers tab
+    active, the scroll viewport must keep a real, usable height -- the
+    reported defect was controls squashed into a compressed sliver."""
+    from PySide6.QtWidgets import QTabWidget
+
+    mw = _make_window(tmp_path / "gh58-viewport")
+    mw.show()
+    mw.resize(MIN_WINDOW_SIZE.width(), MIN_WINDOW_SIZE.height())
+    qt_app.processEvents()
+
+    tabs = mw.findChild(QTabWidget)
+    assert tabs is not None
+    idx = next(
+        (i for i in range(tabs.count()) if tabs.tabText(i) == "Providers"),
+        None,
+    )
+    assert idx is not None, "Providers tab missing"
+    tabs.setCurrentIndex(idx)
+    qt_app.processEvents()
+
+    viewport = _providers_scroll_area(tabs.widget(idx)).viewport()
+    assert viewport.height() >= 100, (
+        "Providers controls collapsed to a "
+        f"{viewport.height()} px viewport at the minimum window size "
+        f"({MIN_WINDOW_SIZE.width()}x{MIN_WINDOW_SIZE.height()})"
+    )
+    mw.close()
+
+
+def test_providers_scrollbar_reaches_overflowing_content(
+    qt_app, tmp_path: Path
+):
+    """GH-58: the reported 'no working scrollbar' -- when the provider
+    panels are taller than the viewport, the vertical scrollbar must be
+    enabled and actually have something to scroll (maximum > 0)."""
+    from PySide6.QtWidgets import QTabWidget
+
+    mw = _make_window(tmp_path / "gh58-scrollbar")
+    mw.show()
+    mw.resize(MIN_WINDOW_SIZE.width(), MIN_WINDOW_SIZE.height())
+    qt_app.processEvents()
+
+    tabs = mw.findChild(QTabWidget)
+    assert tabs is not None
+    idx = next(
+        (i for i in range(tabs.count()) if tabs.tabText(i) == "Providers"),
+        None,
+    )
+    assert idx is not None, "Providers tab missing"
+    tabs.setCurrentIndex(idx)
+    qt_app.processEvents()
+
+    scroll_area = _providers_scroll_area(tabs.widget(idx))
+    bar = scroll_area.verticalScrollBar()
+    if scroll_area.widget().sizeHint().height() > scroll_area.viewport().height():
+        assert bar.maximum() > 0, (
+            "content overflows the viewport but the scrollbar reports "
+            "maximum=0 (nothing to scroll)"
+        )
+        assert bar.isEnabled(), "vertical scrollbar is disabled"
+    else:
+        # Content fits at this window size -- the scroll machinery must at
+        # least not be hard-disabled.
+        assert scroll_area.verticalScrollBarPolicy() != (
+            Qt.ScrollBarAlwaysOff
+        )
+    mw.close()
+
+
+def test_providers_controls_keep_readable_height_at_min_window(
+    qt_app, tmp_path: Path
+):
+    """GH-58: at the minimum window size no provider control may be
+    crushed below its natural (font metrics) height -- 'vertically
+    compressed' is the exact symptom reported in the issue."""
+    from PySide6.QtWidgets import QTabWidget
+
+    mw = _make_window(tmp_path / "gh58-readable")
+    mw.show()
+    mw.resize(MIN_WINDOW_SIZE.width(), MIN_WINDOW_SIZE.height())
+    qt_app.processEvents()
+
+    tabs = mw.findChild(QTabWidget)
+    assert tabs is not None
+    idx = next(
+        (i for i in range(tabs.count()) if tabs.tabText(i) == "Providers"),
+        None,
+    )
+    assert idx is not None, "Providers tab missing"
+    tabs.setCurrentIndex(idx)
+    qt_app.processEvents()
+
+    font_metrics = mw.fontMetrics()
+    squashed = []
+    for widget in tabs.widget(idx).findChildren(QWidget):
+        if not widget.isVisible():
+            continue
+        natural = widget.sizeHint().height()
+        if natural <= 0:
+            # -1 / 0 means "no meaningful hint" (bare layout containers);
+            # not a control.
+            continue
+        if widget.findChildren(QWidget):
+            # Containers legitimately shrink to fit their children --
+            # only leaf controls are the "vertically compressed" symptom.
+            continue
+        if widget.height() < natural - 2:
+            squashed.append(
+                f"{widget.metaObject().className()} "
+                f"({widget.height()} px, natural {natural} px)"
+            )
+    assert not squashed, (
+        "provider controls squashed below their natural height at the "
+        f"minimum window size; font height {font_metrics.height()} px: "
+        + "; ".join(squashed[:5])
+    )
     mw.close()
