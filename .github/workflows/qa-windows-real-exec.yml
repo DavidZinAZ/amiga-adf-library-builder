@@ -8,8 +8,8 @@ name: QA Windows real execution (Issue #15)
 # settings persistence, diagnostics/log access, and an actionable failure path on
 # invalid input (no raw traceback). Screenshots + a JSON report are uploaded.
 #
-# Triggered by push to feat/issue15-windows-gui (operator push gate already cleared)
-# and manually via workflow_dispatch.
+# Triggered by push to feat/issue15-windows-gui (operator push gate already cleared),
+# pull_request to main, and manually via workflow_dispatch.
 
 on:
   workflow_dispatch:
@@ -17,6 +17,9 @@ on:
     branches:
       - feat/issue15-windows-gui
       - feat/issue17-folder-persistence
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: read
