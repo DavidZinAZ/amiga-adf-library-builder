@@ -322,6 +322,19 @@ class MainWindow(QMainWindow):
         self._secret_store = secret_store or SecretStore.with_vault(self._paths.vault_file())
         self._registry = provider_registry or default_registry()
         self._config_path = config_path
+        # (GH-66) The local-media provider (and its persisted review queue) is
+        # anchored to the directory + provider-config the pipeline actually ran
+        # against. The GUI remembers both after each run so the Review button
+        # and the Match Review window read the SAME review_queue.json the run
+        # produced, not a stale/empty one from a different directory.
+        self._last_run_local_media_dir: Optional[Path] = None
+        self._last_run_local_media_config_path: Optional[str] = None
+        # The GuiState the most recent run used, so the review UI can resolve
+        # the exact provider-config path the pipeline read (GH-33 GUI mappings
+        # are merged into a managed file; we must read that same file).
+        self._last_run_state: Optional[GuiState] = None
+        # Cached provider, rebuilt when the run's directory changes.
+        self._local_media_provider = None
 
         # Install the redacting log filter process-wide (F1 / F7). This attaches
         # the SAME RedactingFilter to the root logger's handlers so records from
@@ -1798,6 +1811,10 @@ class MainWindow(QMainWindow):
     def _on_run(self) -> None:
         try:
             state = self._state_from_widgets()
+            # (GH-66) Remember the run's GuiState so the post-run review UI can
+            # resolve the EXACT provider-config path the pipeline read
+            # (GH-33 GUI mappings are merged into a managed file).
+            self._last_run_state = state
             # Persist non-sensitive defaults for next launch (no secrets here).
             self._persist_defaults()
 
@@ -1890,33 +1907,129 @@ class MainWindow(QMainWindow):
             )
             # Remember the logs_dir so the "Open Logs" button opens the right place.
             self._last_run_logs_dir = cfg.logs_dir
+            # (GH-66) Surface the review queue this run produced. The pipeline
+            # builds the local-media provider (and its persisted
+            # review_queue.json) on cfg.artwork_original_dir, so the Review
+            # button and the Match Review window must anchor to that same
+            # directory. Without this the button never left its disabled
+            # "Review 0" state, so review-band (review <= score < auto) and
+            # near-tie local matches vanished without a selection prompt.
+            self._last_run_local_media_dir = cfg.artwork_original_dir
+            self._last_run_local_media_config_path = (
+                self._resolve_run_local_media_config_path(cfg)
+            )
+            # A new run's queue supersedes the previous one: drop the cached
+            # provider so _refresh_review_button() reads the fresh queue.
+            self._local_media_provider = None
+            self._refresh_review_button()
         # (GH-54) Match Review dialog --------------------------------------------------
+    def _local_media_cache_dir(self) -> Path:
+        """GH-66: the directory the local-media provider's persisted state
+        (review_queue.json / manual_locks.json) lives under.
+
+        After a run, the pipeline anchored the provider to
+        ``cfg.artwork_original_dir`` (see :meth:`_on_finished`), so the review
+        UI must read that same directory. Before the first run there is no
+        pipeline dir yet; fall back to the portable cache dir (the pre-GH-66
+        behaviour) so the button state is still well-defined. Always returns a
+        concrete directory.
+        """
+        if self._last_run_local_media_dir is not None:
+            return self._last_run_local_media_dir
+        return self._paths.cache_dir
+
+    def _resolve_run_local_media_config_path(self, cfg) -> Optional[str]:
+        """GH-66: The provider-config path the just-completed run used.
+
+        Mirrors :func:`build_pipeline_kwargs` ->
+        :func:`resolve_local_media_config_path` EXACTLY, so the review UI loads
+        the same ``[local_media]`` table (and hence the same ``enabled`` flag)
+        the pipeline read. When the run held GH-33 LaunchBox mappings this is
+        the GUI-managed merged file; otherwise it is the operator config path.
+        Only called from :meth:`_on_finished` (once per run).
+        """
+        if self._last_run_state is not None:
+            from .state import resolve_local_media_config_path
+
+            return resolve_local_media_config_path(
+                self._last_run_state,
+                config_path=self._config_path,
+                cache_dir=cfg.cache_dir,
+            )
+        # No run state recorded (shouldn't happen post-run): fall back to the
+        # operator config path so the button state is still well-defined.
+        return self._config_path
+
+    def _build_local_media_provider(self, cache_dir: Path):
+        """GH-66: Build (or refresh) the local-media provider for ``cache_dir``.
+
+        Rebuilds when the provider is missing or was anchored to a different
+        directory, so a fresh run's review queue is always visible. Loads the
+        SAME provider config the run used (see
+        ``_last_run_local_media_config_path``) so the ``enabled`` flag matches
+        the pipeline. Returns ``None`` when local media is not configured /
+        enabled (the caller reports it). Silent: a review-UI hiccup must never
+        break a completed run, so this logs instead of popping dialogs.
+        """
+        from ..local_media import LocalMediaProvider, load_local_media_config
+
+        provider = self._local_media_provider
+        if provider is not None and Path(provider.cache_dir) == Path(cache_dir):
+            return provider
+        config_path = self._last_run_local_media_config_path or self._config_path
+        if not config_path:
+            # No operator config and no run recorded: nothing to read.
+            return None
+        try:
+            lm_cfg = load_local_media_config(config_path)
+        except Exception as exc:
+            logger.debug("local-media config load failed: %s", exc)
+            return None
+        if not lm_cfg.enabled:
+            return None
+        try:
+            provider = LocalMediaProvider(lm_cfg, cache_dir)
+        except Exception as exc:
+            logger.debug("local-media provider init failed: %s", exc)
+            return None
+        self._local_media_provider = provider
+        return provider
+
+    def _refresh_review_button(self) -> None:
+        """GH-66: Set the Review button count from the live review queue.
+
+        No-op when local media is not configured (provider is ``None``). Never
+        raises: a review-UI hiccup must not break a completed run.
+        """
+        try:
+            provider = self._build_local_media_provider(self._local_media_cache_dir())
+            count = (
+                provider.get_outcome_summary().get("needs_review_count", 0)
+                if provider is not None
+                else 0
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("review-button refresh skipped: %s", exc)
+            count = 0
+        self.update_review_button(count)
+
     def _open_match_review(self) -> None:
         """Open the non-modal Match Review window for ambiguous matches."""
-        from .local_media import LocalMediaProvider, load_local_media_config
-
-        if not hasattr(self, "_local_media_provider") or self._local_media_provider is None:
-            # Load local media config from the current settings
-            try:
-                cfg = load_local_media_config(self._config_path or str(self._paths.config_file()))
-                if cfg.enabled:
-                    self._local_media_provider = LocalMediaProvider(cfg, self._paths.cache_dir)
-            except Exception as exc:
-                QMessageBox.critical(self, "Match Review", f"Could not initialize local media provider: {exc}")
-                return
-
-        if self._local_media_provider is None:
+        # GH-66: anchor the provider to the directory the pipeline ran against
+        # so the window shows the exact queue the run produced.
+        provider = self._build_local_media_provider(self._local_media_cache_dir())
+        if provider is None:
             QMessageBox.information(self, "Match Review", "Local media provider is not configured or enabled.")
             return
 
-        queue = self._local_media_provider.get_review_queue()
+        queue = provider.get_review_queue()
         if not queue:
             QMessageBox.information(self, "Match Review", "No ambiguous matches to review.")
             return
 
         dialog = MatchReviewDialog(
             self,
-            provider=self._local_media_provider,
+            provider=provider,
             queue=queue,
         )
         dialog.exec()
