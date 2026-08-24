@@ -28,7 +28,16 @@ rtfm-docs = ["pypdf>=4", "pymupdf>=1.23", "pillow>=10", "pytesseract>=0.3"]
 # MIT-licensed CLI/core remain dependency-free. PySide6 is LGPL (license-
 # compatible); PyQt6 is deliberately avoided (GPLv3 would force GPL on an MIT
 # project).
-gui = ["PySide6>=6.7", "cryptography>=42.0", "tomli-w>=1.0"]
+#
+# GH-65: the packaged Windows GUI performs artwork processing through the
+# shared core (enrich -> artwork.process_artwork_bytes -> `from PIL import
+# Image`). Pillow is therefore a hard runtime dependency of the packaged GUI,
+# not an optional extra: without it the frozen app hard-fails with
+# "Artwork processing blocked: Pillow unavailable: No module named 'PIL'".
+# Declaring it in `gui` (installed by .github/workflows/build-windows.yml)
+# puts Pillow into the build environment so PyInstaller bundles it, and the
+# build lane verifies the import before packaging.
+gui = ["PySide6>=6.7", "cryptography>=42.0", "pillow>=10", "tomli-w>=1.0"]
 
 [project.scripts]
 amiga-adf-library-builder = "amiga_adf_library_builder.cli:main"
