@@ -58,6 +58,20 @@ QT_HIDDEN_IMPORTS = [
     "PySide6.QtWidgets",
 ]
 
+# GH-65: the packaged GUI performs artwork processing through the shared core
+# (enrich -> artwork.process_artwork_bytes -> `from PIL import Image`, a lazy
+# in-function import that PyInstaller static analysis cannot see). Pillow is
+# declared in the `gui` extra (pyproject.toml) so the build environment
+# installs it; these hidden imports force the frozen bundle to carry the PIL
+# top-level package and its core image submodules. `PIL` (the top-level
+# package) is the import the runtime code actually performs; `PIL.Image` is
+# included so the image API is reachable even if the package __init__ is
+# pruned by analysis.
+PILLOW_HIDDEN_IMPORTS = [
+    "PIL",
+    "PIL.Image",
+]
+
 # Bootstrap that invokes the documented hook target. Written to build/ at build
 # time (gitignored) so the committed spec stays coherent without committing a
 # bootstrap file.
@@ -282,7 +296,11 @@ def main() -> int:
 
     pathex_rel = ["src"]
     launcher_rel = str(LAUNCHER_REL.as_posix())
-    hidden_imports = discover_hidden_imports(PKG_SRC) + QT_HIDDEN_IMPORTS
+    hidden_imports = (
+        discover_hidden_imports(PKG_SRC)
+        + PILLOW_HIDDEN_IMPORTS
+        + QT_HIDDEN_IMPORTS
+    )
     spec_text = render_spec(
         target=args.target,
         name=name,

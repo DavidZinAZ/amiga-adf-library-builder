@@ -43,6 +43,18 @@ jobs:
         run: |
           python -c "import amiga_adf_library_builder.gui.app as a; assert callable(a.run)"
 
+      - name: Verify artwork runtime dependency (GH-65)
+        # GH-65: the packaged app must be able to import Pillow at runtime.
+        # The `gui` extra (installed above) declares pillow; this gate fails
+        # the build BEFORE packaging if the build environment cannot import
+        # PIL, so a regression is caught here instead of in the shipped app.
+        run: |
+          python - <<'PY'
+          import PIL
+          from PIL import Image
+          print("Pillow import OK:", PIL.__version__)
+          PY
+
       - name: Build onedir portable app
         run: |
           python tools/build_windows.py --target onedir --clean

@@ -189,12 +189,15 @@ advanced users).
 
 * **Windows-only.** There is no macOS/Linux standalone build from this spec.
   (The package remains a normal `pip install .[gui]` Python app on those OSes.)
-* **Optional features degrade gracefully.** Artwork (Pillow) and RTFM/PDF/Tesseract
-  extraction (`pypdf`/`fitz`/`pytesseract`) are *lazy* imports inside the core.
-  The Windows build bundles **only** the `gui` extra (PySide6, cryptography,
-  tomli-w). If a user invokes artwork/RTFM features, the app raises a clear
-  "dependency unavailable" error rather than crashing. To bundle those, add
-  `artwork`/`rtfm-docs` to the install step and the spec's hidden imports.
+* **Optional features degrade gracefully.** RTFM/PDF/Tesseract extraction
+  (`pypdf`/`fitz`/`pytesseract`) are *lazy* imports inside the core. The Windows
+  build bundles the `gui` extra (PySide6, cryptography, **pillow**, tomli-w).
+  Since GH-65, artwork processing (Pillow) is a declared member of the `gui`
+  extra and is bundled in the shipped artifact, with the build lane verifying
+  the `PIL` import before packaging. If a user invokes RTFM features, the app
+  still raises a clear "dependency unavailable" error rather than crashing. To
+  bundle RTFM extraction, add `rtfm-docs` to the install step and the spec's
+  hidden imports.
 * **No code signing.** The artifact is unsigned. Windows SmartScreen may warn on
   first launch. Signing is a separate operator concern (certificate + `codesign`
  /`signtool`).
