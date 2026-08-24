@@ -88,6 +88,9 @@ class EnrichCategory(str, Enum):
     SCREENSCRAPER = "screenscraper"
     SCREENSCRAPER_MISS = "screenscraper_miss"
     SCREENSCRAPER_REVIEW = "screenscraper_review"
+    RETROACHIEVEMENTS = "retroachievements"
+    RETROACHIEVEMENTS_MISS = "retroachievements_miss"
+    RETROACHIEVEMENTS_REVIEW = "retroachievements_review"
 
 
 @dataclass
@@ -560,6 +563,7 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                  local_media_provider=None, playmatch_provider=None,
                  hasheous_provider=None, igdb_provider=None,
                  screenscraper_provider=None,
+                 retroachievements_provider=None,
                  include_artwork: bool = True,
                  activity: Optional[Callable[[str], None]] = None) -> EnrichResult:
     metadata_cache_dir = Path(metadata_cache_dir or (Path(nfo_dir).parent / "metadata-cache"))
@@ -966,6 +970,75 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                 ok=False, error=str(exc),
             ))
 
+    # Optional RetroAchievements metadata/artwork provider. Exact-MD5 hash-first
+    # identity (first non-special disk), with the game list fetched (and cached)
+    # from the RA Web API. Independent of the sha256-based Playmatch/Hasheous
+    # identity sources: it resolves a DIFFERENT hash in a DIFFERENT namespace
+    # (RA game id), so it is NOT part of the cross-provider exact-hash fail-safe
+    # below. Non-fatal; failures degrade to a clean miss and are logged.
+    _ra_success_event: Optional[EnrichEvent] = None
+    _ra_success_note: Optional[str] = None
+    ra_result = None
+    if retroachievements_provider is not None:
+        try:
+            ra_result = retroachievements_provider.resolve(group, scans=scans, online=online)
+            if ra_result is not None:
+                if ra_result.found:
+                    _ra_success_event = EnrichEvent(
+                        category=EnrichCategory.RETROACHIEVEMENTS,
+                        detail=(f"resolved via {ra_result.match_method.value} "
+                                f"conf={ra_result.confidence:.2f} "
+                                f"provider_id={ra_result.provider_id}"),
+                        ok=True,
+                    )
+                    if ra_result.provider_id:
+                        _ra_success_note = (
+                            f"retroachievements provider_id: {ra_result.provider_id}"
+                        )
+                    # Merge RA metadata if it improves things. Exact MD5 (conf 1.0)
+                    # is the strongest identity signal; it wins unless the existing
+                    # record is already conf 1.0 (deterministic tiebreak: first).
+                    if ra_result.metadata and (not metadata or ra_result.confidence > (metadata.confidence or 0.0)):
+                        if metadata is None:
+                            metadata = MetadataRecord(canonical_title=lookup_title or group.title or "Unknown")
+                        md = ra_result.metadata
+                        if md.get("canonical_title"):
+                            metadata.canonical_title = md["canonical_title"]
+                        if md.get("source_url"):
+                            metadata.source_url = md["source_url"]
+                        if md.get("provider_id"):
+                            metadata.provider_id = md["provider_id"]
+                        metadata.provider = "retroachievements"
+                        metadata.confidence = max(metadata.confidence, ra_result.confidence)
+                        metadata.retrieved_at = md.get("retrieved_at") or metadata.retrieved_at
+                        ra_icons = md.get("artwork_urls") or []
+                        if ra_icons:
+                            metadata.artwork_url = ra_icons[0]
+                            metadata.artwork_page_urls = list(ra_icons)
+                            metadata.artwork_source_url = metadata.artwork_source_url or md.get("source_url", "")
+                            metadata.artwork_provider = md.get("artwork_provider") or "retroachievements"
+                elif ra_result.needs_manual_review:
+                    events.append(EnrichEvent(
+                        category=EnrichCategory.RETROACHIEVEMENTS_REVIEW,
+                        detail=(f"retroachievements needs manual review: "
+                                f"{ra_result.manual_review_reason}"),
+                        ok=False, error=ra_result.manual_review_reason,
+                    ))
+                    notes.append("retroachievements: routed to manual review")
+                else:
+                    events.append(EnrichEvent(
+                        category=EnrichCategory.RETROACHIEVEMENTS_MISS,
+                        detail=(f"retroachievements: no identity match "
+                                f"({ra_result.match_method.value})"),
+                        cache="miss",
+                    ))
+        except Exception as exc:  # defensive: never break enrich
+            events.append(EnrichEvent(
+                category=EnrichCategory.RETROACHIEVEMENTS_MISS,
+                detail=f"retroachievements resolve raised: {exc}",
+                ok=False, error=str(exc),
+            ))
+
     # --- Cross-provider exact-hash fail-safe (issue #11/#12 hash-first posture) ---
     # When BOTH hash-first providers are enabled and each resolves the SAME
     # sha256 to an EXACT-HASH identity (match_method == EXACT_HASH, conf 1.0),
@@ -1191,11 +1264,13 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
         or (hasheous_result is not None and hasheous_result.needs_manual_review)
         or (igdb_result is not None and igdb_result.needs_manual_review)
         or (screenscraper_result is not None and screenscraper_result.needs_manual_review)
+        or (ra_result is not None and ra_result.needs_manual_review)
         or any(e.category in (
             EnrichCategory.PLAYMATCH_REVIEW,
             EnrichCategory.HASHEOUS_REVIEW,
             EnrichCategory.IGDB_REVIEW,
             EnrichCategory.SCREENSCRAPER_REVIEW,
+            EnrichCategory.RETROACHIEVEMENTS_REVIEW,
             EnrichCategory.LOCAL_MEDIA_REVIEW,
         ) for e in events)
     )
@@ -1203,6 +1278,10 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
         events.append(_igdb_success_event)
         if _igdb_success_note is not None:
             notes.append(_igdb_success_note)
+    if _ra_success_event is not None:
+        events.append(_ra_success_event)
+        if _ra_success_note is not None:
+            notes.append(_ra_success_note)
     return EnrichResult(nfo_path, master, processed, processed is not None, notes, metadata_path, provider, processed is None, events, needs_manual_review=needs_manual_review)
 
 
@@ -1214,6 +1293,7 @@ def enrich_all(groups: list[ReleaseGroup], *, nfo_dir: Path, scans: list[ScanRec
                local_media_provider=None, playmatch_provider=None,
                hasheous_provider=None, igdb_provider=None,
                screenscraper_provider=None,
+               retroachievements_provider=None,
                include_artwork: bool = True,
                activity: Optional[Callable[[str], None]] = None) -> list[EnrichResult]:
     scan_map = {s.filename: s for s in scans}
@@ -1241,6 +1321,7 @@ def enrich_all(groups: list[ReleaseGroup], *, nfo_dir: Path, scans: list[ScanRec
                      hasheous_provider=hasheous_provider,
                      igdb_provider=igdb_provider,
                      screenscraper_provider=screenscraper_provider,
+                     retroachievements_provider=retroachievements_provider,
                      include_artwork=include_artwork,
                      activity=activity))
     return results

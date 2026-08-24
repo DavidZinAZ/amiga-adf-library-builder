@@ -215,6 +215,34 @@ enabled = false
 # respect_rate_limit = true
 # rate_limit_backoff_seconds = 5.0
 
+# --- RetroAchievements metadata/artwork provider (GH-13, OPTIONAL, DISABLED by default) --
+# Opt-in metadata and artwork lookup via the RetroAchievements Web API.
+# Hash-first identity: the group's FIRST non-special disk is hashed locally
+# (read-only, MD5) and matched against the game's public Hashes array fetched
+# from the RA game list for the configured console (default "Amiga"). An exact
+# MD5 match is auto-accepted with confidence 1.0; a non-matching hash is a
+# clean miss, never a fuzzy guess. No private ROM filenames, paths, or
+# collection details are transmitted -- only the public MD5 and console name.
+#
+# The API key is NEVER stored in config files. It comes from the environment
+# variable RETROACHIEVEMENTS_API_KEY (or SecretStore) only.
+#
+# The provider is OFFLINE at import time. No network calls occur until a real
+# fetch with --online. The game list is cached under the managed metadata cache
+# dir with a bounded TTL. Tests inject fake openers; no live network in test suite.
+# All outbound requests are guarded by the existing SSRF guard (metadata.guard_url).
+[retroachievements]
+enabled = false
+# base_url = "https://retroachievements.org"
+# timeout_seconds = 10.0
+# max_response_bytes = 2000000
+# cache_ttl = 86400
+# negative_ttl = 3600
+# console_name = "Amiga"
+# respect_rate_limit = true
+# rate_limit_backoff_seconds = 1.0
+# confidence_threshold = 1.0
+
 # ---------------------------------------------------------------------------
 # Optional RetroKit / Archive.org MANUAL provider (GH-10). MANUALS ONLY --
 # this is NOT a metadata or artwork provider. Disabled by default; the base

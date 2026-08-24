@@ -71,6 +71,7 @@ def run_pipeline(
     hasheous_config_path: Optional[str] = None,
     igdb_config_path: Optional[str] = None,
     screenscraper_config_path: Optional[str] = None,
+    retroachievements_config_path: Optional[str] = None,
     retrokit_config_path: Optional[str] = None,
     activity: Optional[Callable[[str], None]] = None,
 ) -> dict:
@@ -280,6 +281,34 @@ def run_pipeline(
                     screenscraper_provider = None
         except Exception:  # provider failure must not break the pipeline
             screenscraper_provider = None
+    # Optional RetroAchievements metadata/artwork provider. OPTIONAL and DISABLED
+    # by default; only built when a [retroachievements] config is present AND
+    # enabled AND the API key is in the environment. The provider uses exact
+    # MD5 hash-first identity (first non-special disk), with the game list
+    # fetched (and cached) from the RA Web API. Credentials (API key) come from
+    # the environment / SecretStore only.
+    retroachievements_provider = None
+    if retroachievements_config_path:
+        try:
+            from . import retroachievements as ra_mod
+            from .paths import load_retroachievements_config
+
+            ra_cfg = ra_mod.RaConfig.from_dict(
+                load_retroachievements_config(retroachievements_config_path)
+            )
+            if ra_cfg.enabled:
+                import os
+                ra_api_key = os.environ.get("RETROACHIEVEMENTS_API_KEY", "").strip()
+                if ra_api_key:
+                    retroachievements_provider = ra_mod.RetroAchievementsProvider(
+                        ra_cfg, cfg.metadata_cache_dir, ra_api_key
+                    )
+                    retroachievements_provider.discover()
+                else:
+                    # Missing API key -- provider stays disabled
+                    retroachievements_provider = None
+        except Exception:  # provider failure must not break the pipeline
+            retroachievements_provider = None
     _act(
         f"Filling in missing metadata for {len(groups)} release(s) "
         + ("from online sources (this can take a while)."
@@ -301,6 +330,7 @@ def run_pipeline(
         hasheous_provider=hasheous_provider,
         igdb_provider=igdb_provider,
         screenscraper_provider=screenscraper_provider,
+        retroachievements_provider=retroachievements_provider,
         include_artwork=include_artwork,
         activity=activity,
     )
