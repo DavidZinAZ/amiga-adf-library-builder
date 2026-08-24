@@ -475,6 +475,31 @@ def load_screenscraper_config(config: Optional[str] = None) -> dict:
     return dict(ss)
 
 
+def load_retroachievements_config(config: Optional[str] = None) -> dict:
+    """Return the ``[retroachievements]`` TOML table from the resolved config file.
+
+    Mirrors :func:`load_screenscraper_config` EXACTLY: same precedence chain
+    (explicit ``config`` > env > XDG > system), returns ``{}`` when no config
+    file is found or no ``[retroachievements]`` table is present.
+    ``retroachievements.py`` provides the typed :class:`~amiga_adf_library_builder.retroachievements.RaConfig`
+    and the provider; this helper is the paths-layer entry point so the
+    precedence logic stays in one module.
+
+    The RetroAchievements provider is OPTIONAL and DISABLED by default; ``{}``
+    (no table) means disabled, so nothing in the pipeline changes. The API key
+    is NEVER in config files -- it comes from the SecretStore / environment
+    (``RETROACHIEVEMENTS_API_KEY``) only.
+    """
+    path = _discover_config_file(config)
+    if path is None:
+        return {}
+    data = _read_config_file(path)
+    ra = data.get("retroachievements")
+    if not isinstance(ra, dict):
+        return {}
+    return dict(ra)
+
+
 def load_retrokit_config(config: Optional[str] = None) -> dict:
     """Return the ``[retrokit_manuals]`` TOML table from the resolved config file.
 

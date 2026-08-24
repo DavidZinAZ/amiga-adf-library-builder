@@ -897,6 +897,177 @@ class ScreenScraperProvider(Provider):
         secret_store.delete_secret("screenscraper_sspassword")
 
 
+# --- RetroAchievements provider adapter (GH-13) ------------------------------
+
+
+def _retroachievements_field_defaults() -> list[ProviderField]:
+    return [
+        ProviderField(
+            key="base_url",
+            label="Server address",
+            default="https://retroachievements.org",
+            placeholder="https://retroachievements.org",
+            help_text="RetroAchievements Web API origin. Self-hosted mirrors are supported.",
+        ),
+        ProviderField(
+            key="console_name",
+            label="Console name",
+            default="amiga",
+            help_text="RA console (system) name resolved at runtime from the console list. "
+                      "A missing console degrades the provider to a clean miss.",
+        ),
+        ProviderField(
+            key="timeout_seconds",
+            label="Time limit per request (seconds)",
+            default="10.0",
+            help_text="How long to wait for the server before giving up (capped at 30 seconds).",
+        ),
+        ProviderField(
+            key="max_response_bytes",
+            label="Maximum response size (bytes)",
+            default="2000000",
+            help_text="Refuse to read more than this from the server (protection against oversized replies).",
+        ),
+        ProviderField(
+            key="cache_ttl",
+            label="Game-list cache age (seconds)",
+            default="86400",
+            help_text="How long to reuse the cached game list. 0 disables reuse.",
+        ),
+        ProviderField(
+            key="respect_rate_limit",
+            label="Honor the server's rate limits",
+            default="true",
+            help_text="Pause and retry once when the server asks us to slow down (HTTP 429).",
+        ),
+    ]
+
+
+def _build_retroachievements_config_dict(*, enabled: bool, base_url: str,
+                                         console_name: str, timeout_seconds: str,
+                                         max_response_bytes: str, cache_ttl: str,
+                                         respect_rate_limit: str) -> dict:
+    """Build a typed ``[retroachievements]`` TOML table (mirrors RaConfig)."""
+    return {
+        "enabled": enabled,
+        "base_url": base_url or "https://retroachievements.org",
+        "console_name": console_name or "amiga",
+        "timeout_seconds": float(timeout_seconds or 10.0),
+        "max_response_bytes": int(max_response_bytes or 2_000_000),
+        "cache_ttl": float(cache_ttl or 86400),
+        "respect_rate_limit": (respect_rate_limit == "true" or respect_rate_limit is True),
+    }
+
+
+class RetroAchievementsProvider(Provider):
+    """Generic GUI adapter over the core RetroAchievements identity resolver.
+
+    OPTIONAL and DISABLED by default. Hash-first: the group's first non-special
+    disk is MD5-hashed locally (read-only) and matched against the RA game
+    list's public ``Hashes`` array. Requires an RA API key stored under
+    ``retroachievements_api_key`` in the SecretStore -- never embedded in
+    config or code.
+    """
+
+    def __init__(self) -> None:
+        self.metadata = ProviderMetadata(
+            id="retroachievements",
+            name="RetroAchievements",
+            description=(
+                "Optional metadata/artwork provider (GH-13). Hash-first identity "
+                "via the RetroAchievements Web API (exact MD5, confidence 1.0). "
+                "Disabled by default; requires an RA API key."
+            ),
+            auth_required="required",
+            fields=_retroachievements_field_defaults(),
+            capabilities=[
+                ProviderCapability.ONLINE_LOOKUP,
+                ProviderCapability.HASH_RESOLUTION,
+                ProviderCapability.METADATA,
+                ProviderCapability.ARTWORK,
+            ],
+            requires_secret=True,
+        )
+        self._enabled = False
+        self._base_url = "https://retroachievements.org"
+        self._console_name = "amiga"
+        self._timeout_seconds = "10.0"
+        self._max_response_bytes = "2000000"
+        self._cache_ttl = "86400"
+        self._respect_rate_limit = "true"
+        self._lock = threading.RLock()
+
+    # --- config ---------------------------------------------------------------
+    def is_configured(self) -> bool:
+        with self._lock:
+            return bool(self._base_url and self._base_url.strip())
+
+    def enabled(self) -> bool:
+        with self._lock:
+            return self._enabled and self.is_configured()
+
+    def set_field(self, key: str, value: str) -> None:
+        with self._lock:
+            if key == "base_url":
+                self._base_url = (value or "").rstrip("/")
+            elif key == "console_name":
+                self._console_name = (value or "").strip().lower()
+            elif key == "timeout_seconds":
+                self._timeout_seconds = value
+            elif key == "max_response_bytes":
+                self._max_response_bytes = value
+            elif key == "cache_ttl":
+                self._cache_ttl = value
+            elif key == "respect_rate_limit":
+                self._respect_rate_limit = value
+            elif key == "enabled":
+                self._enabled = (value == "true" or value is True)
+            else:
+                raise KeyError(f"unknown retroachievements field: {key}")
+
+    def set_enabled(self, enabled: bool) -> None:
+        with self._lock:
+            self._enabled = bool(enabled)
+
+    def to_config_dict(self) -> dict:
+        with self._lock:
+            return _build_retroachievements_config_dict(
+                enabled=self._enabled,
+                base_url=self._base_url,
+                console_name=self._console_name,
+                timeout_seconds=self._timeout_seconds,
+                max_response_bytes=self._max_response_bytes,
+                cache_ttl=self._cache_ttl,
+                respect_rate_limit=self._respect_rate_limit,
+            )
+
+    # --- status ---------------------------------------------------------------
+    def status(self) -> ProviderStatus:
+        with self._lock:
+            if not self._enabled:
+                return ProviderStatus(ok=True, message="Turned off", configured=self.is_configured())
+            if not self.is_configured():
+                return ProviderStatus(ok=False, message="Not set up yet — enter the server address below", configured=False)
+            return ProviderStatus(ok=True, message="Ready", configured=True)
+
+    def test_connection(self) -> ProviderStatus:
+        # Real fetch is performed lazily by the core provider under SSRF guards.
+        status = self.status()
+        if status.ok and status.message == "Ready":
+            # Explicit success wording for connection check (GH-42)
+            return ProviderStatus(ok=True, message="Connection successful", configured=status.configured, reachable=status.reachable)
+        return status
+
+    # --- secrets --------------------------------------------------------------
+    def add_credentials(self, secret_store: Any, **secrets: str) -> None:
+        api_key = secrets.get("api_key")
+        if api_key:
+            secret_store.set_secret("retroachievements_api_key", api_key)
+
+    def remove_credentials(self, secret_store: Any) -> None:
+        secret_store.delete_secret("retroachievements_api_key")
+
+
 # --- Registry ----------------------------------------------------------------
 
 
@@ -939,4 +1110,5 @@ def default_registry() -> ProviderRegistry:
     reg.register(HasheousProvider())
     reg.register(IgdbProvider())
     reg.register(ScreenScraperProvider())
+    reg.register(RetroAchievementsProvider())
     return reg
