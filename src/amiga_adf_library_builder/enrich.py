@@ -746,10 +746,14 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                     ))
                     notes.append("playmatch: routed to manual review")
                 else:
+                    _pm_te = getattr(playmatch_result, "transport_error", None)
                     events.append(EnrichEvent(
                         category=EnrichCategory.PLAYMATCH_MISS,
-                        detail="playmatch: no identity match",
+                        detail="playmatch: no identity match"
+                        + (f" (transport: {_pm_te})" if _pm_te else ""),
                         cache="miss",
+                        ok=not _pm_te,
+                        error=_pm_te,
                     ))
         except Exception as exc:  # defensive: never break enrich
             events.append(EnrichEvent(
@@ -799,10 +803,14 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                     ))
                     notes.append("hasheous: routed to manual review")
                 else:
+                    _hs_te = getattr(hasheous_result, "transport_error", None)
                     events.append(EnrichEvent(
                         category=EnrichCategory.HASHEOUS_MISS,
-                        detail="hasheous: no identity match",
+                        detail="hasheous: no identity match"
+                        + (f" (transport: {_hs_te})" if _hs_te else ""),
                         cache="miss",
+                        ok=not _hs_te,
+                        error=_hs_te,
                     ))
         except Exception as exc:  # defensive: never break enrich
             events.append(EnrichEvent(
@@ -872,10 +880,14 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                     ))
                     notes.append("igdb: routed to manual review")
                 else:
+                    _igdb_te = getattr(igdb_result, "transport_error", None)
                     events.append(EnrichEvent(
                         category=EnrichCategory.IGDB_MISS,
-                        detail="igdb: no identity match",
+                        detail="igdb: no identity match"
+                        + (f" (transport: {_igdb_te})" if _igdb_te else ""),
                         cache="miss",
+                        ok=not _igdb_te,
+                        error=_igdb_te,
                     ))
         except Exception as exc:  # defensive: never break enrich
             events.append(EnrichEvent(
@@ -958,10 +970,14 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                     ))
                     notes.append("screenscraper: routed to manual review")
                 else:
+                    _ss_te = getattr(screenscraper_result, "transport_error", None)
                     events.append(EnrichEvent(
                         category=EnrichCategory.SCREENSCRAPER_MISS,
-                        detail="screenscraper: no identity match",
+                        detail="screenscraper: no identity match"
+                        + (f" (transport: {_ss_te})" if _ss_te else ""),
                         cache="miss",
+                        ok=not _ss_te,
+                        error=_ss_te,
                     ))
         except Exception as exc:  # defensive: never break enrich
             events.append(EnrichEvent(
@@ -1026,11 +1042,14 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                     ))
                     notes.append("retroachievements: routed to manual review")
                 else:
+                    _ra_te = getattr(ra_result, "transport_error", None)
                     events.append(EnrichEvent(
                         category=EnrichCategory.RETROACHIEVEMENTS_MISS,
                         detail=(f"retroachievements: no identity match "
                                 f"({ra_result.match_method.value})"),
                         cache="miss",
+                        ok=not _ra_te,
+                        error=_ra_te,
                     ))
         except Exception as exc:  # defensive: never break enrich
             events.append(EnrichEvent(

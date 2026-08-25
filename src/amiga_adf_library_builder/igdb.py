@@ -284,6 +284,11 @@ class IgdbResult:
     artwork_provider: str = ""
     # Full metadata record fields
     metadata: Optional[dict] = None
+    # GH-44: set when the provider was attempted but never returned a usable
+    # response (network outage, timeout, or malformed API response).
+    # Distinguishes "provider did not answer" from a genuine
+    # "provider answered: not found" miss so a provider outage is diagnosable.
+    transport_error: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
@@ -302,6 +307,7 @@ class IgdbResult:
             "artwork_urls": list(self.artwork_urls),
             "artwork_provider": self.artwork_provider,
             "metadata": self.metadata,
+            "transport_error": self.transport_error,
         }
 
 
@@ -863,6 +869,9 @@ class IgdbProvider:
             result.match_method = IgdbMatchMethod.NONE
             result.confidence = 0.0
             result.candidates_evaluated = [{"kind": "title_search", "title": lookup_title[:32], "outcome": "no_response"}]
+            # GH-44: distinguish "provider did not answer" from a genuine
+            # not-found so a provider outage is diagnosable.
+            result.transport_error = "igdb: provider returned no response (outage, timeout, or malformed)"
             return result
 
         if not games:

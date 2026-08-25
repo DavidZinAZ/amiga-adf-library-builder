@@ -312,6 +312,11 @@ class HasheousResult:
     # "...", "igdb_id": "..."}). Empty unless a supported correlation was
     # returned. Never holds private data.
     external_ids: dict = field(default_factory=dict)
+    # GH-44: set when the provider was attempted but never returned a usable
+    # response (network outage, timeout, oversize, malformed, or 429 after
+    # backoff). Distinguishes "provider did not answer" from a genuine
+    # "provider answered: not found" miss so a provider outage is diagnosable.
+    transport_error: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
@@ -327,6 +332,7 @@ class HasheousResult:
             "provenance": self.provenance,
             "candidates_evaluated": list(self.candidates_evaluated),
             "external_ids": dict(self.external_ids),
+            "transport_error": self.transport_error,
         }
 
 
@@ -871,6 +877,9 @@ class HasheousProvider:
                 confidence=0.0,
                 candidates_evaluated=[{"kind": "hash", "sha256": sha256[:8] + "...",
                                        "outcome": "no_response"}],
+                # GH-44: distinguish "provider did not answer" from a genuine
+                # not-found so a provider outage is diagnosable.
+                transport_error="hasheous: provider returned no response (outage, timeout, or malformed)",
             )
 
         identity = _parse_hash_lookup(payload)

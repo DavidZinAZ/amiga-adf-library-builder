@@ -16,6 +16,7 @@ from typing import Callable, Optional
 
 from . import artwork as artwork_mod
 from . import catalog, enrich, exporter, grouper, quarantine, scanner
+from . import diagnostics
 from .enrich import VERIFIED_ARTWORK_WIDTH, VERIFIED_ARTWORK_HEIGHT
 from .exporter_guard import export_gate_open
 from .logging_utils import redact
@@ -471,6 +472,42 @@ def run_pipeline(
             }
         )
 
+    # (GH-44) Run-level provider-attempt diagnostics: derive one structured
+    # attempt per (provider, release) from the events above, then roll the
+    # attempts up into per-provider success/failure counts, sanitized error
+    # samples, and the zero-result reason taxonomy. Pure (no I/O); degrades
+    # to an empty roll-up if the event stream is empty.
+    provider_diagnostics: dict = {"providers": [], "zero_asset_releases": {},
+                                  "reason_taxonomy": {},
+                                  "totals": {"attempts": 0, "matched": 0,
+                                             "error": 0, "review": 0, "assets": 0}}
+    try:
+        _attempts = []
+        for pg in per_group:
+            _attempts.extend(
+                diagnostics.attempt_from_enrich_events(
+                    pg["events"],
+                    title=pg["title"],
+                    release_key=pg["release_key"],
+                )
+            )
+        provider_diagnostics = diagnostics.aggregate_provider_attempts(_attempts)
+        provider_diagnostics = {
+            **provider_diagnostics,
+            # Keep the result dict JSON-serializable (CLI emits json.dumps).
+            "providers": [
+                s.to_dict() if hasattr(s, "to_dict") else s
+                for s in provider_diagnostics.get("providers", [])
+            ],
+        }
+    except Exception:  # diagnostics must never break the pipeline
+        provider_diagnostics = {
+            "providers": [], "zero_asset_releases": {}, "reason_taxonomy": {},
+            "totals": {"attempts": 0, "matched": 0, "error": 0, "review": 0,
+                       "assets": 0},
+            "error": "diagnostics roll-up failed",
+        }
+
     result: dict = {
         "run_id": run_id,
         "online": online,
@@ -498,6 +535,11 @@ def run_pipeline(
         "original_preserved": ok,
         "original_problems": problems,
         "per_group": per_group,
+        # (GH-44) Run-level provider-attempt roll-up: per-provider
+        # success/failure, match/asset counts, sanitized error samples, and
+        # the zero-result reason taxonomy. Consumed by the GUI Diagnostics
+        # tab (run summary) and the per-run log.
+        "provider_diagnostics": provider_diagnostics,
     }
     if export_result is not None:
         result["export"] = {
