@@ -213,6 +213,13 @@ class PlaymatchResult:
     provenance: Optional[dict] = None
     # Structured per-candidate diagnostics for QA and security audit.
     candidates_evaluated: list = field(default_factory=list)
+    # GH-44: set when the provider was attempted but never returned a usable
+    # response (network outage, timeout, oversize, or malformed payload). A
+    # non-None value distinguishes "provider did not answer" (a transport
+    # error) from a genuine "provider answered: not found" miss, so a provider
+    # outage is no longer indistinguishable from a clean no-match. Always a
+    # bounded, human-readable string; never carries a secret.
+    transport_error: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
@@ -227,6 +234,7 @@ class PlaymatchResult:
             "provider_id": self.provider_id,
             "provenance": self.provenance,
             "candidates_evaluated": list(self.candidates_evaluated),
+            "transport_error": self.transport_error,
         }
 
 
@@ -652,6 +660,9 @@ class PlaymatchProvider:
                 confidence=0.0,
                 candidates_evaluated=[{"kind": "hash", "sha256": sha256[:8] + "...",
                                        "outcome": "no_response"}],
+                # GH-44: distinguish "provider did not answer" from a genuine
+                # not-found so a provider outage is diagnosable.
+                transport_error="playmatch: provider returned no response (outage, timeout, or malformed)",
             )
 
         if not payload.get("found"):
@@ -767,6 +778,9 @@ class PlaymatchProvider:
                 confidence=0.0,
                 candidates_evaluated=[{"kind": "title", "title": norm_title,
                                        "outcome": "no_response"}],
+                # GH-44: distinguish "provider did not answer" from a genuine
+                # not-found so a provider outage is diagnosable.
+                transport_error="playmatch: provider returned no response (outage, timeout, or malformed)",
             )
 
         if not payload.get("found"):

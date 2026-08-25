@@ -243,6 +243,22 @@ def _render(
             lines.append("    - (none)")
         lines.append("")
 
+    # (GH-44) Run-level provider-attempt roll-up: per-provider
+    # success/failure, match/asset counts, sanitized error samples, and the
+    # zero-result reason taxonomy. Rendered only when present and non-empty.
+    provider_diagnostics = result.get("provider_diagnostics")
+    if isinstance(provider_diagnostics, dict) and (
+        provider_diagnostics.get("providers")
+        or provider_diagnostics.get("totals", {}).get("attempts")
+    ):
+        try:
+            from . import diagnostics as _diag
+
+            lines.extend(_diag.render_provider_diagnostics(provider_diagnostics))
+        except Exception:  # logging must never break a run
+            lines.append("  (provider diagnostics unavailable)")
+        lines.append("")
+
     export = result.get("export")
     lines.append("--- Export / publication summary ---")
     if export:

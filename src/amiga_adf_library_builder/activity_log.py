@@ -164,6 +164,25 @@ def render_run_summary(
     # --- where the output went ---------------------------------------------------
     if export is not None and export.get("staging_root"):
         lines.append(f"Per-run scratch area: {redact(str(export['staging_root']))}")
+
+    # --- (GH-44) provider-attempt diagnostics ------------------------------------
+    # Run-level roll-up per online provider: attempts / matched / no_match /
+    # error / review, plus the zero-result reason taxonomy. Rendered only
+    # when the pipeline produced the roll-up (old result dicts omit it) and
+    # at least one attempt was recorded. Never raises: a malformed roll-up
+    # degrades to a single readable line.
+    if not cancelled:
+        pd = result.get("provider_diagnostics")
+        if isinstance(pd, dict):
+            try:
+                from . import diagnostics as _diag
+                if pd.get("providers") or pd.get("totals", {}).get("attempts"):
+                    lines.extend(
+                        _diag.render_provider_diagnostics(pd)
+                    )
+            except Exception:
+                lines.append("Provider diagnostics: unavailable (see the log file).")
+
     if not cancelled:
         lines.append(
             "See the full log file for per-release details "
