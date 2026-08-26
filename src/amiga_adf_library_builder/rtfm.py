@@ -1485,7 +1485,11 @@ def build_rtfm_for_group(
     if not cfg.enabled:
         raise RtfmDisabled("rtfm builder is disabled in config")
 
-    basename = _group_identity(group)
+    # Use the same FAT32-sanitized basename that the exporter uses so the
+    # .rtfm file can be found and copied into the Gotek staging tree.
+    from .naming import release_basename
+    from .exporter import _sanitize_component
+    basename = _sanitize_component(release_basename(group))
     result = RtfmResult(
         release_key=getattr(group, "release_key", "") or "",
         basename=basename,
