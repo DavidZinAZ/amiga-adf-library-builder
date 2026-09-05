@@ -71,6 +71,15 @@ from .secrets import SecretError, SecretStore, install_gui_redaction
 from .settings import Preset, Settings, SettingsStore
 from .state import GuiState
 from .themes import apply_theme, available_themes
+from ..models import (
+    StagedState,
+    CurationAction,
+    StagedChange,
+    StagedReleaseEntry,
+    StagedLibrary,
+)
+from ..library_state import CurationStateManager
+from .preview_widget import PreviewWidget
 
 logger = logging.getLogger("amiga_adf_gui")
 
@@ -411,6 +420,10 @@ class MainWindow(QMainWindow):
         tabs.addTab(self._build_providers_tab(), "Providers")
         # (GH-33) LaunchBox local folder mappings (image/media + manuals).
         tabs.addTab(self._build_launchbox_tab(), "LaunchBox media")
+        # (GH-80) Library Preview & Curation workspace.
+        self._preview_widget = PreviewWidget(self)
+        self._preview_widget.status_message.connect(self._on_preview_status_message)
+        tabs.addTab(self._preview_widget, "Preview & Curation")
         tabs.addTab(self._build_diagnostics_tab(), "Diagnostics")
 
         # --- run/export settings (consolidated) ---
@@ -1107,6 +1120,7 @@ class MainWindow(QMainWindow):
         self._follow_live = True
         return w
 
+    # --- (GH-80) Library Preview & Curation workspace ---------------------------
     # --- (Issue #21) Diagnostics log controls ---------------------------------
     def _append_diag(self, line: str) -> None:
         """Append one line to the Diagnostics log with a timestamp.
@@ -1127,6 +1141,10 @@ class MainWindow(QMainWindow):
             self._diag.verticalScrollBar().setValue(
                 self._diag.verticalScrollBar().maximum()
             )
+
+    def _on_preview_status_message(self, message: str) -> None:
+        """Handle status messages from the PreviewWidget."""
+        self._append_diag(f"Preview & Curation: {message}")
 
     def _run_marker(self, text: str) -> None:
         """Append a run boundary line (start/end) even when the live log is off."""
