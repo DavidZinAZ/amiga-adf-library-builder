@@ -703,6 +703,215 @@ def mobygames_lookup(title: str, *, api_key: str, timeout: float = 20.0,
     )
 
 
+def hall_of_light_lookup(title: str, *, timeout: float = 20.0,
+                         opener: Optional[Callable[..., Any]] = None) -> Optional[MetadataRecord]:
+    """Search Hall of Light (amiga.abime.net) for a game and return a MetadataRecord.
+
+    Uses the Hall of Light search page to find the game, then parses the game
+    detail page for metadata. The provider is unkeyed (no API key required) and
+    participates in the standard relevance validation pipeline.
+
+    The search is deterministic: results are ranked by title similarity, and the
+    best match above a confidence floor is returned. If no Amiga platform match
+    is found, returns None.
+
+    Every HTTP call goes through the injected ``opener`` for testability. The
+    real urllib opener is used when ``opener`` is None.
+    """
+    import urllib.parse
+    import re
+
+    # Step 1: Search for the game
+    search_url = "https://amiga.abime.net/games/search?" + urllib.parse.urlencode({"q": title})
+    try:
+        search_html, final_search_url = _text_get(search_url, timeout=timeout, opener=opener)
+    except Exception:
+        return None
+
+    # Parse search results to find game links
+    # Hall of Light search results contain links like /games/view/<game-slug>
+    search_parser = _HallOfLightSearchParser()
+    search_parser.feed(search_html)
+    game_links = search_parser.game_links
+
+    if not game_links:
+        return None
+
+    # Step 2: For each candidate, fetch the detail page and extract metadata
+    # Rank by title similarity
+    target_norm = _norm(title)
+    candidates: list[tuple[float, MetadataRecord]] = []
+
+    for game_url in game_links[:10]:  # Limit to first 10 results
+        try:
+            detail_html, final_url = _text_get(game_url, timeout=timeout, opener=opener)
+        except Exception:
+            continue
+
+        detail_parser = _HallOfLightDetailParser()
+        detail_parser.feed(detail_html)
+
+        if not detail_parser.canonical_title:
+            continue
+
+        candidate_norm = _norm(detail_parser.canonical_title)
+        ratio = SequenceMatcher(None, target_norm, candidate_norm).ratio()
+        if ratio < 0.30:  # Below floor
+            continue
+
+        # Build MetadataRecord from parsed data
+        record = MetadataRecord(
+            canonical_title=detail_parser.canonical_title,
+            description=detail_parser.description,
+            year=detail_parser.year,
+            developer=detail_parser.developer,
+            publisher=detail_parser.publisher,
+            genres=detail_parser.genres,
+            platforms=detail_parser.platforms,
+            source_url=final_url,
+            provider="hall-of-light",
+            provider_id=detail_parser.game_id or "",
+            retrieved_at=utc_now(),
+            confidence=ratio,
+            query=title,
+        )
+
+        # Skip games without Amiga platform
+        amiga_present = any("amiga" in (p or "").lower() for p in record.platforms)
+        if not amiga_present:
+            continue
+
+        # Discover artwork from the game page
+        try:
+            art_found = discover_artwork_from_page(final_url, title, timeout=timeout, opener=opener)
+            if art_found:
+                record.artwork_url, record.artwork_provider = art_found
+                record.artwork_source_url = final_url
+        except Exception:
+            pass
+
+        candidates.append((ratio, record))
+
+    if not candidates:
+        return None
+
+    # Best match by similarity, deterministic tie-break
+    candidates.sort(key=lambda x: (-x[0], x[1].canonical_title))
+    return candidates[0][1]
+
+
+class _HallOfLightSearchParser(HTMLParser):
+    """Parse Hall of Light search results for game links."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.game_links: list[str] = []
+        self._in_results = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
+        a = {k.lower(): (v or "") for k, v in attrs}
+        if tag.lower() == "a" and a.get("href"):
+            href = a["href"]
+            # Match game view URLs: /games/view/<slug> or /games/view/<id>/<slug>
+            if re.match(r"^/games/view/", href):
+                absolute = urllib.parse.urljoin("https://amiga.abime.net", href)
+                if absolute not in self.game_links:
+                    self.game_links.append(absolute)
+
+
+class _HallOfLightDetailParser(HTMLParser):
+    """Parse Hall of Light game detail page for metadata."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.canonical_title: str = ""
+        self.description: str = ""
+        self.year: str = ""
+        self.developer: str = ""
+        self.publisher: str = ""
+        self.genres: list[str] = []
+        self.platforms: list[str] = []
+        self.game_id: str = ""
+        self._state: str = ""
+        self._current_field: str = ""
+        self._in_description = False
+        self._description_parts: list[str] = []
+        self._skip_until_endtag: str = ""
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
+        if self._skip_until_endtag:
+            return
+
+        a = {k.lower(): (v or "") for k, v in attrs}
+        tag_lower = tag.lower()
+
+        if tag_lower == "h1" and a.get("class") and "game-title" in a["class"]:
+            self._state = "title"
+        elif tag_lower == "div" and a.get("class") and "game-description" in a["class"]:
+            self._in_description = True
+            self._state = "description"
+        elif tag_lower == "dt":
+            # Definition term - field label
+            self._current_field = a.get("class", "").lower() or ""
+        elif tag_lower == "dd" and self._current_field:
+            # Definition description - field value; keep the field from the preceding dt
+            self._state = self._current_field
+        elif tag_lower == "a" and a.get("href"):
+            href = a["href"]
+            # Extract game ID from URL if present
+            if "/games/view/" in href:
+                parts = href.split("/")
+                if len(parts) >= 4:
+                    self.game_id = parts[3] if parts[3] else ""
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._skip_until_endtag:
+            if tag.lower() == self._skip_until_endtag:
+                self._skip_until_endtag = ""
+            return
+
+        if tag.lower() == "dt":
+            # Don't clear _current_field here - it's needed for the following dd
+            pass
+        elif tag.lower() == "dd":
+            self._state = ""
+            self._current_field = ""  # Clear after dd
+        elif tag.lower() == "div" and self._in_description:
+            self._in_description = False
+            if self._description_parts:
+                self.description = " ".join(self._description_parts)
+                self._description_parts = []
+            self._state = ""
+        elif tag.lower() == "h1" and self._state == "title":
+            self._state = ""
+
+    def handle_data(self, data: str) -> None:
+        if self._skip_until_endtag:
+            return
+
+        data = data.strip()
+        if not data:
+            return
+
+        if self._state == "title" and not self.canonical_title:
+            self.canonical_title = data
+        elif self._state == "description" or self._in_description:
+            self._description_parts.append(data)
+        elif self._state:
+            # Field mapping from class names to our fields
+            field = self._state.replace("game-", "").replace("field-", "")
+            if "year" in field or "release" in field:
+                self.year = data[:4] if len(data) >= 4 and data[:4].isdigit() else ""
+            elif "developer" in field:
+                self.developer = data
+            elif "publisher" in field:
+                self.publisher = data
+            elif "genre" in field:
+                self.genres = [g.strip() for g in data.split(",") if g.strip()]
+            elif "platform" in field:
+                self.platforms = [p.strip() for p in data.split(",") if p.strip()]
+
+
 def _discover_curated_artwork(record: MetadataRecord, title: str, *, timeout: float,
                               opener: Optional[Callable[..., Any]]) -> None:
     pages = list(dict.fromkeys(record.artwork_page_urls))
@@ -803,6 +1012,9 @@ def lookup_metadata(title: str, *, cache_dir: Path, curated_dir: Path,
         if mobygames_key:
             _try_provider("mobygames",
                           lambda: mobygames_lookup(title, api_key=mobygames_key, timeout=timeout, opener=opener))
+    if accepted is None:
+        _try_provider("hall-of-light",
+                      lambda: hall_of_light_lookup(title, timeout=timeout, opener=opener))
     if accepted is None:
         _try_provider("wikipedia",
                       lambda: wikipedia_lookup(title, timeout=timeout, opener=opener))
