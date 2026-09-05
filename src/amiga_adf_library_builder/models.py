@@ -282,6 +282,11 @@ class StagedReleaseEntry:
     # Confidence score (0.0 - 1.0)
     confidence: float = 0.0
 
+    # Planned folder override (operator-approved or curation-planned).
+    # When set, this takes precedence over derived identity for export path.
+    # Distinct from 'group' which holds the release/crack group identity.
+    folder: Optional[str] = None
+
     # Curation state
     curation_state: StagedState = StagedState.PENDING
     notes: Optional[str] = None
@@ -310,6 +315,7 @@ class StagedReleaseEntry:
             "match_confidence": self.match_confidence,
             "locked_fields": self.locked_fields,
             "confidence": self.confidence,
+            "folder": self.folder,
             "curation_state": self.curation_state.value,
             "notes": self.notes,
             "actions": [c.to_dict() for c in self.actions],
@@ -337,6 +343,7 @@ class StagedReleaseEntry:
             match_confidence=d.get("match_confidence"),
             locked_fields=d.get("locked_fields", []),
             confidence=d.get("confidence", 0.0),
+            folder=d.get("folder"),
             curation_state=StagedState(d.get("curation_state", "pending")),
             notes=d.get("notes"),
             actions=[StagedChange.from_dict(c) for c in d.get("actions", [])],

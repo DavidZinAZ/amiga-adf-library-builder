@@ -804,6 +804,38 @@ class PreviewWidget(QWidget):
                 pass
         elif action.action == CurationAction.NOTE_ADDED:
             entry.notes = None
+        elif action.action == CurationAction.RENAME:
+            # Parse old title from details: "Renamed from 'old' to 'new'"
+            try:
+                old_title = action.details.split("from '")[1].split("' to ")[0]
+                entry.title = old_title
+            except (IndexError, ValueError):
+                pass
+        elif action.action == CurationAction.MOVE:
+            # Parse previous folder from details: "Moved from folder: <old> to folder: <new>"
+            # or "Created folder and moved from folder: <old> to folder: <new>"
+            try:
+                if "from folder: " in action.details:
+                    previous_folder = action.details.split("from folder: ")[1].split(" to folder: ")[0]
+                    entry.folder = previous_folder if previous_folder != "None" else None
+                else:
+                    # Legacy format: just clear the folder
+                    entry.folder = None
+            except (IndexError, ValueError):
+                entry.folder = None
+        elif action.action == CurationAction.KEEP_FILENAME:
+            # Remove filename from locked_fields
+            if "filename" in (entry.locked_fields or []):
+                entry.locked_fields.remove("filename")
+        elif action.action == CurationAction.ACCEPT_MATCH:
+            # Remove the locks added by accept match (if they were added by us)
+            # Only remove if they weren't there before - we can't know, so we leave them
+            # This is a limitation - ideally we'd track which locks we added
+            pass
+        elif action.action == CurationAction.ACCEPT_METADATA_ONLY:
+            # Remove filename from locked_fields
+            if "filename" in (entry.locked_fields or []):
+                entry.locked_fields.remove("filename")
         # Add more undo cases as needed
 
         # Move to redo stack
@@ -835,6 +867,44 @@ class PreviewWidget(QWidget):
         elif action.action == CurationAction.NOTE_ADDED:
             # Note was removed, re-add it
             pass
+        elif action.action == CurationAction.RENAME:
+            # Parse new title from details: "Renamed from 'old' to 'new'"
+            try:
+                new_title = action.details.split("to '")[1].split("'")[0]
+                entry.title = new_title
+            except (IndexError, ValueError):
+                pass
+        elif action.action == CurationAction.MOVE:
+            # Parse new folder from details: "Moved from folder: <old> to folder: <new>"
+            # or "Created folder and moved from folder: <old> to folder: <new>"
+            try:
+                if "to folder: " in action.details:
+                    new_folder = action.details.split("to folder: ")[1]
+                    entry.folder = new_folder
+                else:
+                    # Legacy format: no folder to restore
+                    pass
+            except (IndexError, ValueError):
+                pass
+        elif action.action == CurationAction.KEEP_FILENAME:
+            # Add filename to locked_fields
+            entry.locked_fields = entry.locked_fields or []
+            if "filename" not in entry.locked_fields:
+                entry.locked_fields.append("filename")
+        elif action.action == CurationAction.ACCEPT_MATCH:
+            # Re-add locks
+            entry.locked_fields = entry.locked_fields or []
+            if "title" not in entry.locked_fields:
+                entry.locked_fields.append("title")
+            if "folder" not in entry.locked_fields:
+                entry.locked_fields.append("folder")
+            if "group" not in entry.locked_fields:
+                entry.locked_fields.append("group")
+        elif action.action == CurationAction.ACCEPT_METADATA_ONLY:
+            # Add filename lock
+            entry.locked_fields = entry.locked_fields or []
+            if "filename" not in entry.locked_fields:
+                entry.locked_fields.append("filename")
 
         # Move back to undo stack
         self._undo_stack.append((release_key, action))
@@ -941,6 +1011,14 @@ class PreviewWidget(QWidget):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             new_title = name_edit.text().strip()
             if new_title and new_title != entry.title:
+                # Check if title field is locked
+                if "title" in (entry.locked_fields or []):
+                    QMessageBox.warning(
+                        self,
+                        "Field Locked",
+                        f"Cannot rename release: title field is locked.",
+                    )
+                    return
                 old_title = entry.title
                 entry.title = new_title
                 action = StagedChange(
@@ -972,11 +1050,20 @@ class PreviewWidget(QWidget):
             if release_key:
                 entry = self._state.current_library.releases.get(release_key)
                 if entry:
-                    entry.group = folder
+                    # Check if folder field is locked
+                    if "folder" in (entry.locked_fields or []):
+                        QMessageBox.warning(
+                            self,
+                            "Field Locked",
+                            f"Cannot move release '{entry.title}': folder field is locked.",
+                        )
+                        continue
+                    previous_folder = entry.folder
+                    entry.folder = folder
                     action = StagedChange(
                         action=CurationAction.MOVE,
                         timestamp=__import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
-                        details=f"Moved to folder: {folder}",
+                        details=f"Moved from folder: {previous_folder} to folder: {folder}",
                     )
                     entry.actions.append(action)
                     self._record_action_for_undo(release_key, action)
@@ -1018,11 +1105,20 @@ class PreviewWidget(QWidget):
                     if release_key:
                         entry = self._state.current_library.releases.get(release_key)
                         if entry:
-                            entry.group = folder
+                            # Check if folder field is locked
+                            if "folder" in (entry.locked_fields or []):
+                                QMessageBox.warning(
+                                    self,
+                                    "Field Locked",
+                                    f"Cannot move release '{entry.title}': folder field is locked.",
+                                )
+                                continue
+                            previous_folder = entry.folder
+                            entry.folder = folder
                             action = StagedChange(
                                 action=CurationAction.MOVE,
                                 timestamp=__import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
-                                details=f"Created folder and moved: {folder}",
+                                details=f"Created folder and moved from folder: {previous_folder} to folder: {folder}",
                             )
                             entry.actions.append(action)
                             self._record_action_for_undo(release_key, action)
@@ -1087,7 +1183,14 @@ class PreviewWidget(QWidget):
             return
 
         entry.curation_state = StagedState.ACCEPTED
+        # Only add to locked_fields if not already locked
         entry.locked_fields = entry.locked_fields or []
+        if "title" not in entry.locked_fields:
+            entry.locked_fields.append("title")
+        if "folder" not in entry.locked_fields:
+            entry.locked_fields.append("folder")
+        if "group" not in entry.locked_fields:
+            entry.locked_fields.append("group")
         action = StagedChange(
             action=CurationAction.ACCEPT_MATCH,
             timestamp=__import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
@@ -1129,6 +1232,9 @@ class PreviewWidget(QWidget):
 
         entry.curation_state = StagedState.MODIFIED
         entry.locked_fields = entry.locked_fields or []
+        # Preserve existing locked fields; only add filename lock for this action
+        if "filename" not in entry.locked_fields:
+            entry.locked_fields.append("filename")
         action = StagedChange(
             action=CurationAction.ACCEPT_METADATA_ONLY,
             timestamp=__import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
