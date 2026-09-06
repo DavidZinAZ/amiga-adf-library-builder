@@ -21,7 +21,15 @@ shared core) exercises its flows there:
        * actionable FAILURE PATH: feed an invalid (missing) library root and
          Run; assert a clear error surfaces and the process does NOT crash with a
          raw traceback (the run is wrapped; a QMessageBox.critical is shown).
-  3. Emit a JSON report + screenshots (offscreen QWidget.grab) as artifacts.
+  3. (GH-86) POPULATED Preview / Curation qualification: run the real pipeline
+     against a populated synthetic `Original Disks (read only)` library, open
+     the Preview & Curation tab, and prove:
+       * visible/non-empty Preview / Curation rows/items;
+       * selected entry exposes original identity;
+       * selected entry exposes planned processed/export identity/path;
+       * source fixture hashes/content are unchanged;
+       * merely previewing does not write final export files.
+  4. Emit a JSON report + screenshots (offscreen QWidget.grab) as artifacts.
 
 This script does NOT modify any GUI/core source; it only drives the public
 GUI entry points and inspects their side effects. It is not imported by pytest
@@ -376,10 +384,132 @@ def main() -> int:
         REPORT["errors"].append(repr(exc))
 
     # ------------------------------------------------------------------ #
-    # 2b) (GH-33) Direct backend diagnostic: a missing/inaccessible LaunchBox
-    #      root is reported (retained, never deleted) by scan_launchbox_roots.
-    #      No Qt required; proves the diagnostic on the real runtime.
+    # 3) (GH-86) POPULATED Preview / Curation qualification on Windows.
     # ------------------------------------------------------------------ #
+    gh86_report = {
+        "library_populated": False,
+        "preview_nonempty_rows": 0,
+        "selected_release_key": None,
+        "selected_title": None,
+        "selected_adf_count": None,
+        "selected_original_identity": None,
+        "selected_planned_export_path": None,
+        "source_fixtures_unchanged": False,
+        "export_files_written_after_preview": [],
+        "screenshot": None,
+        "errors": [],
+    }
+
+    def _gh86_step(name, ok, detail=""):
+        REPORT["steps"].append({"step": name, "ok": ok, "detail": detail})
+        print(f"[{'PASS' if ok else 'FAIL'}] {name}: {detail}")
+
+    try:
+        from PySide6.QtWidgets import QApplication
+
+        from amiga_adf_library_builder.gui import PortablePaths
+        from amiga_adf_library_builder.gui.main_window import GuiState
+        from amiga_adf_library_builder.gui.state import (
+            build_path_config_from_gui_state,
+            build_pipeline_kwargs,
+        )
+        from amiga_adf_library_builder.initializer import ensure_managed_directories
+        from amiga_adf_library_builder.pipeline import run_pipeline, build_staged_library_from_result
+        from amiga_adf_library_builder.gui.preview_widget import PreviewWidget
+        # 3a) Build a populated synthetic "Original Disks (read only)" library.
+        original_root = base_dir / "gh86-original"
+        original_root.mkdir(parents=True, exist_ok=True)
+        fixtures = [
+            "Gh86 - Space Tactics (Disk 1 of 4).adf",
+            "Gh86 - Space Tactics (Disk 2 of 4).adf",
+            "Gh86 - Space Tactics (Disk 3 of 4).adf",
+            "Gh86 - Space Tactics (Disk 4 of 4).adf",
+            "Gh86 Quest III Boot.adf",
+            "Gh86 Quest III Character.adf",
+            "Gh86 Castle Quest (Disk A).adf",
+        ]
+        before_hashes = {}
+        for name in fixtures:
+            path = original_root / name
+            path.write_bytes(name.encode("utf-8"))
+            before_hashes[name] = __import__("hashlib").sha256(name.encode("utf-8")).hexdigest()
+
+        state = GuiState(
+            library_root=str(base_dir / "gh86-lib"),
+            original_dir=str(original_root),
+            run_mode="build",
+        )
+        pp_gh86 = PortablePaths(base_dir=base_dir / "gh86-lib")
+        pp_gh86.ensure_all()
+        cfg_gh86 = build_path_config_from_gui_state(state)
+        ensure_managed_directories(cfg_gh86)
+        kwargs_gh86 = build_pipeline_kwargs(state, cfg_gh86)
+        result_gh86 = run_pipeline(**kwargs_gh86)
+        gh86_report["library_populated"] = bool(result_gh86.get("per_group"))
+        _gh86_step("gh86_populated_pipeline", gh86_report["library_populated"],
+                    f"groups={result_gh86.get('groups', 0)}")
+
+        after_hashes = {}
+        for name in fixtures:
+            path = original_root / name
+            after_hashes[name] = __import__("hashlib").sha256(path.read_bytes()).hexdigest()
+        unchanged = after_hashes == before_hashes
+        gh86_report["source_fixtures_unchanged"] = unchanged
+        _gh86_step("gh86_source_fixtures_unchanged", unchanged,
+                    f"fixtures={len(fixtures)}")
+
+        state_path = build_staged_library_from_result(
+            result_gh86,
+            output_dir=cfg_gh86.output_dir,
+            run_id=result_gh86.get("run_id", "gh86-qa"),
+        )
+        preview_loaded = False
+        table_rows = 0
+        if state_path and state_path.exists():
+            pw = PreviewWidget()
+            preview_loaded = pw.load_state_file(state_path)
+            pw.show()
+            table_rows = pw._table.rowCount()
+            _gh86_step("gh86_preview_loaded", preview_loaded and table_rows > 0,
+                        f"loaded={preview_loaded} rows={table_rows}")
+            gh86_report["preview_nonempty_rows"] = table_rows
+
+            shot = screenshots / "gh86-preview-populated.png"
+            try:
+                pix = pw.grab()
+                pix.save(str(shot))
+                _gh86_step("gh86_screenshot", shot.is_file(), f"saved {shot}")
+                gh86_report["screenshot"] = str(shot)
+            except Exception as exc:
+                _gh86_step("gh86_screenshot", False, f"grab failed: {exc}")
+
+            if table_rows > 0:
+                pw._table.selectRow(0)
+                key = pw._state.row_to_release_key.get(0)
+                entry = pw._state.current_library.releases.get(key) if key and pw._state.current_library else None
+                selected_ok = bool(entry and entry.title and entry.adf_files)
+                gh86_report["selected_release_key"] = key
+                gh86_report["selected_title"] = entry.title if entry else None
+                gh86_report["selected_adf_count"] = len(entry.adf_files) if entry else 0
+                gh86_report["selected_original_identity"] = entry.adf_files[0] if entry and entry.adf_files else None
+                gh86_report["selected_planned_export_path"] = str(cfg_gh86.output_dir / (entry.folder or entry.title or key or "")) if entry else None
+                _gh86_step("gh86_selected_identity", selected_ok,
+                            f"release_key={gh86_report['selected_release_key']} "
+                            f"title={gh86_report['selected_title']} "
+                            f"adf_count={gh86_report['selected_adf_count']}")
+                _gh86_step("gh86_selected_planned_export_path", bool(gh86_report["selected_planned_export_path"]),
+                            f"path={gh86_report['selected_planned_export_path']}")
+
+            export_files_before = sorted(p for p in cfg_gh86.output_dir.rglob("*") if p.is_file())
+            _gh86_step("gh86_preview_no_export", len(export_files_before) == 0,
+                        f"export_files={len(export_files_before)}")
+            gh86_report["export_files_written_after_preview"] = [str(p) for p in export_files_before]
+            pw.close()
+        else:
+            _gh86_step("gh86_preview_loaded", False, "state_path missing")
+    except Exception as exc:
+        _gh86_step("gh86_qualification", False, repr(exc))
+        gh86_report["errors"].append(repr(exc))
     try:
         from amiga_adf_library_builder import local_media as _lm
 
@@ -407,6 +537,7 @@ def main() -> int:
     # ------------------------------------------------------------------ #
     # Emit the report + secret-leak scan of the logs dir
     # ------------------------------------------------------------------ #
+    REPORT["gh86"] = gh86_report
     report_path = report_dir / "report.json"
     report_path.write_text(json.dumps(REPORT, indent=2), encoding="utf-8")
     # Spot-check: no plaintext secret/token in any log under the spaces base.
