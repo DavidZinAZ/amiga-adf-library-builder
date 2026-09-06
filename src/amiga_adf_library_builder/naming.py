@@ -40,22 +40,28 @@ def release_basename(group: ReleaseGroup) -> str:
     (e.g. special-only sets approved for publication).
     """
     # Operator-approved folder override.
-    if group.folder:
+    if getattr(group, "folder", None):
         return _sanitize(group.folder)
 
     parts = [_sanitize(group.title)]
-    if group.edition:
-        parts.append(group.edition)
-    if group.chipset:
-        parts.append(group.chipset)
-    if group.group:
-        parts.append(f"cr {group.group}")
-    if group.language:
-        parts.append(f"lang {group.language}")
-    if group.version:
-        parts.append(f"ver {group.version}")
-    if group.alt_marker:
-        parts.append(f"alt {group.alt_marker}")
+    edition = getattr(group, "edition", None)
+    if edition:
+        parts.append(edition)
+    chipset = getattr(group, "chipset", None)
+    if chipset:
+        parts.append(chipset)
+    group_name = getattr(group, "group", None)
+    if group_name:
+        parts.append(f"cr {group_name}")
+    language = getattr(group, "language", None)
+    if language:
+        parts.append(f"lang {language}")
+    version = getattr(group, "version", None)
+    if version:
+        parts.append(f"ver {version}")
+    alt_marker = getattr(group, "alt_marker", None)
+    if alt_marker:
+        parts.append(f"alt {alt_marker}")
     raw = " ".join(parts)
     out = "".join(
         ch if ch.isalnum() or ch in " .-[]()" else "_" for ch in raw

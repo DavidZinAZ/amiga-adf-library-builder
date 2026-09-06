@@ -18,6 +18,7 @@ __version__ = "0.2.5+gui"
 
 from .layout import PortablePaths
 from .main_window import MainWindow
+from .preview_widget import PreviewWidget
 from .providers import (
     Provider,
     ProviderMetadata,
@@ -31,6 +32,7 @@ from .state import GuiState, build_path_config_from_gui_state, build_pipeline_kw
 __all__ = [
     "PortablePaths",
     "MainWindow",
+    "PreviewWidget",
     "Provider",
     "ProviderMetadata",
     "ProviderRegistry",
