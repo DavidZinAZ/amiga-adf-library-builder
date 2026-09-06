@@ -460,7 +460,7 @@ def main() -> int:
 
         state_path = build_staged_library_from_result(
             result_gh86,
-            output_dir=cfg_gh86.output_dir,
+            library_root=cfg_gh86.library_root,
             run_id=result_gh86.get("run_id", "gh86-qa"),
         )
         preview_loaded = False

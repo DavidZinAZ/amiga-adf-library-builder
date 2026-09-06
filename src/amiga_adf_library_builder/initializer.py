@@ -33,6 +33,9 @@ DATA_DIRECTORIES = (
     "reports",
     "logs",
     "work/staging",
+    # (GH-86) The curation state file (library_state_<run_id>.json) lives here,
+    # independent of the read-only original corpus AND the export output dir.
+    "curation",
 )
 
 

@@ -89,8 +89,9 @@ def test_pipeline_idempotent_catalog(tmp_path: Path) -> None:
 
 def test_build_staged_library_from_result_creates_populated_state(tmp_path: Path) -> None:
     """Test that build_staged_library_from_result creates a populated library state file."""
-    output_dir = tmp_path / "output"
-    output_dir.mkdir()
+    library_root = tmp_path / "lib"
+    # The curation dir must NOT pre-exist: the builder creates it itself (this is
+    # exactly the fresh-library condition the Windows run exercised).
 
     run_id = "test-run-001"
     result = {
@@ -104,6 +105,11 @@ def test_build_staged_library_from_result_creates_populated_state(tmp_path: Path
                 "artwork_missing": True,
                 "notes": ["Synthetic test corpus entry A"],
                 "quarantine_reason": None,
+                "source_files": [
+                    "Test Quest III (Disk 1 of 2).adf",
+                    "Test Quest III (Disk 2 of 2).adf",
+                ],
+                "folder": "Test Quest III",
             },
             {
                 "release_key": "Another_Title_Demo",
@@ -112,6 +118,11 @@ def test_build_staged_library_from_result_creates_populated_state(tmp_path: Path
                 "artwork_missing": False,
                 "notes": ["Synthetic test corpus entry B"],
                 "quarantine_reason": None,
+                "source_files": [
+                    "Another Title Demo (Disk 1 of 1).adf",
+                    "Another Title Demo Boot.adf",
+                ],
+                "folder": "Another Title Demo",
             },
             {
                 "release_key": "Incomplete_Special_Only",
@@ -120,15 +131,19 @@ def test_build_staged_library_from_result_creates_populated_state(tmp_path: Path
                 "artwork_missing": False,
                 "notes": [],
                 "quarantine_reason": "Incomplete set: only special disk",
+                "source_files": ["Incomplete Special Only Boot.adf"],
+                "folder": "Incomplete Special Only",
             },
         ],
     }
 
-    state_path = build_staged_library_from_result(result, output_dir=output_dir, run_id=run_id)
+    state_path = build_staged_library_from_result(result, library_root=library_root, run_id=run_id)
 
     assert state_path is not None
     assert state_path.exists()
     assert state_path.name == f"library_state_{run_id}.json"
+    # The state file lives under the managed curation dir, NOT under output/.
+    assert state_path.parent == (library_root / "curation")
 
     # Verify the state file can be loaded and has the expected content
     from amiga_adf_library_builder.library_state import CurationStateManager
@@ -151,6 +166,22 @@ def test_build_staged_library_from_result_creates_populated_state(tmp_path: Path
     # Verify notes for artwork_missing
     assert "Artwork missing from metadata providers." in library.releases["Test_Quest_III_OCS"].notes
 
+    # (GH-86) Original identity must be preserved: adf_files populated from the
+    # discovered source inventory, and the planned export folder recorded.
+    entry_a = library.releases["Test_Quest_III_OCS"]
+    assert entry_a.adf_files == [
+        "Test Quest III (Disk 1 of 2).adf",
+        "Test Quest III (Disk 2 of 2).adf",
+    ]
+    assert entry_a.folder == "Test Quest III"
+    assert library.releases["Another_Title_Demo"].adf_files == [
+        "Another Title Demo (Disk 1 of 1).adf",
+        "Another Title Demo Boot.adf",
+    ]
+    assert library.releases["Incomplete_Special_Only"].adf_files == [
+        "Incomplete Special Only Boot.adf",
+    ]
+
     # Verify actions were created
     for entry in library.releases.values():
         assert len(entry.actions) >= 1
@@ -160,8 +191,7 @@ def test_build_staged_library_from_result_creates_populated_state(tmp_path: Path
 
 def test_build_staged_library_from_result_returns_none_for_empty_result(tmp_path: Path) -> None:
     """Test that build_staged_library_from_result returns None when per_group is empty."""
-    output_dir = tmp_path / "output"
-    output_dir.mkdir()
+    library_root = tmp_path / "lib"
 
     result = {
         "run_id": "test-empty",
@@ -169,6 +199,74 @@ def test_build_staged_library_from_result_returns_none_for_empty_result(tmp_path
         "per_group": [],
     }
 
-    state_path = build_staged_library_from_result(result, output_dir=output_dir, run_id="test-empty")
+    state_path = build_staged_library_from_result(result, library_root=library_root, run_id="test-empty")
 
     assert state_path is None
+    # No state file and no curation dir should be created for an empty run.
+    assert not (library_root / "curation").exists()
+
+
+def test_build_staged_library_writes_to_curation_not_output(tmp_path: Path) -> None:
+    """GH-86 Windows regression: the curation state must NOT be written into the
+    export output dir.
+
+    The Windows Actions run 34016970787 failed with FileNotFoundError because the
+    state file was written to ``output_dir`` (a dir that does not exist on a fresh
+    library and is the export destination that must stay empty until export). This
+    test pins both halves of the fix:
+      * the builder creates and writes ``<library_root>/curation/`` on its own
+        (no FileNotFoundError even when nothing pre-exists); and
+      * the export ``output/`` dir remains absent/empty after the builder runs.
+    """
+    library_root = tmp_path / "lib"
+    output_dir = library_root / "output"
+    # A fresh library: neither curation/ nor output/ exists yet.
+    assert not (library_root / "curation").exists()
+    assert not output_dir.exists()
+
+    result = {
+        "run_id": "gh86-windows-run",
+        "groups": 1,
+        "per_group": [
+            {
+                "release_key": "Gh86_Space_Tactics",
+                "title": "Gh86 Space Tactics",
+                "provider": "offline",
+                "artwork_missing": True,
+                "notes": [],
+                "quarantine_reason": None,
+                "source_files": [
+                    "Gh86 Space Tactics (Disk 1 of 4).adf",
+                    "Gh86 Space Tactics (Disk 2 of 4).adf",
+                    "Gh86 Space Tactics (Disk 3 of 4).adf",
+                    "Gh86 Space Tactics (Disk 4 of 4).adf",
+                ],
+                "folder": "Gh86 Space Tactics",
+            },
+        ],
+    }
+
+    # Must not raise FileNotFoundError (the original Windows failure).
+    state_path = build_staged_library_from_result(
+        result, library_root=library_root, run_id="gh86-windows-run"
+    )
+
+    assert state_path is not None
+    assert state_path.parent == (library_root / "curation")
+    assert state_path.exists()
+
+    # The export output dir must remain empty (no preview-only export writes).
+    if output_dir.exists():
+        files = [p for p in output_dir.rglob("*") if p.is_file()]
+        assert files == []
+    else:
+        assert not output_dir.exists()
+
+    # The loaded library exposes the original ADF identity for the selected row.
+    from amiga_adf_library_builder.library_state import CurationStateManager
+
+    library = CurationStateManager(state_path).load()
+    entry = library.releases["Gh86_Space_Tactics"]
+    assert len(entry.adf_files) == 4
+    assert entry.folder == "Gh86 Space Tactics"
+    assert entry.curation_state.value == "pending"

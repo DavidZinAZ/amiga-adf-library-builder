@@ -469,6 +469,14 @@ def run_pipeline(
                 "artwork_missing": (not g.quarantine_reason) and bool(r.artwork_missing),
                 "notes": list(r.notes),
                 "events": events,
+                # (GH-86) Full discovered source inventory for this release
+                # (ordered main disks followed by special disks) so the curation
+                # preview can show the original ADF files. Source read-only:
+                # these are filenames, not copies.
+                "source_files": [rec.source_filename for rec in (g.disks + g.specials)],
+                # (GH-86) Planned export folder basename (release_basename is the
+                # single canonical naming source; honours operator folder override).
+                "folder": release_basename(g),
             }
         )
 
@@ -572,15 +580,21 @@ def run_pipeline(
 def build_staged_library_from_result(
     result: dict,
     *,
-    output_dir: Path,
+    library_root: Path,
     run_id: str,
 ) -> Optional[Path]:
-    """Build a StagedLibrary from pipeline result and save as .library_state.json.
+    """Build a StagedLibrary from pipeline result and save as a state file.
 
     Creates a curation state file that the Preview & Curation widget can load.
-    The file is saved as ``library_state_<run_id>.json`` under ``output_dir``.
+    The file is saved as ``library_state_<run_id>.json`` under
+    ``<library_root>/curation/`` -- a managed directory that is independent of
+    both the read-only ``original/`` corpus and the export ``output/``
+    destination. Writing the state file into ``output/`` would (a) fail on a
+    fresh library where that dir does not yet exist and (b) falsely populate
+    the export destination, so the curation state is deliberately kept apart.
 
-    Returns the path to the saved state file, or None if no groups were processed.
+    Returns the path to the saved state file, or None if no groups were
+    processed.
     """
     per_group = result.get("per_group", [])
     if not per_group:
@@ -591,18 +605,17 @@ def build_staged_library_from_result(
         release_key = pg.get("release_key", "")
         title = pg.get("title", "")
         quarantine_reason = pg.get("quarantine_reason")
-        provider = pg.get("provider")
         artwork_missing = pg.get("artwork_missing", False)
         notes = pg.get("notes", [])
+        # (GH-86) Full discovered source inventory + planned export folder.
+        source_files = list(pg.get("source_files") or [])
+        folder = pg.get("folder")
 
-        # Determine initial curation state based on quarantine status
-        if quarantine_reason:
-            if "Incomplete set: only special disk" in quarantine_reason:
-                curation_state = StagedState.NEEDS_REVIEW
-            else:
-                curation_state = StagedState.NEEDS_REVIEW
-        else:
-            curation_state = StagedState.PENDING
+        # Determine initial curation state based on quarantine status.
+        # Quarantined / flagged releases route to review; clean ones to pending.
+        curation_state = (
+            StagedState.NEEDS_REVIEW if quarantine_reason else StagedState.PENDING
+        )
 
         entry = StagedReleaseEntry(
             release_key=release_key,
@@ -614,6 +627,8 @@ def build_staged_library_from_result(
             version=None,
             alt_marker=None,
             ext="adf",
+            adf_files=source_files,
+            folder=folder,
             curation_state=curation_state,
         )
         if artwork_missing:
@@ -631,8 +646,10 @@ def build_staged_library_from_result(
 
         library.releases[release_key] = entry
 
-    # Save to output_dir
-    state_path = output_dir / f"library_state_{run_id}.json"
+    # Save under the managed curation dir (independent of output/ and original/).
+    curation_dir = Path(library_root) / "curation"
+    curation_dir.mkdir(parents=True, exist_ok=True)
+    state_path = curation_dir / f"library_state_{run_id}.json"
     from .library_state import CurationStateManager, CurationStateMeta, CurationStateFile
     meta = CurationStateMeta(
         schema_version=1,

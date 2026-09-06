@@ -1946,7 +1946,7 @@ class MainWindow(QMainWindow):
                 from ..pipeline import build_staged_library_from_result
                 state_path = build_staged_library_from_result(
                     result,
-                    output_dir=cfg.output_dir,
+                    library_root=cfg.library_root,
                     run_id=result.get("run_id", "unknown"),
                 )
                 if state_path and state_path.exists():
