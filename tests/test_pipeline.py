@@ -91,7 +91,7 @@ def test_build_staged_library_from_result_creates_populated_state(tmp_path: Path
     """Test that build_staged_library_from_result creates a populated library state file."""
     output_dir = tmp_path / "output"
     output_dir.mkdir()
-    
+
     run_id = "test-run-001"
     result = {
         "run_id": run_id,
@@ -123,34 +123,34 @@ def test_build_staged_library_from_result_creates_populated_state(tmp_path: Path
             },
         ],
     }
-    
+
     state_path = build_staged_library_from_result(result, output_dir=output_dir, run_id=run_id)
-    
+
     assert state_path is not None
     assert state_path.exists()
     assert state_path.name == f"library_state_{run_id}.json"
-    
+
     # Verify the state file can be loaded and has the expected content
     from amiga_adf_library_builder.library_state import CurationStateManager
     manager = CurationStateManager(state_path)
     library = manager.load()
-    
+
     # Should have 3 releases
     assert len(library.releases) == 3
-    
+
     # Verify the three entries
     assert "Test_Quest_III_OCS" in library.releases
     assert "Another_Title_Demo" in library.releases
     assert "Incomplete_Special_Only" in library.releases
-    
+
     # Verify curation states
     assert library.releases["Test_Quest_III_OCS"].curation_state.value == "pending"
     assert library.releases["Another_Title_Demo"].curation_state.value == "pending"
     assert library.releases["Incomplete_Special_Only"].curation_state.value == "needs_review"
-    
+
     # Verify notes for artwork_missing
     assert "Artwork missing from metadata providers." in library.releases["Test_Quest_III_OCS"].notes
-    
+
     # Verify actions were created
     for entry in library.releases.values():
         assert len(entry.actions) >= 1
@@ -162,13 +162,13 @@ def test_build_staged_library_from_result_returns_none_for_empty_result(tmp_path
     """Test that build_staged_library_from_result returns None when per_group is empty."""
     output_dir = tmp_path / "output"
     output_dir.mkdir()
-    
+
     result = {
         "run_id": "test-empty",
         "groups": 0,
         "per_group": [],
     }
-    
+
     state_path = build_staged_library_from_result(result, output_dir=output_dir, run_id="test-empty")
-    
+
     assert state_path is None
