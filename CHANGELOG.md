@@ -17,6 +17,28 @@
     files will be exported) before Run is pressed.
   - Regression coverage: tests/test_gui_issue43_export_controls.py.
 
+## 0.2.7 — 2026-09-06
+
+- GH-86: Fix Preview/Curation population (P0 — released v0.2.6 Windows GUI showed an
+  empty Preview/Curation tab).
+  - Root cause: `FileNotFoundError` during source-scan + empty ADF/identity handling
+    left the Preview/Curation workspace with zero populated rows from a real
+    configured library.
+  - The Preview/Curation workspace now populates from the configured **Original Disks
+    (read only)** source with the complete discovered source inventory, original
+    identity, planned processed/export name and destination path, and per-entry
+    preview/details — before any final export is written.
+  - Non-destructive contract preserved: source fixtures remain untouched and no
+    export files are written until explicit Export.
+  - Regression coverage uses a populated library fixture (curation-not-output
+    regression + full `test_pipeline` population paths), not only lightweight object
+    construction.
+  - Independently qualified on real packaged Windows (Windows-R3 Actions run
+    34025701908; QA-FINAL-R2 run #160 PASS): populated Preview/Curation rows,
+    original identity, coherent planned export path, 7 source fixtures hash-unchanged,
+    0 preview-only export writes.
+  - Shipped with Windows assets: `amiga-adf-gui-portable.zip` and `amiga-adf-gui.exe`.
+
 ## 0.2.5 — 2026-08-21
 
 - GH-49: Configurable local matching confidence and ambiguous review system
