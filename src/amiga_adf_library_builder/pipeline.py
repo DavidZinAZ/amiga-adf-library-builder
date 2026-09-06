@@ -20,7 +20,7 @@ from . import diagnostics
 from .enrich import VERIFIED_ARTWORK_WIDTH, VERIFIED_ARTWORK_HEIGHT
 from .exporter_guard import export_gate_open
 from .logging_utils import redact
-from .models import ParsedRecord, ReleaseGroup, ScanRecord
+from .models import ParsedRecord, ReleaseGroup, ScanRecord, StagedLibrary, StagedReleaseEntry, StagedState, StagedChange, CurationAction
 from .parser import parse_filename
 from .naming import release_basename
 from .paths import PathConfig
@@ -567,3 +567,86 @@ def run_pipeline(
         "provenance_written": [str(r.provenance_path) for r in rtfm_results if r.provenance_path],
     }
     return result
+
+
+def build_staged_library_from_result(
+    result: dict,
+    *,
+    output_dir: Path,
+    run_id: str,
+) -> Optional[Path]:
+    """Build a StagedLibrary from pipeline result and save as .library_state.json.
+
+    Creates a curation state file that the Preview & Curation widget can load.
+    The file is saved as ``library_state_<run_id>.json`` under ``output_dir``.
+
+    Returns the path to the saved state file, or None if no groups were processed.
+    """
+    per_group = result.get("per_group", [])
+    if not per_group:
+        return None
+
+    library = StagedLibrary()
+    for pg in per_group:
+        release_key = pg.get("release_key", "")
+        title = pg.get("title", "")
+        quarantine_reason = pg.get("quarantine_reason")
+        provider = pg.get("provider")
+        artwork_missing = pg.get("artwork_missing", False)
+        notes = pg.get("notes", [])
+
+        # Determine initial curation state based on quarantine status
+        if quarantine_reason:
+            if "Incomplete set: only special disk" in quarantine_reason:
+                curation_state = StagedState.NEEDS_REVIEW
+            else:
+                curation_state = StagedState.NEEDS_REVIEW
+        else:
+            curation_state = StagedState.PENDING
+
+        entry = StagedReleaseEntry(
+            release_key=release_key,
+            title=title,
+            edition=None,
+            group=None,
+            chipset=None,
+            language=None,
+            version=None,
+            alt_marker=None,
+            ext="adf",
+            curation_state=curation_state,
+        )
+        if artwork_missing:
+            entry.notes = (entry.notes or "") + "Artwork missing from metadata providers."
+        if notes:
+            existing_notes = entry.notes or ""
+            entry.notes = (existing_notes + "; " if existing_notes else "") + "; ".join(notes)
+
+        # Add initial state change action
+        entry.actions.append(StagedChange(
+            action=CurationAction.STATE_CHANGE,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            details=f"Initial state from pipeline: {curation_state.value}",
+        ))
+
+        library.releases[release_key] = entry
+
+    # Save to output_dir
+    state_path = output_dir / f"library_state_{run_id}.json"
+    from .library_state import CurationStateManager, CurationStateMeta, CurationStateFile
+    meta = CurationStateMeta(
+        schema_version=1,
+        created_at=datetime.now(timezone.utc).isoformat(),
+        updated_at=datetime.now(timezone.utc).isoformat(),
+        source_workspace=f"pipeline_run_{run_id}",
+        entry_count=len(library.releases),
+    )
+    state_file = CurationStateFile(meta=meta, library=library)
+
+    # Atomic write via temp file
+    tmp_path = state_path.with_suffix(".json.tmp")
+    import json
+    tmp_path.write_text(json.dumps(state_file.to_dict(), indent=2))
+    tmp_path.replace(state_path)
+
+    return state_path

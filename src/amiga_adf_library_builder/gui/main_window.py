@@ -1940,6 +1940,22 @@ class MainWindow(QMainWindow):
             # provider so _refresh_review_button() reads the fresh queue.
             self._local_media_provider = None
             self._refresh_review_button()
+
+            # (GH-86) Build and load curation state for Preview & Curation tab
+            try:
+                from ..pipeline import build_staged_library_from_result
+                state_path = build_staged_library_from_result(
+                    result,
+                    output_dir=cfg.output_dir,
+                    run_id=result.get("run_id", "unknown"),
+                )
+                if state_path and state_path.exists():
+                    self._preview_widget.load_state_file(state_path)
+                    self._append_diag(f"Loaded curation state: {state_path.name}")
+            except Exception as exc:
+                # Preview population is best-effort; never break a completed run
+                logger.debug("Preview curation state load failed: %s", exc)
+                self._append_diag(f"Preview state load skipped: {exc}")
         # (GH-54) Match Review dialog --------------------------------------------------
     def _local_media_cache_dir(self) -> Path:
         """GH-66: the directory the local-media provider's persisted state
