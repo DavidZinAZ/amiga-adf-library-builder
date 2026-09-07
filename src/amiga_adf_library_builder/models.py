@@ -4,6 +4,7 @@ Pure data definitions and small value types. No I/O here.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Optional
 from pathlib import Path
@@ -216,6 +217,7 @@ class CurationAction(Enum):
     BULK_EDIT = "bulk_edit"
     RENAME = "rename"
     MOVE = "move"
+    MERGE = "merge"
     ACCEPT_MATCH = "accept_match"
     REJECT_MATCH = "reject_match"
     ACCEPT_METADATA_ONLY = "accept_metadata_only"
@@ -230,12 +232,14 @@ class StagedChange:
     action: CurationAction
     timestamp: str
     details: str
+    payload: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
             "action": self.action.value,
             "timestamp": self.timestamp,
             "details": self.details,
+            "payload": self.payload,
         }
 
     @classmethod
@@ -244,6 +248,7 @@ class StagedChange:
             action=CurationAction(d["action"]),
             timestamp=d.get("timestamp", ""),
             details=d.get("details", ""),
+            payload=d.get("payload"),
         )
 
 
@@ -365,3 +370,231 @@ class StagedLibrary:
         return cls(
             releases={k: StagedReleaseEntry.from_dict(v) for k, v in d.get("releases", {}).items()},
         )
+
+    def move_adfs(
+        self,
+        src_key: str,
+        dst_key: str,
+        filenames: list[str],
+    ) -> tuple[StagedReleaseEntry, StagedReleaseEntry]:
+        """Move ADF files from one staged release to another.
+
+        Args:
+            src_key: Source release key
+            dst_key: Destination release key
+            filenames: List of ADF filenames to move
+
+        Returns:
+            Tuple of (source_entry, destination_entry) after move
+
+        Raises:
+            ValueError: If source or destination doesn't exist, if src_key == dst_key,
+                        if any filename is not in source, or if any filename already
+                        exists in destination (duplicate prevention).
+        """
+        if src_key == dst_key:
+            raise ValueError("Source and destination release cannot be the same")
+
+        src_entry = self.releases.get(src_key)
+        if not src_entry:
+            raise ValueError(f"Source release not found: {src_key}")
+
+        dst_entry = self.releases.get(dst_key)
+        if not dst_entry:
+            raise ValueError(f"Destination release not found: {dst_key}")
+
+        # Empty selection is rejected: a no-op that changes nothing and
+        # records nothing. The UI layer additionally prevents empty
+        # selections from being submitted at all.
+        if not filenames:
+            return src_entry, dst_entry
+
+        # Verify all filenames exist in source
+        for fname in filenames:
+            if fname not in src_entry.adf_files:
+                raise ValueError(f"ADF file not found in source: {fname}")
+
+        # Verify no duplicates in destination
+        for fname in filenames:
+            if fname in dst_entry.adf_files:
+                raise ValueError(f"ADF file already exists in destination: {fname}")
+
+        # Store source state for undo
+        src_files_before = list(src_entry.adf_files)
+        dst_files_before = list(dst_entry.adf_files)
+        src_state_before = src_entry.curation_state
+
+        # Remove from source preserving order of remaining files
+        new_src_files = [f for f in src_entry.adf_files if f not in filenames]
+        src_entry.adf_files = new_src_files
+
+        # Append to destination preserving moved order
+        dst_entry.adf_files.extend(filenames)
+
+        # Post-move source state: NEEDS_REVIEW when the source emptied,
+        # otherwise unchanged. Recorded in the payload so redo can restore
+        # the exact post-move state.
+        src_state_after = (
+            StagedState.NEEDS_REVIEW if not src_entry.adf_files else src_state_before
+        )
+
+        # Record decision log on both source and destination. The payload
+        # carries the full undo context; the UI layer records the logged
+        # action for undo exactly once.
+        from datetime import datetime, timezone
+        timestamp = datetime.now(timezone.utc).isoformat()
+
+        payload = json.dumps({
+            "src_key": src_key,
+            "dst_key": dst_key,
+            "moved_files": list(filenames),
+            "src_files_before": src_files_before,
+            "dst_files_before": dst_files_before,
+            "src_files_after": list(src_entry.adf_files),
+            "dst_files_after": list(dst_entry.adf_files),
+            "src_curation_state": src_state_before.value,
+            "src_state_after": src_state_after.value,
+        })
+
+        src_action = StagedChange(
+            action=CurationAction.MOVE,
+            timestamp=timestamp,
+            details=f"Moved {len(filenames)} ADF(s) to {dst_entry.release_key} ({dst_entry.title})",
+            payload=payload,
+        )
+        src_entry.actions.append(src_action)
+
+        dst_action = StagedChange(
+            action=CurationAction.MOVE,
+            timestamp=timestamp,
+            details=f"Received {len(filenames)} ADF(s) from {src_entry.release_key} ({src_entry.title})",
+            payload=payload,
+        )
+        dst_entry.actions.append(dst_action)
+
+        # If source is now empty, set to NEEDS_REVIEW (record real previous state).
+        # The transition action carries the same payload so a single undo entry
+        # restores files AND state together.
+        if not src_entry.adf_files:
+            prev_state = src_entry.curation_state
+            src_entry.curation_state = StagedState.NEEDS_REVIEW
+            empty_action = StagedChange(
+                action=CurationAction.STATE_CHANGE,
+                timestamp=timestamp,
+                details=f"State changed from {prev_state.value} to needs_review (empty after move)",
+                payload=payload,
+            )
+            src_entry.actions.append(empty_action)
+
+        return src_entry, dst_entry
+
+    def merge_release(self, src_key: str, dst_key: str) -> tuple[StagedReleaseEntry, StagedReleaseEntry]:
+        """Merge all ADFs from source release into destination release.
+
+        Args:
+            src_key: Source release key (will be emptied)
+            dst_key: Destination release key (will receive all ADFs)
+
+        Returns:
+            Tuple of (source_entry, destination_entry) after merge
+
+        Raises:
+            ValueError: If source or destination doesn't exist, if src_key == dst_key,
+                        or if any ADF from source already exists in destination.
+        """
+        if src_key == dst_key:
+            raise ValueError("Source and destination release cannot be the same")
+
+        src_entry = self.releases.get(src_key)
+        if not src_entry:
+            raise ValueError(f"Source release not found: {src_key}")
+
+        dst_entry = self.releases.get(dst_key)
+        if not dst_entry:
+            raise ValueError(f"Destination release not found: {dst_key}")
+
+        # Check for duplicates
+        for fname in src_entry.adf_files:
+            if fname in dst_entry.adf_files:
+                raise ValueError(f"ADF file already exists in destination: {fname}")
+
+        # Store pre-merge state for undo
+        src_files_before = list(src_entry.adf_files)
+        dst_files_before = list(dst_entry.adf_files)
+        src_state_before = src_entry.curation_state
+
+        # Append source ADFs to destination
+        # Destination's existing files first, then source's files in their
+        # original order (preserves disk ordinals on both sides).
+        dst_entry.adf_files.extend(src_entry.adf_files)
+
+        # Merge metadata: destination wins; promote only blank destination fields from source
+        if not dst_entry.title and src_entry.title:
+            dst_entry.title = src_entry.title
+        if not dst_entry.edition and src_entry.edition:
+            dst_entry.edition = src_entry.edition
+        if not dst_entry.group and src_entry.group:
+            dst_entry.group = src_entry.group
+        if not dst_entry.chipset and src_entry.chipset:
+            dst_entry.chipset = src_entry.chipset
+        if not dst_entry.language and src_entry.language:
+            dst_entry.language = src_entry.language
+        if not dst_entry.version and src_entry.version:
+            dst_entry.version = src_entry.version
+        if not dst_entry.alt_marker and src_entry.alt_marker:
+            dst_entry.alt_marker = src_entry.alt_marker
+
+        # Do NOT carry over source locked_fields to avoid introducing hidden
+        # protection constraints. Do NOT carry over source action history: the
+        # destination audit trail must contain exactly one MERGE entry for this
+        # operation, not a copy of the source's unrelated history.
+        # Preserve destination curation state and locked_fields.
+
+        # Empty source entry but retain it in the library with NEEDS_REVIEW
+        src_entry.adf_files = []
+        src_entry.curation_state = StagedState.NEEDS_REVIEW
+
+        # Record decision log on both source and destination. The payload
+        # carries the full undo context (before/after files + state); the UI
+        # layer records the logged action for undo exactly once.
+        from datetime import datetime, timezone
+        timestamp = datetime.now(timezone.utc).isoformat()
+
+        payload = json.dumps({
+            "src_key": src_key,
+            "dst_key": dst_key,
+            "src_files_before": src_files_before,
+            "dst_files_before": dst_files_before,
+            "src_files_after": list(src_entry.adf_files),
+            "dst_files_after": list(dst_entry.adf_files),
+            "src_curation_state": src_state_before.value,
+            # Merge always empties the source and marks it NEEDS_REVIEW.
+            "src_state_after": StagedState.NEEDS_REVIEW.value,
+        })
+
+        src_action = StagedChange(
+            action=CurationAction.MERGE,
+            timestamp=timestamp,
+            details=f"Merged into {dst_entry.release_key} ({dst_entry.title}); {len(src_files_before)} ADF(s) moved",
+            payload=payload,
+        )
+        src_entry.actions.append(src_action)
+
+        # Empty-source state transition recorded with the real previous state
+        state_action = StagedChange(
+            action=CurationAction.STATE_CHANGE,
+            timestamp=timestamp,
+            details=f"State changed from {src_state_before.value} to needs_review (empty after merge)",
+            payload=payload,
+        )
+        src_entry.actions.append(state_action)
+
+        dst_action = StagedChange(
+            action=CurationAction.MERGE,
+            timestamp=timestamp,
+            details=f"Merged from {src_key} ({src_entry.title}); {len(src_files_before)} ADF(s) received",
+            payload=payload,
+        )
+        dst_entry.actions.append(dst_action)
+
+        return src_entry, dst_entry

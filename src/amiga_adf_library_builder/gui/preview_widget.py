@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -33,6 +34,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -46,6 +48,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -620,6 +623,18 @@ class PreviewWidget(QWidget):
 
         menu.addSeparator()
 
+        # Move ADF(s) to Release...
+        move_adfs_action = QAction("Move ADF(s) to Release…", self)
+        move_adfs_action.triggered.connect(self._on_move_adfs_to_release)
+        menu.addAction(move_adfs_action)
+
+        # Merge Release Into...
+        merge_release_action = QAction("Merge Release Into…", self)
+        merge_release_action.triggered.connect(self._on_merge_release_into)
+        menu.addAction(merge_release_action)
+
+        menu.addSeparator()
+
         # Lookup actions
         lookup_menu = menu.addMenu("Lookup")
         online_lookup = QAction("Online Lookup…", self)
@@ -833,17 +848,41 @@ class PreviewWidget(QWidget):
             except (IndexError, ValueError):
                 pass
         elif action.action == CurationAction.MOVE:
-            # Parse previous folder from details: "Moved from folder: <old> to folder: <new>"
-            # or "Created folder and moved from folder: <old> to folder: <new>"
-            try:
-                if "from folder: " in action.details:
-                    previous_folder = action.details.split("from folder: ")[1].split(" to folder: ")[0]
-                    entry.folder = previous_folder if previous_folder != "None" else None
-                else:
-                    # Legacy format: just clear the folder
+            # ADF move actions carry a payload (src/dst keys + file lists);
+            # folder-move actions do not. Dispatch on payload first so the
+            # two kinds of MOVE are never conflated.
+            payload = None
+            if action.payload:
+                try:
+                    payload = json.loads(action.payload)
+                except (json.JSONDecodeError, TypeError):
+                    payload = None
+            if payload is not None and payload.get("moved_files") is not None:
+                # ADF move: restore exact membership + source state.
+                src_key = payload.get("src_key")
+                dst_key = payload.get("dst_key")
+                src_entry = self._state.current_library.releases.get(src_key)
+                if src_entry:
+                    src_entry.adf_files = list(payload.get("src_files_before", []))
+                    if "src_curation_state" in payload:
+                        try:
+                            src_entry.curation_state = StagedState(payload["src_curation_state"])
+                        except ValueError:
+                            pass
+                dst_entry = self._state.current_library.releases.get(dst_key)
+                if dst_entry:
+                    dst_entry.adf_files = list(payload.get("dst_files_before", []))
+            else:
+                # Folder move: parse previous folder from details.
+                try:
+                    if "from folder: " in action.details:
+                        previous_folder = action.details.split("from folder: ")[1].split(" to folder: ")[0]
+                        entry.folder = previous_folder if previous_folder != "None" else None
+                    else:
+                        # Legacy format: just clear the folder
+                        entry.folder = None
+                except (IndexError, ValueError):
                     entry.folder = None
-            except (IndexError, ValueError):
-                entry.folder = None
         elif action.action == CurationAction.KEEP_FILENAME:
             # Remove filename from locked_fields
             if "filename" in (entry.locked_fields or []):
@@ -857,6 +896,29 @@ class PreviewWidget(QWidget):
             # Remove filename from locked_fields
             if "filename" in (entry.locked_fields or []):
                 entry.locked_fields.remove("filename")
+        elif action.action == CurationAction.MERGE:
+            # Use payload for reliable undo of merge operations
+            if action.payload:
+                try:
+                    payload = json.loads(action.payload)
+                    src_key = payload.get("src_key")
+                    dst_key = payload.get("dst_key")
+                    src_files_before = payload.get("src_files_before", [])
+                    dst_files_before = payload.get("dst_files_before", [])
+                    src_curation_state = payload.get("src_curation_state", "pending")
+                    
+                    # Restore source
+                    src_entry = self._state.current_library.releases.get(src_key)
+                    if src_entry:
+                        src_entry.adf_files = src_files_before
+                        src_entry.curation_state = StagedState(src_curation_state)
+                    
+                    # Restore destination
+                    dst_entry = self._state.current_library.releases.get(dst_key)
+                    if dst_entry:
+                        dst_entry.adf_files = dst_files_before
+                except (json.JSONDecodeError, KeyError, ValueError):
+                    pass
         # Add more undo cases as needed
 
         # Move to redo stack
@@ -896,17 +958,41 @@ class PreviewWidget(QWidget):
             except (IndexError, ValueError):
                 pass
         elif action.action == CurationAction.MOVE:
-            # Parse new folder from details: "Moved from folder: <old> to folder: <new>"
-            # or "Created folder and moved from folder: <old> to folder: <new>"
-            try:
-                if "to folder: " in action.details:
-                    new_folder = action.details.split("to folder: ")[1]
-                    entry.folder = new_folder
-                else:
-                    # Legacy format: no folder to restore
+            # ADF move actions carry a payload (src/dst keys + file lists);
+            # folder-move actions do not. Dispatch on payload first so the
+            # two kinds of MOVE are never conflated.
+            payload = None
+            if action.payload:
+                try:
+                    payload = json.loads(action.payload)
+                except (json.JSONDecodeError, TypeError):
+                    payload = None
+            if payload is not None and payload.get("moved_files") is not None:
+                # ADF move: re-apply exact membership + post-move state.
+                src_key = payload.get("src_key")
+                dst_key = payload.get("dst_key")
+                src_entry = self._state.current_library.releases.get(src_key)
+                if src_entry:
+                    src_entry.adf_files = list(payload.get("src_files_after", []))
+                    if "src_state_after" in payload:
+                        try:
+                            src_entry.curation_state = StagedState(payload["src_state_after"])
+                        except ValueError:
+                            pass
+                dst_entry = self._state.current_library.releases.get(dst_key)
+                if dst_entry:
+                    dst_entry.adf_files = list(payload.get("dst_files_after", []))
+            else:
+                # Folder move: parse new folder from details.
+                try:
+                    if "to folder: " in action.details:
+                        new_folder = action.details.split("to folder: ")[1]
+                        entry.folder = new_folder
+                    else:
+                        # Legacy format: no folder to restore
+                        pass
+                except (IndexError, ValueError):
                     pass
-            except (IndexError, ValueError):
-                pass
         elif action.action == CurationAction.KEEP_FILENAME:
             # Add filename to locked_fields
             entry.locked_fields = entry.locked_fields or []
@@ -926,6 +1012,28 @@ class PreviewWidget(QWidget):
             entry.locked_fields = entry.locked_fields or []
             if "filename" not in entry.locked_fields:
                 entry.locked_fields.append("filename")
+        elif action.action == CurationAction.MERGE:
+            # Use payload for reliable redo of merge operations
+            if action.payload:
+                try:
+                    payload = json.loads(action.payload)
+                    src_key = payload.get("src_key")
+                    dst_key = payload.get("dst_key")
+                    src_files_before = payload.get("src_files_before", [])
+                    dst_files_before = payload.get("dst_files_before", [])
+                    src_files_after = payload.get("src_files_after", [])
+                    dst_files_after = payload.get("dst_files_after", [])
+                    src_state_after = payload.get("src_state_after", "needs_review")
+
+                    # Re-apply merge: restore exact post-merge membership + state.
+                    src_entry = self._state.current_library.releases.get(src_key)
+                    dst_entry = self._state.current_library.releases.get(dst_key)
+                    if src_entry and dst_entry:
+                        src_entry.adf_files = src_files_after
+                        src_entry.curation_state = StagedState(src_state_after)
+                        dst_entry.adf_files = dst_files_after
+                except (json.JSONDecodeError, KeyError, ValueError):
+                    pass
 
         # Move back to undo stack
         self._undo_stack.append((release_key, action))
@@ -1408,6 +1516,356 @@ class PreviewWidget(QWidget):
         layout.addWidget(buttons)
 
         dialog.exec()
+
+    def _on_move_adfs_to_release(self) -> None:
+        """Move explicitly selected ADF(s) from source release to destination release."""
+        if self._state.current_library is None or not self._state.selected_release_key:
+            return
+
+        src_entry = self._state.current_library.releases.get(self._state.selected_release_key)
+        if not src_entry or not src_entry.adf_files:
+            QMessageBox.information(self, "Move ADF(s)", "No ADF files available in the selected release.")
+            return
+
+        # Build destination picker dialog with a real selectable ADF list
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Move ADF(s) to Release")
+        dialog.resize(520, 480)
+        layout = QVBoxLayout(dialog)
+
+        # Source info
+        layout.addWidget(QLabel(f"Source: {src_entry.title} ({src_entry.release_key})"))
+        layout.addWidget(QLabel(f"ADF files in source: {len(src_entry.adf_files)}"))
+
+        # ADF selection (real selectable list — only checked items are moved)
+        layout.addWidget(QLabel("Select ADF(s) to move (only checked items are moved):"))
+        adf_box = QVBoxLayout()
+        adf_checkboxes: list[QCheckBox] = []
+        for adf in src_entry.adf_files:
+            cb = QCheckBox(adf)
+            cb.setChecked(True)
+            adf_box.addWidget(cb)
+            adf_checkboxes.append(cb)
+        select_all = QCheckBox("Select all")
+        select_all.setChecked(True)
+
+        def sync_select_all(_checked: bool) -> None:
+            if select_all.isChecked():
+                for cb in adf_checkboxes:
+                    cb.setChecked(True)
+
+        def sync_checkboxes() -> None:
+            select_all.setChecked(all(cb.isChecked() for cb in adf_checkboxes))
+
+        for cb in adf_checkboxes:
+            cb.toggled.connect(sync_checkboxes)
+        select_all.toggled.connect(sync_select_all)
+        adf_box.addWidget(select_all)
+        adf_scroll = QScrollArea()
+        adf_scroll.setWidgetResizable(True)
+        adf_scroll_container = QWidget()
+        adf_scroll_container.setLayout(adf_box)
+        adf_scroll.setWidget(adf_scroll_container)
+        adf_scroll.setMaximumHeight(180)
+        layout.addWidget(adf_scroll)
+
+        # Destination picker
+        layout.addWidget(QLabel("Destination Release:"))
+        dest_combo = QComboBox()
+        dest_combo.setEditable(True)
+        dest_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+
+        # Populate with other releases (self-target protection: source excluded)
+        for entry in self._state.current_library.releases.values():
+            if entry.release_key != src_entry.release_key:
+                dest_combo.addItem(f"{entry.title} ({entry.release_key}) [{len(entry.adf_files)} ADFs] [{entry.curation_state.value}]", entry.release_key)
+
+        if dest_combo.count() == 0:
+            QMessageBox.information(self, "Move ADF(s)", "No other releases available as destination.")
+            return
+
+        # Add search/filter
+        search_edit = QLineEdit()
+        search_edit.setPlaceholderText("Search destination by title, key, group...")
+        layout.addWidget(search_edit)
+
+        def filter_dest():
+            search_text = search_edit.text().lower()
+            for i in range(dest_combo.count()):
+                text = dest_combo.itemText(i).lower()
+                dest_combo.setItemHidden(i, search_text not in text)
+
+        search_edit.textChanged.connect(filter_dest)
+        layout.addWidget(dest_combo)
+
+        # Preview area
+        layout.addWidget(QLabel("Preview (destination after move):"))
+        preview = QTextEdit()
+        preview.setReadOnly(True)
+        preview.setFontFamily("monospace")
+        preview.setMaximumHeight(100)
+        layout.addWidget(preview)
+
+        def selected_adfs() -> list[str]:
+            return [cb.text() for cb in adf_checkboxes if cb.isChecked()]
+
+        def update_preview():
+            idx = dest_combo.currentIndex()
+            if idx >= 0:
+                dst_key = dest_combo.itemData(idx)
+                dst_entry = self._state.current_library.releases.get(dst_key)
+                if dst_entry:
+                    moved = selected_adfs()
+                    text = f"Destination: {dst_entry.title} ({dst_entry.release_key})\n"
+                    text += f"Selected ADFs: {len(moved)} of {len(src_entry.adf_files)}\n"
+                    text += "ADF list after move:\n"
+                    combined = list(dst_entry.adf_files) + moved
+                    for i, adf in enumerate(combined):
+                        text += f"  {i+1}. {adf}\n"
+                    preview.setText(text)
+
+        dest_combo.currentIndexChanged.connect(update_preview)
+        for cb in adf_checkboxes:
+            cb.toggled.connect(update_preview)
+        update_preview()
+
+        # Guard: empty selection must not execute
+        ok_btn = QDialogButtonBox.StandardButton.Ok
+        buttons = QDialogButtonBox(ok_btn | QDialogButtonBox.StandardButton.Cancel)
+        ok_button = buttons.button(ok_btn)
+
+        def guard_empty_selection() -> None:
+            enabled = bool(selected_adfs())
+            if ok_button is not None:
+                ok_button.setEnabled(enabled)
+
+        for cb in adf_checkboxes:
+            cb.toggled.connect(guard_empty_selection)
+        select_all.toggled.connect(lambda _c: guard_empty_selection())
+        guard_empty_selection()
+
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        dst_key = dest_combo.currentData()
+        if not dst_key:
+            return
+
+        dst_entry = self._state.current_library.releases.get(dst_key)
+        if not dst_entry:
+            QMessageBox.critical(self, "Move ADF(s)", "Destination release not found.")
+            return
+
+        # Move ONLY the explicitly selected ADFs, preserving source order.
+        selected = selected_adfs()
+        if not selected:
+            QMessageBox.information(self, "Move ADF(s)", "No ADFs selected. Nothing was moved.")
+            return
+
+        self._apply_move_adfs(src_entry.release_key, dst_key, selected)
+
+    def _apply_move_adfs(self, src_key: str, dst_key: str, selected: list[str]) -> None:
+        """Execute an ADF move for exactly the given selected filenames.
+
+        Records a single coherent MOVE entry per side plus the undo payload.
+        Raises ValueError on empty selection, self-target, missing source, or
+        destination duplicates (duplicate prevention).
+        """
+        if self._state.current_library is None:
+            raise ValueError("No staged library loaded")
+        if not selected:
+            raise ValueError("No ADF files selected to move")
+
+        src_entry = self._state.current_library.releases.get(src_key)
+        dst_entry = self._state.current_library.releases.get(dst_key)
+        if not src_entry:
+            raise ValueError(f"Source release not found: {src_key}")
+        if not dst_entry:
+            raise ValueError(f"Destination release not found: {dst_key}")
+        if src_key == dst_key:
+            raise ValueError("Source and destination release cannot be the same")
+
+        # move_adfs validates membership, duplicate prevention, and order, and
+        # records the decision-log entries (one MOVE per side, with the full
+        # undo payload) on the model side.
+        self._state.current_library.move_adfs(src_key, dst_key, list(selected))
+
+        # Record the source's logged MOVE entry for undo exactly once. The
+        # model already appended it (with the full payload); do NOT append a
+        # duplicate entry — that was the duplicate-logging defect.
+        src_moves = [a for a in src_entry.actions if a.action == CurationAction.MOVE]
+        if not src_moves:
+            raise ValueError("move_adfs did not record a MOVE action")
+        self._record_action_for_undo(src_key, src_moves[-1])
+
+        self._refresh_table()
+        self._show_detail(dst_entry)  # Show destination detail after move
+        self.state_changed.emit()
+        self.status_message.emit(f"Moved {len(selected)} ADF(s) from {src_key} to {dst_key}")
+
+    def _on_merge_release_into(self) -> None:
+        """Merge entire source release into destination release."""
+        if self._state.current_library is None or not self._state.selected_release_key:
+            return
+
+        src_entry = self._state.current_library.releases.get(self._state.selected_release_key)
+        if not src_entry:
+            return
+
+        # Build destination picker dialog
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Merge Release Into")
+        dialog.resize(500, 400)
+        layout = QVBoxLayout(dialog)
+
+        # Source info
+        layout.addWidget(QLabel(f"Source: {src_entry.title} ({src_entry.release_key})"))
+        layout.addWidget(QLabel(f"ADF files in source: {len(src_entry.adf_files)}"))
+        if src_entry.adf_files:
+            adf_list = QTextEdit()
+            adf_list.setReadOnly(True)
+            adf_list.setFontFamily("monospace")
+            for i, adf in enumerate(src_entry.adf_files):
+                adf_list.append(f"  {i+1}. {adf}")
+            adf_list.setMaximumHeight(150)
+            layout.addWidget(adf_list)
+
+        # Destination picker
+        layout.addWidget(QLabel("Destination Release:"))
+        dest_combo = QComboBox()
+        dest_combo.setEditable(True)
+        dest_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+
+        for entry in self._state.current_library.releases.values():
+            if entry.release_key != src_entry.release_key:
+                dest_combo.addItem(f"{entry.title} ({entry.release_key}) [{len(entry.adf_files)} ADFs] [{entry.curation_state.value}]", entry.release_key)
+
+        if dest_combo.count() == 0:
+            QMessageBox.information(self, "Merge Release", "No other releases available as destination.")
+            return
+
+        search_edit = QLineEdit()
+        search_edit.setPlaceholderText("Search destination by title, key, group...")
+        layout.addWidget(search_edit)
+
+        def filter_dest():
+            search_text = search_edit.text().lower()
+            for i in range(dest_combo.count()):
+                text = dest_combo.itemText(i).lower()
+                dest_combo.setItemHidden(i, search_text not in text)
+
+        search_edit.textChanged.connect(filter_dest)
+        layout.addWidget(dest_combo)
+
+        # Merge summary preview
+        layout.addWidget(QLabel("Merge Summary:"))
+        preview = QTextEdit()
+        preview.setReadOnly(True)
+        preview.setFontFamily("monospace")
+        preview.setMaximumHeight(150)
+        layout.addWidget(preview)
+
+        def update_preview():
+            idx = dest_combo.currentIndex()
+            if idx >= 0:
+                dst_key = dest_combo.itemData(idx)
+                dst_entry = self._state.current_library.releases.get(dst_key)
+                if dst_entry:
+                    text = f"Destination: {dst_entry.title} ({dst_entry.release_key})\n"
+                    text += f"Destination ADFs: {len(dst_entry.adf_files)}\n"
+                    text += f"Source ADFs: {len(src_entry.adf_files)}\n"
+                    text += f"Combined ADFs: {len(dst_entry.adf_files) + len(src_entry.adf_files)}\n\n"
+                    text += "Metadata promotion (destination wins, blank fields from source):\n"
+                    if not dst_entry.title and src_entry.title:
+                        text += f"  Title: '{src_entry.title}' (promoted from source)\n"
+                    if not dst_entry.edition and src_entry.edition:
+                        text += f"  Edition: '{src_entry.edition}' (promoted from source)\n"
+                    if not dst_entry.group and src_entry.group:
+                        text += f"  Group: '{src_entry.group}' (promoted from source)\n"
+                    if not dst_entry.chipset and src_entry.chipset:
+                        text += f"  Chipset: '{src_entry.chipset}' (promoted from source)\n"
+                    if not dst_entry.language and src_entry.language:
+                        text += f"  Language: '{src_entry.language}' (promoted from source)\n"
+                    if not dst_entry.version and src_entry.version:
+                        text += f"  Version: '{src_entry.version}' (promoted from source)\n"
+                    if not dst_entry.alt_marker and src_entry.alt_marker:
+                        text += f"  Alt Marker: '{src_entry.alt_marker}' (promoted from source)\n"
+                    if dst_entry.title and not src_entry.title:
+                        text += f"  Title: '{dst_entry.title}' (kept from destination)\n"
+                    preview.setText(text)
+
+        dest_combo.currentIndexChanged.connect(update_preview)
+        update_preview()
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        dst_key = dest_combo.currentData()
+        if not dst_key:
+            return
+
+        dst_entry = self._state.current_library.releases.get(dst_key)
+        if not dst_entry:
+            QMessageBox.critical(self, "Merge Release", "Destination release not found.")
+            return
+
+        try:
+            self._apply_merge_release(src_entry.release_key, dst_entry.release_key)
+        except ValueError as e:
+            QMessageBox.critical(self, "Merge Release Failed", str(e))
+
+    def _apply_merge_release(self, src_key: str, dst_key: str) -> None:
+        """Merge the entire source release into the destination release.
+
+        Delegates to the model (which records one MERGE entry per side with
+        the full undo payload) and records the source's logged MERGE entry
+        for undo exactly once. Raises ValueError on self-target, missing
+        releases, or destination duplicates.
+        """
+        if self._state.current_library is None:
+            raise ValueError("No staged library loaded")
+
+        src_entry = self._state.current_library.releases.get(src_key)
+        dst_entry = self._state.current_library.releases.get(dst_key)
+        if not src_entry:
+            raise ValueError(f"Source release not found: {src_key}")
+        if not dst_entry:
+            raise ValueError(f"Destination release not found: {dst_key}")
+        if src_key == dst_key:
+            raise ValueError("Source and destination release cannot be the same")
+
+        moved_count = len(src_entry.adf_files)
+        src_title = src_entry.title
+        dst_title = dst_entry.title
+
+        # merge_release moves all ADFs, promotes metadata, empties the source
+        # (NEEDS_REVIEW), and records the decision-log entries (one MERGE per
+        # side, with the full undo payload) on the model side.
+        self._state.current_library.merge_release(src_key, dst_key)
+
+        # Record the source's logged MERGE entry for undo exactly once. The
+        # model already appended it (with the full payload); do NOT append a
+        # duplicate entry — that was the duplicate-logging defect.
+        src_merges = [a for a in src_entry.actions if a.action == CurationAction.MERGE]
+        if not src_merges:
+            raise ValueError("merge_release did not record a MERGE action")
+        self._record_action_for_undo(src_key, src_merges[-1])
+
+        self._refresh_table()
+        self._show_detail(dst_entry)  # Show destination detail after merge
+        self.state_changed.emit()
+        self.status_message.emit(f"Merged release {src_key} into {dst_key} ({moved_count} ADFs)")
 
     def _update_summary(self) -> None:
         """Update the status label with summary counts."""

@@ -14,7 +14,7 @@ Key entry points:
 
 from __future__ import annotations
 
-__version__ = "0.2.8+gui"
+__version__ = "0.2.9+gui"
 
 from .layout import PortablePaths
 from .main_window import MainWindow
