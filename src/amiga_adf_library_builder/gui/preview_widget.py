@@ -1129,7 +1129,13 @@ class PreviewWidget(QWidget):
             if folder:
                 for idx in selected:
                     row = idx.row()
-                    release_key = self._state.row_to_release_key.get(row)
+                    release_key = None
+                    for col in range(self._table.columnCount()):
+                        item = self._table.item(row, col)
+                        if item is not None:
+                            release_key = item.data(Qt.ItemDataRole.UserRole)
+                            if release_key:
+                                break
                     if release_key:
                         entry = self._state.current_library.releases.get(release_key)
                         if entry:

@@ -416,3 +416,109 @@ class TestPreviewWidgetSelectionIdentity:
         for row in range(len(rows)):
             rk = _item_release_key_from_data(cells[(row, 0)][1])
             assert rk in known_keys
+
+    def test_multi_select_resolves_keys_after_sort(self):
+        """Simulate multi-select mutation handlers (_on_move_to_folder,
+        _on_create_folder_and_move, _on_set_selected_state) after a sort.
+        Every selected row must resolve to the correct release_key via UserRole
+        scan across columns, not stale row_to_release_key."""
+        rows = self._make_rows()
+        # cells indexed by (original_row, col) -> (display_text, user_role_data)
+        cells = {}
+        for row, (rk, title) in enumerate(rows):
+            cells[(row, 0)] = (rk, rk)
+            cells[(row, 1)] = (title, rk)
+            cells[(row, 2)] = (rk, rk)
+
+        # Simulate sort ascending by title: Alpha, Bard's Tale III, Delta, Hot Rod
+        # Original rows 0..3 become visual rows 0,1,3,2
+        # Visual row -> original row mapping
+        visual_to_original = {0: 0, 1: 1, 2: 3, 3: 2}
+
+        # Simulate multi-select on visual rows 1 and 2 (Bard's Tale III and Delta)
+        selected_visual_rows = [1, 2]
+        resolved_keys = []
+        for visual_row in selected_visual_rows:
+            original_row = visual_to_original[visual_row]
+            release_key = None
+            for col in range(3):
+                rk = _item_release_key_from_data(cells[(original_row, col)][1])
+                if rk:
+                    release_key = rk
+                    break
+            resolved_keys.append(release_key)
+
+        # Should resolve to r2 and r4 (the actual releases at those visual positions)
+        assert resolved_keys == ["r2", "r4"], f"Expected ['r2', 'r4'], got {resolved_keys}"
+
+    def test_multi_select_resolves_keys_after_filter(self):
+        """Simulate multi-select after filter hides some rows.
+        Selected visual rows must resolve to correct release_keys via UserRole."""
+        rows = self._make_rows()
+        cells = {}
+        for row, (rk, title) in enumerate(rows):
+            cells[(row, 0)] = (rk, rk)
+            cells[(row, 1)] = (title, rk)
+            cells[(row, 2)] = (rk, rk)
+
+        # Simulate filter showing only rows with "Alpha" and "Delta" (original 0 and 3)
+        # They appear at visual rows 0 and 1 after filtering
+        # Visual row -> original row mapping
+        visual_to_original = {0: 0, 1: 3}
+        filtered_visual_rows = [0, 1]
+        expected_keys = ["r1", "r4"]
+
+        resolved_keys = []
+        for visual_row in filtered_visual_rows:
+            original_row = visual_to_original[visual_row]
+            release_key = None
+            for col in range(3):
+                rk = _item_release_key_from_data(cells[(original_row, col)][1])
+                if rk:
+                    release_key = rk
+                    break
+            resolved_keys.append(release_key)
+
+        assert resolved_keys == expected_keys, f"Expected {expected_keys}, got {resolved_keys}"
+
+    def test_multi_select_resolves_keys_after_resort(self):
+        """Simulate sort up then back down: multi-select resolves correctly
+        through round-trip via UserRole scan."""
+        rows = self._make_rows()
+        cells = {}
+        for row, (rk, title) in enumerate(rows):
+            cells[(row, 0)] = (rk, rk)
+            cells[(row, 1)] = (title, rk)
+            cells[(row, 2)] = (rk, rk)
+
+        # Sort ascending: visual -> original
+        visual_to_original_up = {0: 0, 1: 1, 2: 3, 3: 2}
+        # Select visual rows 1 and 2 (Bard's Tale III, Delta)
+        selected_up = [1, 2]
+        resolved_up = []
+        for vr in selected_up:
+            orig = visual_to_original_up[vr]
+            rk = None
+            for col in range(3):
+                val = _item_release_key_from_data(cells[(orig, col)][1])
+                if val:
+                    rk = val
+                    break
+            resolved_up.append(rk)
+        assert resolved_up == ["r2", "r4"]
+
+        # Sort descending back to original: visual == original
+        visual_to_original_down = {0: 0, 1: 1, 2: 2, 3: 3}
+        # Same visual row indices 1 and 2 now map to original rows 1 and 2
+        selected_down = [1, 2]
+        resolved_down = []
+        for vr in selected_down:
+            orig = visual_to_original_down[vr]
+            rk = None
+            for col in range(3):
+                val = _item_release_key_from_data(cells[(orig, col)][1])
+                if val:
+                    rk = val
+                    break
+            resolved_down.append(rk)
+        assert resolved_down == ["r2", "r3"]
