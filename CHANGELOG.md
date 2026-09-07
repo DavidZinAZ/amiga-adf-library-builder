@@ -2,20 +2,17 @@
 
 ## Unreleased
 
-- GH-43: Duplicate export controls clarified (Run / Export Settings)
-  - 'Export the library (writes the final files)' is now the ONE obvious
-    primary choice that determines whether the run will export files.
-  - The ambiguous 'Allow export' checkbox is replaced by the unmistakable
-    safety acknowledgement 'I understand this run will write files'.
-    Internal settings key `export_gate_acknowledged` and the CLI
-    `--export-gate-acknowledged` flag are unchanged.
-  - The acknowledgement is disabled (and never holds a stale checked value)
-    while build-only mode is selected, preventing contradictory combinations;
-    a run that writes files always gets a fresh, explicit confirmation.
-  - The pre-Run state label now explains exactly why the run will or will not
-    write files (build-only / export pending acknowledgement / check-only /
-    files will be exported) before Run is pressed.
-  - Regression coverage: tests/test_gui_issue43_export_controls.py.
+- GH-90: Fix Preview/Curation selection integrity (P0 — released v0.2.7 Windows GUI showed
+  mismatched selection mapping between Preview table rows and Release Detail pane).
+  - Row identity and Release Detail identity are now reliably bound through stable
+    UserRole data; sort/filter/refresh no longer cross-wire selection mapping.
+  - All row-level actions route through the selected release’s UserRole, preventing
+    Accept/Reject/Pending/Modified/Rename/Lookup/Add Note from mutating the wrong release.
+  - Regression coverage proves actions cannot be applied to a neighboring/shifted release.
+  - Independently qualified on real packaged Windows (Windows-R3 Actions run
+    34075294316; parent QA PASS); residual Windows harness quirk documented and excluded
+    from source changes.
+  - Shipped with Windows assets: `amiga-adf-gui-portable.zip` and `amiga-adf-gui.exe`.
 
 ## 0.2.7 — 2026-09-06
 

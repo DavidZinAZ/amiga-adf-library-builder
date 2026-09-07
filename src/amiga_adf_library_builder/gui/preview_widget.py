@@ -237,7 +237,7 @@ class PreviewWidget(QWidget):
         self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self._table.setSelectionMode(QAbstractItemView.SingleSelection)
-        self._table.setSortingEnabled(True)
+        self._table.setSortingEnabled(False)
         self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._table.customContextMenuRequested.connect(self._show_context_menu)
         self._table.selectionModel().selectionChanged.connect(self._on_selection_changed)
@@ -480,7 +480,8 @@ class PreviewWidget(QWidget):
 
             # State column with color coding
             state_item = QTableWidgetItem(entry.curation_state.value)
-            state_item.setData(Qt.ItemDataRole.UserRole, entry.curation_state.value)
+            state_item.setData(Qt.ItemDataRole.UserRole, entry.release_key)
+            state_item.setData(Qt.ItemDataRole.UserRole + 1, entry.curation_state.value)
             # Color by state
             if entry.curation_state == StagedState.ACCEPTED:
                 state_item.setBackground(Qt.GlobalColor.green)
@@ -496,8 +497,13 @@ class PreviewWidget(QWidget):
                 state_item.setForeground(Qt.GlobalColor.black)
             self._table.setItem(row, 0, state_item)
 
-            self._table.setItem(row, 1, QTableWidgetItem(entry.release_key))
-            self._table.setItem(row, 2, QTableWidgetItem(entry.title))
+            key_item = QTableWidgetItem(entry.release_key)
+            key_item.setData(Qt.ItemDataRole.UserRole, entry.release_key)
+            self._table.setItem(row, 1, key_item)
+
+            title_item = QTableWidgetItem(entry.title)
+            title_item.setData(Qt.ItemDataRole.UserRole, entry.release_key)
+            self._table.setItem(row, 2, title_item)
             self._table.setItem(row, 3, QTableWidgetItem(entry.edition or ""))
             self._table.setItem(row, 4, QTableWidgetItem(entry.group or ""))
             self._table.setItem(row, 5, QTableWidgetItem(f"{entry.confidence:.2f}" if entry.confidence > 0 else ""))
@@ -552,7 +558,15 @@ class PreviewWidget(QWidget):
 
         if has_selection:
             row = selected[0].row()
-            release_key = self._state.row_to_release_key.get(row)
+            # Resolve release_key from item UserRole data (stable identity)
+            # rather than row_to_release_key[row] which breaks after sorting.
+            release_key = None
+            for col in range(self._table.columnCount()):
+                item = self._table.item(row, col)
+                if item is not None:
+                    release_key = item.data(Qt.ItemDataRole.UserRole)
+                    if release_key:
+                        break
             if release_key and self._state.current_library:
                 entry = self._state.current_library.releases.get(release_key)
                 if entry:
@@ -758,7 +772,14 @@ class PreviewWidget(QWidget):
         selected = self._table.selectionModel().selectedRows()
         for idx in selected:
             row = idx.row()
-            release_key = self._state.row_to_release_key.get(row)
+            # Resolve release_key from item UserRole data (stable identity)
+            release_key = None
+            for col in range(self._table.columnCount()):
+                item = self._table.item(row, col)
+                if item is not None:
+                    release_key = item.data(Qt.ItemDataRole.UserRole)
+                    if release_key:
+                        break
             if release_key:
                 entry = self._state.current_library.releases.get(release_key)
                 if entry:
@@ -1046,7 +1067,14 @@ class PreviewWidget(QWidget):
 
         for idx in selected:
             row = idx.row()
-            release_key = self._state.row_to_release_key.get(row)
+            # Resolve release_key from item UserRole data (stable identity)
+            release_key = None
+            for col in range(self._table.columnCount()):
+                item = self._table.item(row, col)
+                if item is not None:
+                    release_key = item.data(Qt.ItemDataRole.UserRole)
+                    if release_key:
+                        break
             if release_key:
                 entry = self._state.current_library.releases.get(release_key)
                 if entry:
@@ -1101,7 +1129,13 @@ class PreviewWidget(QWidget):
             if folder:
                 for idx in selected:
                     row = idx.row()
-                    release_key = self._state.row_to_release_key.get(row)
+                    release_key = None
+                    for col in range(self._table.columnCount()):
+                        item = self._table.item(row, col)
+                        if item is not None:
+                            release_key = item.data(Qt.ItemDataRole.UserRole)
+                            if release_key:
+                                break
                     if release_key:
                         entry = self._state.current_library.releases.get(release_key)
                         if entry:
