@@ -42,6 +42,7 @@ class TestCurationAction:
         assert CurationAction.BULK_EDIT.value == "bulk_edit"
         assert CurationAction.RENAME.value == "rename"
         assert CurationAction.MOVE.value == "move"
+        assert CurationAction.MERGE.value == "merge"
         assert CurationAction.ACCEPT_MATCH.value == "accept_match"
         assert CurationAction.REJECT_MATCH.value == "reject_match"
         assert CurationAction.ACCEPT_METADATA_ONLY.value == "accept_metadata_only"
@@ -51,7 +52,7 @@ class TestCurationAction:
 
     def test_all_actions(self):
         actions = list(CurationAction)
-        assert len(actions) == 13
+        assert len(actions) == 14
 
 
 class TestStagedChange:

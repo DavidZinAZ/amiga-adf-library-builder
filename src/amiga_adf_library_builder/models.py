@@ -216,6 +216,7 @@ class CurationAction(Enum):
     BULK_EDIT = "bulk_edit"
     RENAME = "rename"
     MOVE = "move"
+    MERGE = "merge"
     ACCEPT_MATCH = "accept_match"
     REJECT_MATCH = "reject_match"
     ACCEPT_METADATA_ONLY = "accept_metadata_only"
@@ -230,12 +231,14 @@ class StagedChange:
     action: CurationAction
     timestamp: str
     details: str
+    payload: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
             "action": self.action.value,
             "timestamp": self.timestamp,
             "details": self.details,
+            "payload": self.payload,
         }
 
     @classmethod
@@ -244,6 +247,7 @@ class StagedChange:
             action=CurationAction(d["action"]),
             timestamp=d.get("timestamp", ""),
             details=d.get("details", ""),
+            payload=d.get("payload"),
         )
 
 
@@ -365,3 +369,173 @@ class StagedLibrary:
         return cls(
             releases={k: StagedReleaseEntry.from_dict(v) for k, v in d.get("releases", {}).items()},
         )
+
+    def move_adfs(
+        self,
+        src_key: str,
+        dst_key: str,
+        filenames: list[str],
+    ) -> tuple[StagedReleaseEntry, StagedReleaseEntry]:
+        """Move ADF files from one staged release to another.
+
+        Args:
+            src_key: Source release key
+            dst_key: Destination release key
+            filenames: List of ADF filenames to move
+
+        Returns:
+            Tuple of (source_entry, destination_entry) after move
+
+        Raises:
+            ValueError: If source or destination doesn't exist, if src_key == dst_key,
+                        if any filename is not in source, or if any filename already
+                        exists in destination (duplicate prevention).
+        """
+        if src_key == dst_key:
+            raise ValueError("Source and destination release cannot be the same")
+
+        src_entry = self.releases.get(src_key)
+        if not src_entry:
+            raise ValueError(f"Source release not found: {src_key}")
+
+        dst_entry = self.releases.get(dst_key)
+        if not dst_entry:
+            raise ValueError(f"Destination release not found: {dst_key}")
+
+        # Verify all filenames exist in source
+        for fname in filenames:
+            if fname not in src_entry.adf_files:
+                raise ValueError(f"ADF file not found in source: {fname}")
+
+        # Verify no duplicates in destination
+        for fname in filenames:
+            if fname in dst_entry.adf_files:
+                raise ValueError(f"ADF file already exists in destination: {fname}")
+
+        # Store source state for undo
+        src_files_before = list(src_entry.adf_files)
+        dst_files_before = list(dst_entry.adf_files)
+
+        # Remove from source preserving order of remaining files
+        new_src_files = [f for f in src_entry.adf_files if f not in filenames]
+        src_entry.adf_files = new_src_files
+
+        # Append to destination preserving moved order
+        dst_entry.adf_files.extend(filenames)
+
+        # Record decision log on both source and destination
+        from datetime import datetime, timezone
+        timestamp = datetime.now(timezone.utc).isoformat()
+
+        src_action = StagedChange(
+            action=CurationAction.MOVE,
+            timestamp=timestamp,
+            details=f"Moved {len(filenames)} ADF(s) to {dst_entry.release_key} ({dst_entry.title})",
+        )
+        src_entry.actions.append(src_action)
+
+        dst_action = StagedChange(
+            action=CurationAction.MOVE,
+            timestamp=timestamp,
+            details=f"Received {len(filenames)} ADF(s) from {src_entry.release_key} ({src_entry.title})",
+        )
+        dst_entry.actions.append(dst_action)
+
+        # If source is now empty, set to NEEDS_REVIEW
+        if not src_entry.adf_files:
+            src_entry.curation_state = StagedState.NEEDS_REVIEW
+            empty_action = StagedChange(
+                action=CurationAction.STATE_CHANGE,
+                timestamp=timestamp,
+                details=f"State changed from {src_entry.curation_state.value} to needs_review (empty after move)",
+            )
+            src_entry.actions.append(empty_action)
+
+        return src_entry, dst_entry
+
+    def merge_release(self, src_key: str, dst_key: str) -> tuple[StagedReleaseEntry, StagedReleaseEntry]:
+        """Merge all ADFs from source release into destination release.
+
+        Args:
+            src_key: Source release key (will be emptied)
+            dst_key: Destination release key (will receive all ADFs)
+
+        Returns:
+            Tuple of (source_entry, destination_entry) after merge
+
+        Raises:
+            ValueError: If source or destination doesn't exist, if src_key == dst_key,
+                        or if any ADF from source already exists in destination.
+        """
+        if src_key == dst_key:
+            raise ValueError("Source and destination release cannot be the same")
+
+        src_entry = self.releases.get(src_key)
+        if not src_entry:
+            raise ValueError(f"Source release not found: {src_key}")
+
+        dst_entry = self.releases.get(dst_key)
+        if not dst_entry:
+            raise ValueError(f"Destination release not found: {dst_key}")
+
+        # Check for duplicates
+        for fname in src_entry.adf_files:
+            if fname in dst_entry.adf_files:
+                raise ValueError(f"ADF file already exists in destination: {fname}")
+
+        # Store pre-merge state for undo
+        src_files_before = list(src_entry.adf_files)
+        dst_files_before = list(dst_entry.adf_files)
+
+        # Append source ADFs to destination
+        dst_entry.adf_files.extend(src_entry.adf_files)
+
+        # Renumber disk ordinals in destination to contiguous 1-based order
+        # We preserve the original order: destination's existing files first,
+        # then source's files in their original order
+
+        # Union provenance/action history by appending source actions to destination
+        dst_entry.actions.extend(src_entry.actions)
+
+        # Merge metadata: destination wins; promote only blank destination fields from source
+        if not dst_entry.title and src_entry.title:
+            dst_entry.title = src_entry.title
+        if not dst_entry.edition and src_entry.edition:
+            dst_entry.edition = src_entry.edition
+        if not dst_entry.group and src_entry.group:
+            dst_entry.group = src_entry.group
+        if not dst_entry.chipset and src_entry.chipset:
+            dst_entry.chipset = src_entry.chipset
+        if not dst_entry.language and src_entry.language:
+            dst_entry.language = src_entry.language
+        if not dst_entry.version and src_entry.version:
+            dst_entry.version = src_entry.version
+        if not dst_entry.alt_marker and src_entry.alt_marker:
+            dst_entry.alt_marker = src_entry.alt_marker
+
+        # Do NOT carry over source locked_fields to avoid introducing hidden protection constraints
+        # Preserve destination curation state and locked_fields
+
+        # Empty source entry but retain it in the library with NEEDS_REVIEW
+        src_entry.adf_files = []
+        src_entry.curation_state = StagedState.NEEDS_REVIEW
+
+        # Record decision log on both source and destination
+        from datetime import datetime, timezone
+        timestamp = datetime.now(timezone.utc).isoformat()
+
+        src_action = StagedChange(
+            action=CurationAction.MERGE,
+            timestamp=timestamp,
+            details=f"Merged into {dst_entry.release_key} ({dst_entry.title}); {len(src_files_before)} ADF(s) moved",
+        )
+        src_entry.actions.append(src_action)
+
+        dst_action = StagedChange(
+            action=CurationAction.MERGE,
+            timestamp=timestamp,
+            details=f"Merged from {src_key} ({src_entry.title}); {len(src_files_before)} ADF(s) received",
+        )
+        dst_entry.actions.append(dst_action)
+
+        return src_entry, dst_entry

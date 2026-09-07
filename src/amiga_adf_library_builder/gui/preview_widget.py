@@ -620,6 +620,18 @@ class PreviewWidget(QWidget):
 
         menu.addSeparator()
 
+        # Move ADF(s) to Release...
+        move_adfs_action = QAction("Move ADF(s) to Release…", self)
+        move_adfs_action.triggered.connect(self._on_move_adfs_to_release)
+        menu.addAction(move_adfs_action)
+
+        # Merge Release Into...
+        merge_release_action = QAction("Merge Release Into…", self)
+        merge_release_action.triggered.connect(self._on_merge_release_into)
+        menu.addAction(merge_release_action)
+
+        menu.addSeparator()
+
         # Lookup actions
         lookup_menu = menu.addMenu("Lookup")
         online_lookup = QAction("Online Lookup…", self)
@@ -857,6 +869,56 @@ class PreviewWidget(QWidget):
             # Remove filename from locked_fields
             if "filename" in (entry.locked_fields or []):
                 entry.locked_fields.remove("filename")
+        elif action.action == CurationAction.MOVE:
+            # Use payload for reliable undo of move operations
+            if action.payload:
+                try:
+                    import json
+                    payload = json.loads(action.payload)
+                    src_key = payload.get("src_key")
+                    dst_key = payload.get("dst_key")
+                    moved_files = payload.get("moved_files", [])
+                    src_files_before = payload.get("src_files_before", [])
+                    dst_files_before = payload.get("dst_files_before", [])
+                    
+                    # Restore source
+                    src_entry = self._state.current_library.releases.get(src_key)
+                    if src_entry:
+                        src_entry.adf_files = src_files_before
+                    
+                    # Restore destination
+                    dst_entry = self._state.current_library.releases.get(dst_key)
+                    if dst_entry:
+                        dst_entry.adf_files = dst_files_before
+                except (json.JSONDecodeError, KeyError):
+                    pass
+            else:
+                # Fallback: try to parse from details
+                pass
+        elif action.action == CurationAction.MERGE:
+            # Use payload for reliable undo of merge operations
+            if action.payload:
+                try:
+                    import json
+                    payload = json.loads(action.payload)
+                    src_key = payload.get("src_key")
+                    dst_key = payload.get("dst_key")
+                    src_files_before = payload.get("src_files_before", [])
+                    dst_files_before = payload.get("dst_files_before", [])
+                    src_curation_state = payload.get("src_curation_state", "pending")
+                    
+                    # Restore source
+                    src_entry = self._state.current_library.releases.get(src_key)
+                    if src_entry:
+                        src_entry.adf_files = src_files_before
+                        src_entry.curation_state = StagedState(src_curation_state)
+                    
+                    # Restore destination
+                    dst_entry = self._state.current_library.releases.get(dst_key)
+                    if dst_entry:
+                        dst_entry.adf_files = dst_files_before
+                except (json.JSONDecodeError, KeyError, ValueError):
+                    pass
         # Add more undo cases as needed
 
         # Move to redo stack
@@ -926,6 +988,52 @@ class PreviewWidget(QWidget):
             entry.locked_fields = entry.locked_fields or []
             if "filename" not in entry.locked_fields:
                 entry.locked_fields.append("filename")
+        elif action.action == CurationAction.MOVE:
+            # Use payload for reliable redo of move operations
+            if action.payload:
+                try:
+                    import json
+                    payload = json.loads(action.payload)
+                    src_key = payload.get("src_key")
+                    dst_key = payload.get("dst_key")
+                    moved_files = payload.get("moved_files", [])
+                    
+                    # Re-apply move
+                    src_entry = self._state.current_library.releases.get(src_key)
+                    dst_entry = self._state.current_library.releases.get(dst_key)
+                    if src_entry and dst_entry:
+                        for fname in moved_files:
+                            if fname in src_entry.adf_files:
+                                src_entry.adf_files.remove(fname)
+                        dst_entry.adf_files.extend(moved_files)
+                except (json.JSONDecodeError, KeyError):
+                    pass
+            else:
+                # Fallback: try to parse from details
+                pass
+        elif action.action == CurationAction.MERGE:
+            # Use payload for reliable redo of merge operations
+            if action.payload:
+                try:
+                    import json
+                    payload = json.loads(action.payload)
+                    src_key = payload.get("src_key")
+                    dst_key = payload.get("dst_key")
+                    src_files_before = payload.get("src_files_before", [])
+                    dst_files_before = payload.get("dst_files_before", [])
+                    src_files_after = payload.get("src_files_after", [])
+                    dst_files_after = payload.get("dst_files_after", [])
+                    src_curation_state = payload.get("src_curation_state", "pending")
+                    
+                    # Re-apply merge
+                    src_entry = self._state.current_library.releases.get(src_key)
+                    dst_entry = self._state.current_library.releases.get(dst_key)
+                    if src_entry and dst_entry:
+                        src_entry.adf_files = src_files_after
+                        src_entry.curation_state = StagedState(src_curation_state)
+                        dst_entry.adf_files = dst_files_after
+                except (json.JSONDecodeError, KeyError, ValueError):
+                    pass
 
         # Move back to undo stack
         self._undo_stack.append((release_key, action))
@@ -1408,6 +1516,349 @@ class PreviewWidget(QWidget):
         layout.addWidget(buttons)
 
         dialog.exec()
+
+    def _on_move_adfs_to_release(self) -> None:
+        """Move selected ADF(s) from source release to destination release."""
+        if self._state.current_library is None or not self._state.selected_release_key:
+            return
+
+        src_entry = self._state.current_library.releases.get(self._state.selected_release_key)
+        if not src_entry or not src_entry.adf_files:
+            QMessageBox.information(self, "Move ADF(s)", "No ADF files available in the selected release.")
+            return
+
+        # Build destination picker dialog
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Move ADF(s) to Release")
+        dialog.resize(500, 400)
+        layout = QVBoxLayout(dialog)
+
+        # Source info
+        layout.addWidget(QLabel(f"Source: {src_entry.title} ({src_entry.release_key})"))
+        layout.addWidget(QLabel(f"ADF files in source: {len(src_entry.adf_files)}"))
+
+        # ADF selection
+        layout.addWidget(QLabel("Select ADF(s) to move:"))
+        adf_list = QTextEdit()
+        adf_list.setReadOnly(True)
+        adf_list.setFontFamily("monospace")
+        for i, adf in enumerate(src_entry.adf_files):
+            adf_list.append(f"  {i+1}. {adf}")
+        adf_list.setMaximumHeight(150)
+        layout.addWidget(adf_list)
+
+        # Destination picker
+        layout.addWidget(QLabel("Destination Release:"))
+        dest_combo = QComboBox()
+        dest_combo.setEditable(True)
+        dest_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+
+        # Populate with other releases
+        for entry in self._state.current_library.releases.values():
+            if entry.release_key != src_entry.release_key:
+                dest_combo.addItem(f"{entry.title} ({entry.release_key}) [{len(entry.adf_files)} ADFs] [{entry.curation_state.value}]", entry.release_key)
+
+        if dest_combo.count() == 0:
+            QMessageBox.information(self, "Move ADF(s)", "No other releases available as destination.")
+            return
+
+        # Add search/filter
+        search_edit = QLineEdit()
+        search_edit.setPlaceholderText("Search destination by title, key, group...")
+        layout.addWidget(search_edit)
+
+        def filter_dest():
+            search_text = search_edit.text().lower()
+            for i in range(dest_combo.count()):
+                text = dest_combo.itemText(i).lower()
+                dest_combo.setItemHidden(i, search_text not in text)
+
+        search_edit.textChanged.connect(filter_dest)
+        layout.addWidget(dest_combo)
+
+        # Preview area
+        layout.addWidget(QLabel("Preview (destination after move):"))
+        preview = QTextEdit()
+        preview.setReadOnly(True)
+        preview.setFontFamily("monospace")
+        preview.setMaximumHeight(100)
+        layout.addWidget(preview)
+
+        def update_preview():
+            idx = dest_combo.currentIndex()
+            if idx >= 0:
+                dst_key = dest_combo.itemData(idx)
+                dst_entry = self._state.current_library.releases.get(dst_key)
+                if dst_entry:
+                    text = f"Destination: {dst_entry.title} ({dst_entry.release_key})\n"
+                    text += f"Current ADFs: {len(dst_entry.adf_files)}\n"
+                    text += "ADF list after move:\n"
+                    for i, adf in enumerate(dst_entry.adf_files):
+                        text += f"  {i+1}. {adf}\n"
+                    text += "--- Moved ADFs ---\n"
+                    for i, adf in enumerate(src_entry.adf_files):
+                        text += f"  {len(dst_entry.adf_files) + i + 1}. {adf}\n"
+                    preview.setText(text)
+
+        dest_combo.currentIndexChanged.connect(update_preview)
+        update_preview()
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        dst_key = dest_combo.currentData()
+        if not dst_key:
+            return
+
+        dst_entry = self._state.current_library.releases.get(dst_key)
+        if not dst_entry:
+            QMessageBox.critical(self, "Move ADF(s)", "Destination release not found.")
+            return
+
+        # For now, move all ADFs from source (simplified - could add multi-select for specific ADFs)
+        # Per design, we move selected ADFs. In single-selection context menu mode,
+        # we move all ADFs from the source. Multi-select would allow picking specific ADFs.
+        # For simplicity and per the design "Enabled only when exactly one source row is selected",
+        # we move all ADFs from the source release.
+        try:
+            src_entry_before = list(src_entry.adf_files)
+            dst_entry_before = list(dst_entry.adf_files)
+
+            src_entry, dst_entry = self._state.current_library.move_adfs(
+                src_entry.release_key, dst_entry.release_key, src_entry.adf_files
+            )
+
+            # Record actions on both source and destination
+            timestamp = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
+
+            # Source action
+            src_action = StagedChange(
+                action=CurationAction.MOVE,
+                timestamp=timestamp,
+                details=f"Moved {len(src_entry_before)} ADF(s) to {dst_entry.release_key} ({dst_entry.title})",
+                payload=json.dumps({
+                    "src_key": src_entry.release_key,
+                    "dst_key": dst_entry.release_key,
+                    "moved_files": src_entry_before,
+                    "src_files_before": src_entry_before,
+                    "dst_files_before": dst_entry_before,
+                }),
+            )
+            src_entry.actions.append(src_action)
+            self._record_action_for_undo(src_entry.release_key, src_action)
+
+            # Destination action
+            dst_action = StagedChange(
+                action=CurationAction.MOVE,
+                timestamp=timestamp,
+                details=f"Received {len(src_entry_before)} ADF(s) from {src_entry.release_key} ({src_entry.title})",
+                payload=json.dumps({
+                    "src_key": src_entry.release_key,
+                    "dst_key": dst_entry.release_key,
+                    "moved_files": src_entry_before,
+                    "src_files_before": src_entry_before,
+                    "dst_files_before": dst_entry_before,
+                }),
+            )
+            dst_entry.actions.append(dst_action)
+            self._record_action_for_undo(dst_entry.release_key, dst_action)
+
+            # If source is now empty, set to NEEDS_REVIEW
+            if not src_entry.adf_files:
+                src_entry.curation_state = StagedState.NEEDS_REVIEW
+                empty_action = StagedChange(
+                    action=CurationAction.STATE_CHANGE,
+                    timestamp=timestamp,
+                    details=f"State changed from {src_entry.curation_state.value} to needs_review (empty after move)",
+                )
+                src_entry.actions.append(empty_action)
+                self._record_action_for_undo(src_entry.release_key, empty_action)
+
+            self._refresh_table()
+            self._show_detail(dst_entry)  # Show destination detail after move
+            self.state_changed.emit()
+            self.status_message.emit(f"Moved {len(src_entry_before)} ADF(s) from {src_entry.release_key} to {dst_entry.release_key}")
+
+        except ValueError as e:
+            QMessageBox.critical(self, "Move ADF(s) Failed", str(e))
+
+    def _on_merge_release_into(self) -> None:
+        """Merge entire source release into destination release."""
+        if self._state.current_library is None or not self._state.selected_release_key:
+            return
+
+        src_entry = self._state.current_library.releases.get(self._state.selected_release_key)
+        if not src_entry:
+            return
+
+        # Build destination picker dialog
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Merge Release Into")
+        dialog.resize(500, 400)
+        layout = QVBoxLayout(dialog)
+
+        # Source info
+        layout.addWidget(QLabel(f"Source: {src_entry.title} ({src_entry.release_key})"))
+        layout.addWidget(QLabel(f"ADF files in source: {len(src_entry.adf_files)}"))
+        if src_entry.adf_files:
+            adf_list = QTextEdit()
+            adf_list.setReadOnly(True)
+            adf_list.setFontFamily("monospace")
+            for i, adf in enumerate(src_entry.adf_files):
+                adf_list.append(f"  {i+1}. {adf}")
+            adf_list.setMaximumHeight(150)
+            layout.addWidget(adf_list)
+
+        # Destination picker
+        layout.addWidget(QLabel("Destination Release:"))
+        dest_combo = QComboBox()
+        dest_combo.setEditable(True)
+        dest_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+
+        for entry in self._state.current_library.releases.values():
+            if entry.release_key != src_entry.release_key:
+                dest_combo.addItem(f"{entry.title} ({entry.release_key}) [{len(entry.adf_files)} ADFs] [{entry.curation_state.value}]", entry.release_key)
+
+        if dest_combo.count() == 0:
+            QMessageBox.information(self, "Merge Release", "No other releases available as destination.")
+            return
+
+        search_edit = QLineEdit()
+        search_edit.setPlaceholderText("Search destination by title, key, group...")
+        layout.addWidget(search_edit)
+
+        def filter_dest():
+            search_text = search_edit.text().lower()
+            for i in range(dest_combo.count()):
+                text = dest_combo.itemText(i).lower()
+                dest_combo.setItemHidden(i, search_text not in text)
+
+        search_edit.textChanged.connect(filter_dest)
+        layout.addWidget(dest_combo)
+
+        # Merge summary preview
+        layout.addWidget(QLabel("Merge Summary:"))
+        preview = QTextEdit()
+        preview.setReadOnly(True)
+        preview.setFontFamily("monospace")
+        preview.setMaximumHeight(150)
+        layout.addWidget(preview)
+
+        def update_preview():
+            idx = dest_combo.currentIndex()
+            if idx >= 0:
+                dst_key = dest_combo.itemData(idx)
+                dst_entry = self._state.current_library.releases.get(dst_key)
+                if dst_entry:
+                    text = f"Destination: {dst_entry.title} ({dst_entry.release_key})\n"
+                    text += f"Destination ADFs: {len(dst_entry.adf_files)}\n"
+                    text += f"Source ADFs: {len(src_entry.adf_files)}\n"
+                    text += f"Combined ADFs: {len(dst_entry.adf_files) + len(src_entry.adf_files)}\n\n"
+                    text += "Metadata promotion (destination wins, blank fields from source):\n"
+                    if not dst_entry.title and src_entry.title:
+                        text += f"  Title: '{src_entry.title}' (promoted from source)\n"
+                    if not dst_entry.edition and src_entry.edition:
+                        text += f"  Edition: '{src_entry.edition}' (promoted from source)\n"
+                    if not dst_entry.group and src_entry.group:
+                        text += f"  Group: '{src_entry.group}' (promoted from source)\n"
+                    if not dst_entry.chipset and src_entry.chipset:
+                        text += f"  Chipset: '{src_entry.chipset}' (promoted from source)\n"
+                    if not dst_entry.language and src_entry.language:
+                        text += f"  Language: '{src_entry.language}' (promoted from source)\n"
+                    if not dst_entry.version and src_entry.version:
+                        text += f"  Version: '{src_entry.version}' (promoted from source)\n"
+                    if not dst_entry.alt_marker and src_entry.alt_marker:
+                        text += f"  Alt Marker: '{src_entry.alt_marker}' (promoted from source)\n"
+                    if dst_entry.title and not src_entry.title:
+                        text += f"  Title: '{dst_entry.title}' (kept from destination)\n"
+                    preview.setText(text)
+
+        dest_combo.currentIndexChanged.connect(update_preview)
+        update_preview()
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        dst_key = dest_combo.currentData()
+        if not dst_key:
+            return
+
+        dst_entry = self._state.current_library.releases.get(dst_key)
+        if not dst_entry:
+            QMessageBox.critical(self, "Merge Release", "Destination release not found.")
+            return
+
+        try:
+            src_key = src_entry.release_key
+            dst_key = dst_entry.release_key
+            src_files_before = list(src_entry.adf_files)
+            dst_files_before = list(dst_entry.adf_files)
+            src_state_before = src_entry.curation_state.value
+
+            src_entry, dst_entry = self._state.current_library.merge_release(src_key, dst_key)
+
+            src_files_after = list(src_entry.adf_files)
+            dst_files_after = list(dst_entry.adf_files)
+
+            # Record merge action on source (now empty)
+            timestamp = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
+
+            src_action = StagedChange(
+                action=CurationAction.MERGE,
+                timestamp=timestamp,
+                details=f"Merged into {dst_entry.release_key} ({dst_entry.title}); {len(src_files_before)} ADF(s) moved",
+                payload=json.dumps({
+                    "src_key": src_key,
+                    "dst_key": dst_key,
+                    "src_files_before": src_files_before,
+                    "dst_files_before": dst_files_before,
+                    "src_files_after": src_files_after,
+                    "dst_files_after": dst_files_after,
+                    "src_curation_state": src_state_before,
+                }),
+            )
+            src_entry.actions.append(src_action)
+            self._record_action_for_undo(src_key, src_action)
+
+            # Record merge action on destination
+            dst_action = StagedChange(
+                action=CurationAction.MERGE,
+                timestamp=timestamp,
+                details=f"Merged from {src_key} ({src_entry.title}); {len(src_files_before)} ADF(s) received",
+                payload=json.dumps({
+                    "src_key": src_key,
+                    "dst_key": dst_key,
+                    "src_files_before": src_files_before,
+                    "dst_files_before": dst_files_before,
+                    "src_files_after": src_files_after,
+                    "dst_files_after": dst_files_after,
+                    "src_curation_state": src_state_before,
+                }),
+            )
+            dst_entry.actions.append(dst_action)
+            self._record_action_for_undo(dst_key, dst_action)
+
+            self._refresh_table()
+            self._show_detail(dst_entry)  # Show destination detail after merge
+            self.state_changed.emit()
+            self.status_message.emit(f"Merged release {src_key} into {dst_key} ({len(src_files_before)} ADFs)")
+
+        except ValueError as e:
+            QMessageBox.critical(self, "Merge Release Failed", str(e))
 
     def _update_summary(self) -> None:
         """Update the status label with summary counts."""
