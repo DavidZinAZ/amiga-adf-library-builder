@@ -535,6 +535,219 @@ def main() -> int:
         REPORT["errors"].append(repr(exc))
 
     # ------------------------------------------------------------------ #
+    # 4) (GH-90) Selection-integrity qualification on Windows.
+    # ------------------------------------------------------------------ #
+    gh90_report = {
+        "multi_release_rows": 0,
+        "selected_rows_identity_match": False,
+        "selected_rows_titles": [],
+        "filter_refresh_identity_match": False,
+        "order_identity_match": False,
+        "staged_mutation_only_selected": False,
+        "staged_mutation_target_count": 0,
+        "source_fixtures_unchanged": False,
+        "preview_export_files_after_mutation": [],
+        "errors": [],
+    }
+
+    def _gh90_step(name, ok, detail=""):
+        REPORT["steps"].append({"step": name, "ok": ok, "detail": detail})
+        print(f"[{'PASS' if ok else 'FAIL'}] {name}: {detail}")
+
+    try:
+        from PySide6.QtWidgets import QApplication
+        from PySide6.QtCore import Qt
+
+        from amiga_adf_library_builder.gui import PortablePaths
+        from amiga_adf_library_builder.gui.main_window import GuiState
+        from amiga_adf_library_builder.gui.state import (
+            build_path_config_from_gui_state,
+            build_pipeline_kwargs,
+        )
+        from amiga_adf_library_builder.initializer import ensure_managed_directories
+        from amiga_adf_library_builder.pipeline import run_pipeline, build_staged_library_from_result
+        from amiga_adf_library_builder.gui.preview_widget import PreviewWidget
+
+        # 4a) Build a populated synthetic library with distinct releases.
+        gh90_root = base_dir / "gh90-original"
+        gh90_root.mkdir(parents=True, exist_ok=True)
+        fixtures = {
+            "Gh90 - Alpha Quest (Disk 1 of 2).adf": "alpha",
+            "Gh90 - Alpha Quest (Disk 2 of 2).adf": "alpha",
+            "Gh90 - Beta Quest (Disk 1).adf": "beta",
+            "Gh90 - Gamma Force.adf": "gamma",
+            "Gh90 - Delta Race.adf": "delta",
+        }
+        before_hashes = {}
+        for name in fixtures:
+            path = gh90_root / name
+            path.write_bytes(name.encode("utf-8"))
+            before_hashes[name] = __import__("hashlib").sha256(name.encode("utf-8")).hexdigest()
+
+        state = GuiState(
+            library_root=str(base_dir / "gh90-lib"),
+            original_dir=str(gh90_root),
+            run_mode="build",
+        )
+        pp_gh90 = PortablePaths(base_dir=base_dir / "gh90-lib")
+        pp_gh90.ensure_all()
+        cfg_gh90 = build_path_config_from_gui_state(state)
+        ensure_managed_directories(cfg_gh90)
+        kwargs_gh90 = build_pipeline_kwargs(state, cfg_gh90)
+        result_gh90 = run_pipeline(**kwargs_gh90)
+        pipeline_ok = bool(result_gh90.get("per_group"))
+        _gh90_step("gh90_pipeline_populated", pipeline_ok, f"groups={result_gh90.get('groups', 0)}")
+
+        state_path = build_staged_library_from_result(
+            result_gh90,
+            library_root=cfg_gh90.library_root,
+            run_id=result_gh90.get("run_id", "gh90-qa"),
+        )
+        pw = PreviewWidget()
+        preview_loaded = False
+        if state_path and state_path.exists():
+            preview_loaded = pw.load_state_file(state_path)
+            pw.show()
+        _gh90_step("gh90_preview_loaded", preview_loaded, f"loaded={preview_loaded}")
+
+        if preview_loaded:
+            rows = pw._table.rowCount()
+            gh90_report["multi_release_rows"] = rows
+            _gh90_step("gh90_multi_release_rows", rows >= 4, f"rows={rows}")
+
+            # Multi-select: select all rows and verify each selected row identity.
+            pw._table.selectAll()
+            selected = pw._table.selectionModel().selectedRows()
+            titles = []
+            keys = []
+            identity_match = len(selected) == rows and rows > 0
+            for idx in selected:
+                row = idx.row()
+                title = pw._table.item(row, 2).text() if pw._table.item(row, 2) else ""
+                release_key = None
+                for col in range(pw._table.columnCount()):
+                    item = pw._table.item(row, col)
+                    if item is not None:
+                        release_key = item.data(__import__("PySide6.QtCore").QtCore.Qt.ItemDataRole.UserRole)
+                        if release_key:
+                            break
+                titles.append(title)
+                keys.append(release_key)
+                if not (title and release_key and release_key in pw._state.current_library.releases):
+                    identity_match = False
+            gh90_report["selected_rows_identity_match"] = identity_match
+            gh90_report["selected_rows_titles"] = titles
+            _gh90_step("gh90_selected_rows_identity_match", identity_match,
+                        f"selected={len(selected)} rows={rows} titles={titles}")
+
+            # Filter/refresh: apply a filter, then clear it, and confirm row count restores.
+            pw._filter_combo.setCurrentText("Accepted")
+            pw._apply_filter()
+            filtered_rows = sum(1 for r in range(pw._table.rowCount()) if not pw._table.isRowHidden(r))
+            pw._filter_combo.setCurrentText("All")
+            pw._apply_filter()
+            restored_rows = sum(1 for r in range(pw._table.rowCount()) if not pw._table.isRowHidden(r))
+            filter_refresh_match = restored_rows == rows and restored_rows >= 4
+            gh90_report["filter_refresh_identity_match"] = filter_refresh_match
+            _gh90_step("gh90_filter_refresh_identity_match", filter_refresh_match,
+                        f"filtered_rows={filtered_rows} restored_rows={restored_rows}")
+
+            # Order: enable sorting, sort by Title, then restore original order by title asc.
+            pw._table.setSortingEnabled(True)
+            pw._table.sortItems(2)
+            sorted_rows = [pw._table.item(r, 2).text() for r in range(pw._table.rowCount()) if not pw._table.isRowHidden(r)]
+            expected_sorted = sorted(titles)
+            order_match = sorted_rows == expected_sorted
+            gh90_report["order_identity_match"] = order_match
+            _gh90_step("gh90_order_identity_match", order_match,
+                        f"sorted_rows={sorted_rows}")
+            pw._table.setSortingEnabled(False)
+
+            # Staged mutation: select row 0 and row 2, mutate ONLY those releases to Accepted.
+            targets = []
+            for row in (0, 2):
+                item = pw._table.item(row, 0)
+                if item is None:
+                    continue
+                release_key = None
+                for col in range(pw._table.columnCount()):
+                    it = pw._table.item(row, col)
+                    if it is not None:
+                        release_key = it.data(__import__("PySide6.QtCore").QtCore.Qt.ItemDataRole.UserRole)
+                        if release_key:
+                            break
+                if release_key:
+                    targets.append((row, release_key))
+            # Select exactly the target rows.
+            pw._table.clearSelection()
+            for row, _ in targets:
+                pw._table.selectRow(row)
+            selected = pw._table.selectionModel().selectedRows()
+            if len(selected) == len(targets):
+                pw._set_selected_state(__import__("amiga_adf_library_builder.models").models.StagedState.ACCEPTED)
+            mutated_targets = []
+            for _, release_key in targets:
+                entry = pw._state.current_library.releases.get(release_key)
+                mutated_targets.append(entry.curation_state if entry else None)
+            mutated_ok = all(s is not None and s.value == "Accepted" for s in mutated_targets if s is not None)
+            # Verify non-selected releases remain unchanged.
+            non_selected_unchanged = True
+            for row in range(pw._table.rowCount()):
+                if row in {t[0] for t in targets}:
+                    continue
+                item = pw._table.item(row, 0)
+                if item is None:
+                    continue
+                release_key = None
+                for col in range(pw._table.columnCount()):
+                    it = pw._table.item(row, col)
+                    if it is not None:
+                        release_key = it.data(__import__("PySide6.QtCore").QtCore.Qt.ItemDataRole.UserRole)
+                        if release_key:
+                            break
+                if not release_key:
+                    continue
+                entry = pw._state.current_library.releases.get(release_key)
+                if entry and entry.curation_state.value == "Accepted":
+                    non_selected_unchanged = False
+                    break
+            gh90_report["staged_mutation_only_selected"] = mutated_ok and non_selected_unchanged
+            gh90_report["staged_mutation_target_count"] = len(targets)
+            _gh90_step("gh90_staged_mutation_only_selected", mutated_ok and non_selected_unchanged,
+                        f"targets={len(targets)} mutated={mutated_targets} non_selected_unchanged={non_selected_unchanged}")
+
+            # Source fixtures unchanged.
+            after_hashes = {}
+            for name in fixtures:
+                path = gh90_root / name
+                after_hashes[name] = __import__("hashlib").sha256(path.read_bytes()).hexdigest()
+            gh90_report["source_fixtures_unchanged"] = after_hashes == before_hashes
+            _gh90_step("gh90_source_fixtures_unchanged", after_hashes == before_hashes,
+                        f"fixtures={len(fixtures)}")
+
+            # Preview-only export check: no export files should exist after mutation.
+            export_files_after = sorted(p for p in cfg_gh90.output_dir.rglob("*") if p.is_file())
+            gh90_report["preview_export_files_after_mutation"] = [str(p) for p in export_files_after]
+            _gh90_step("gh90_preview_no_export_after_mutation", len(export_files_after) == 0,
+                        f"export_files={len(export_files_after)}")
+
+            shot = screenshots / "gh90-preview-selection-integrity.png"
+            try:
+                pix = pw.grab()
+                pix.save(str(shot))
+                _gh90_step("gh90_screenshot", shot.is_file(), f"saved {shot}")
+            except Exception as exc:
+                _gh90_step("gh90_screenshot", False, f"grab failed: {exc}")
+            pw.close()
+        else:
+            _gh90_step("gh90_preview_loaded", False, "state_path missing")
+    except Exception as exc:
+        _gh90_step("gh90_selection_integrity", False, repr(exc))
+        gh90_report["errors"].append(repr(exc))
+
+    REPORT["gh90"] = gh90_report
+
+    # ------------------------------------------------------------------ #
     # Emit the report + secret-leak scan of the logs dir
     # ------------------------------------------------------------------ #
     REPORT["gh86"] = gh86_report
