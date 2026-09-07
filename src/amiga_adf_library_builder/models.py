@@ -4,6 +4,7 @@ Pure data definitions and small value types. No I/O here.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Optional
 from pathlib import Path
@@ -402,6 +403,12 @@ class StagedLibrary:
         if not dst_entry:
             raise ValueError(f"Destination release not found: {dst_key}")
 
+        # Empty selection is rejected: a no-op that changes nothing and
+        # records nothing. The UI layer additionally prevents empty
+        # selections from being submitted at all.
+        if not filenames:
+            return src_entry, dst_entry
+
         # Verify all filenames exist in source
         for fname in filenames:
             if fname not in src_entry.adf_files:
@@ -415,6 +422,7 @@ class StagedLibrary:
         # Store source state for undo
         src_files_before = list(src_entry.adf_files)
         dst_files_before = list(dst_entry.adf_files)
+        src_state_before = src_entry.curation_state
 
         # Remove from source preserving order of remaining files
         new_src_files = [f for f in src_entry.adf_files if f not in filenames]
@@ -423,14 +431,36 @@ class StagedLibrary:
         # Append to destination preserving moved order
         dst_entry.adf_files.extend(filenames)
 
-        # Record decision log on both source and destination
+        # Post-move source state: NEEDS_REVIEW when the source emptied,
+        # otherwise unchanged. Recorded in the payload so redo can restore
+        # the exact post-move state.
+        src_state_after = (
+            StagedState.NEEDS_REVIEW if not src_entry.adf_files else src_state_before
+        )
+
+        # Record decision log on both source and destination. The payload
+        # carries the full undo context; the UI layer records the logged
+        # action for undo exactly once.
         from datetime import datetime, timezone
         timestamp = datetime.now(timezone.utc).isoformat()
+
+        payload = json.dumps({
+            "src_key": src_key,
+            "dst_key": dst_key,
+            "moved_files": list(filenames),
+            "src_files_before": src_files_before,
+            "dst_files_before": dst_files_before,
+            "src_files_after": list(src_entry.adf_files),
+            "dst_files_after": list(dst_entry.adf_files),
+            "src_curation_state": src_state_before.value,
+            "src_state_after": src_state_after.value,
+        })
 
         src_action = StagedChange(
             action=CurationAction.MOVE,
             timestamp=timestamp,
             details=f"Moved {len(filenames)} ADF(s) to {dst_entry.release_key} ({dst_entry.title})",
+            payload=payload,
         )
         src_entry.actions.append(src_action)
 
@@ -438,16 +468,21 @@ class StagedLibrary:
             action=CurationAction.MOVE,
             timestamp=timestamp,
             details=f"Received {len(filenames)} ADF(s) from {src_entry.release_key} ({src_entry.title})",
+            payload=payload,
         )
         dst_entry.actions.append(dst_action)
 
-        # If source is now empty, set to NEEDS_REVIEW
+        # If source is now empty, set to NEEDS_REVIEW (record real previous state).
+        # The transition action carries the same payload so a single undo entry
+        # restores files AND state together.
         if not src_entry.adf_files:
+            prev_state = src_entry.curation_state
             src_entry.curation_state = StagedState.NEEDS_REVIEW
             empty_action = StagedChange(
                 action=CurationAction.STATE_CHANGE,
                 timestamp=timestamp,
-                details=f"State changed from {src_entry.curation_state.value} to needs_review (empty after move)",
+                details=f"State changed from {prev_state.value} to needs_review (empty after move)",
+                payload=payload,
             )
             src_entry.actions.append(empty_action)
 
@@ -486,16 +521,12 @@ class StagedLibrary:
         # Store pre-merge state for undo
         src_files_before = list(src_entry.adf_files)
         dst_files_before = list(dst_entry.adf_files)
+        src_state_before = src_entry.curation_state
 
         # Append source ADFs to destination
+        # Destination's existing files first, then source's files in their
+        # original order (preserves disk ordinals on both sides).
         dst_entry.adf_files.extend(src_entry.adf_files)
-
-        # Renumber disk ordinals in destination to contiguous 1-based order
-        # We preserve the original order: destination's existing files first,
-        # then source's files in their original order
-
-        # Union provenance/action history by appending source actions to destination
-        dst_entry.actions.extend(src_entry.actions)
 
         # Merge metadata: destination wins; promote only blank destination fields from source
         if not dst_entry.title and src_entry.title:
@@ -513,28 +544,56 @@ class StagedLibrary:
         if not dst_entry.alt_marker and src_entry.alt_marker:
             dst_entry.alt_marker = src_entry.alt_marker
 
-        # Do NOT carry over source locked_fields to avoid introducing hidden protection constraints
-        # Preserve destination curation state and locked_fields
+        # Do NOT carry over source locked_fields to avoid introducing hidden
+        # protection constraints. Do NOT carry over source action history: the
+        # destination audit trail must contain exactly one MERGE entry for this
+        # operation, not a copy of the source's unrelated history.
+        # Preserve destination curation state and locked_fields.
 
         # Empty source entry but retain it in the library with NEEDS_REVIEW
         src_entry.adf_files = []
         src_entry.curation_state = StagedState.NEEDS_REVIEW
 
-        # Record decision log on both source and destination
+        # Record decision log on both source and destination. The payload
+        # carries the full undo context (before/after files + state); the UI
+        # layer records the logged action for undo exactly once.
         from datetime import datetime, timezone
         timestamp = datetime.now(timezone.utc).isoformat()
+
+        payload = json.dumps({
+            "src_key": src_key,
+            "dst_key": dst_key,
+            "src_files_before": src_files_before,
+            "dst_files_before": dst_files_before,
+            "src_files_after": list(src_entry.adf_files),
+            "dst_files_after": list(dst_entry.adf_files),
+            "src_curation_state": src_state_before.value,
+            # Merge always empties the source and marks it NEEDS_REVIEW.
+            "src_state_after": StagedState.NEEDS_REVIEW.value,
+        })
 
         src_action = StagedChange(
             action=CurationAction.MERGE,
             timestamp=timestamp,
             details=f"Merged into {dst_entry.release_key} ({dst_entry.title}); {len(src_files_before)} ADF(s) moved",
+            payload=payload,
         )
         src_entry.actions.append(src_action)
+
+        # Empty-source state transition recorded with the real previous state
+        state_action = StagedChange(
+            action=CurationAction.STATE_CHANGE,
+            timestamp=timestamp,
+            details=f"State changed from {src_state_before.value} to needs_review (empty after merge)",
+            payload=payload,
+        )
+        src_entry.actions.append(state_action)
 
         dst_action = StagedChange(
             action=CurationAction.MERGE,
             timestamp=timestamp,
             details=f"Merged from {src_key} ({src_entry.title}); {len(src_files_before)} ADF(s) received",
+            payload=payload,
         )
         dst_entry.actions.append(dst_action)
 
