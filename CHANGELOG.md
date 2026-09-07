@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.2.9 — 2026-09-07
+
+- GH-93: Add Move ADF(s) and Merge Release with explicit selection safety and single audit trail.
+  - Move ADF(s) now moves only the explicitly selected ADF filenames from one release
+    to another, preserving source order and blocking empty or self-target moves.
+  - Merge Release combines all ADFs from a source release into a destination release,
+    promotes blank metadata from source only when destination fields are empty, and
+    empties the source release into NEEDS_REVIEW rather than carrying hidden state.
+  - Decision logging is now single-source: the model records one MOVE/MERGE entry per
+    side, and undo/redo uses the stored payload to restore exact pre/post file sets
+    and curation state instead of fragile string parsing.
+  - The duplicate logging defect in move/merge operations is fixed; undo/redo no longer
+    injects extra duplicate actions into the audit trail.
+  - Focused regression coverage for explicit ADF selection, move/merge identity, empty
+    source handling, undo/redo dispatch, and manual approval enforcement.
+  - Independently qualified on real packaged Windows (Windows-R3 Actions run
+    34126061118; QA PASS); released with Windows assets
+    `amiga-adf-gui-portable.zip` and `amiga-adf-gui.exe`.
+
 ## Unreleased
 
 - GH-90: Fix Preview/Curation selection integrity (P0 — released v0.2.7 Windows GUI showed
@@ -63,7 +82,7 @@
   verified upstream hard limits (file ≤ 500 KB, pixel ≤ 2000×2000), aspect-fit
   with no upscaling, and master preservation under `assets/artwork-original`.
 - Online metadata enrichment (opt-in `--online`) from approved providers with a
-  provenance-aware persistent cache and bundled curated records.
+  provenance-aware persistent metadata cache and bundled curated records.
 - Gotek export safety gate (`exporter_guard.export_gate_open`): hard-gated by an
   explicit operator safety signal and verified artwork dimensions; never writes
   to the shared SD-card destination and refuses to silently overwrite staged
