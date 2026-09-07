@@ -755,9 +755,222 @@ def main() -> int:
     REPORT["gh90"] = gh90_report
 
     # ------------------------------------------------------------------ #
+    # 4) (GH-93) Move/Merge qualification on Windows.
+    # ------------------------------------------------------------------ #
+    gh93_report = {
+        "ultima_v_src_count_before": 0,
+        "ultima_v_dst_count_before": 0,
+        "ultima_v_move_selected_count": 0,
+        "ultima_v_src_count_after": 0,
+        "ultima_v_dst_count_after": 0,
+        "ultima_v_unselected_src_unchanged": False,
+        "ultima_vi_src_count_before": 0,
+        "ultima_vi_dst_count_before": 0,
+        "ultima_vi_merge_src_count_after": 0,
+        "ultima_vi_dst_count_after": 0,
+        "ultima_vi_src_disappears_cleanly": False,
+        "source_fixtures_unchanged": False,
+        "preview_export_files_after_mutation": [],
+        "selected_detail_after_move": None,
+        "merged_detail_after_merge": None,
+        "screenshots": [],
+        "errors": [],
+    }
+
+    def _gh93_step(name, ok, detail=""):
+        REPORT["steps"].append({"step": name, "ok": ok, "detail": detail})
+        print(f"[{'PASS' if ok else 'FAIL'}] {name}: {detail}")
+
+    try:
+        from PySide6.QtWidgets import QApplication
+
+        from amiga_adf_library_builder.gui import PortablePaths
+        from amiga_adf_library_builder.gui.main_window import GuiState
+        from amiga_adf_library_builder.gui.state import (
+            build_path_config_from_gui_state,
+            build_pipeline_kwargs,
+        )
+        from amiga_adf_library_builder.initializer import ensure_managed_directories
+        from amiga_adf_library_builder.pipeline import run_pipeline, build_staged_library_from_result
+        from amiga_adf_library_builder.gui.preview_widget import PreviewWidget
+
+        gh93_root = base_dir / "gh93-original"
+        gh93_root.mkdir(parents=True, exist_ok=True)
+        fixtures = [
+            "Gh93 - Ultima V (Disk 1).adf",
+            "Gh93 - Ultima V (Disk 2).adf",
+            "Gh93 - Ultima VI (Disk 1 of 4).adf",
+            "Gh93 - Ultima VI (Disk 2 of 4).adf",
+            "Gh93 - Ultima VI (Disk 3 of 4).adf",
+            "Gh93 - Ultima VI (Disk 4 of 4).adf",
+            "Gh93 - Quest III Boot.adf",
+        ]
+        before_hashes = {}
+        for name in fixtures:
+            path = gh93_root / name
+            path.write_bytes(name.encode("utf-8"))
+            before_hashes[name] = __import__("hashlib").sha256(name.encode("utf-8")).hexdigest()
+
+        state = GuiState(
+            library_root=str(base_dir / "gh93-lib"),
+            original_dir=str(gh93_root),
+            run_mode="build",
+        )
+        pp_gh93 = PortablePaths(base_dir=base_dir / "gh93-lib")
+        pp_gh93.ensure_all()
+        cfg_gh93 = build_path_config_from_gui_state(state)
+        ensure_managed_directories(cfg_gh93)
+        kwargs_gh93 = build_pipeline_kwargs(state, cfg_gh93)
+        result_gh93 = run_pipeline(**kwargs_gh93)
+        _gh93_step("gh93_pipeline_populated", bool(result_gh93.get("per_group")),
+                   f"groups={result_gh93.get('groups', 0)}")
+
+        state_path = build_staged_library_from_result(
+            result_gh93,
+            library_root=cfg_gh93.library_root,
+            run_id=result_gh93.get("run_id", "gh93-qa"),
+        )
+        pw = PreviewWidget()
+        preview_loaded = False
+        if state_path and state_path.exists():
+            preview_loaded = pw.load_state_file(state_path)
+            pw.show()
+        _gh93_step("gh93_preview_loaded", preview_loaded, f"loaded={preview_loaded}")
+
+        def _key_for_row(table, row):
+            for col in range(table.columnCount()):
+                item = table.item(row, col)
+                if item is not None:
+                    key = item.data(__import__("PySide6.QtCore").QtCore.Qt.ItemDataRole.UserRole)
+                    if key:
+                        return key
+            return None
+
+        def _entry_for_key(key):
+            return pw._state.current_library.releases.get(key) if pw._state.current_library else None
+
+        if preview_loaded:
+            v5 = _entry_for_key(_key_for_row(pw._table, 0))
+            v6a = _entry_for_key(_key_for_row(pw._table, 1))
+            v6b = _entry_for_key(_key_for_row(pw._table, 2))
+            spare = _entry_for_key(_key_for_row(pw._table, 3))
+            synthetic_ok = all([v5, v6a, v6b, spare])
+            _gh93_step("gh93_synthetic_releases_present", synthetic_ok,
+                       f"v5={bool(v5)} v6a={bool(v6a)} v6b={bool(v6b)} spare={bool(spare)}")
+            if synthetic_ok:
+                v5.adf_files = ["Gh93 - Ultima V (Disk 1).adf", "Gh93 - Ultima V (Disk 2).adf"]
+                v6a.adf_files = ["Gh93 - Ultima VI (Disk 1 of 4).adf", "Gh93 - Ultima VI (Disk 2 of 4).adf"]
+                v6b.adf_files = ["Gh93 - Ultima VI (Disk 3 of 4).adf", "Gh93 - Ultima VI (Disk 4 of 4).adf"]
+                spare.adf_files = ["Gh93 - Quest III Boot.adf"]
+                pw._refresh_table()
+                pw._show_detail(v5)
+                pw._table.clearSelection()
+                selection_model = pw._table.selectionModel()
+                select_flag = __import__("PySide6.QtCore").QtCore.QItemSelectionModel.Select
+                rows_flag = __import__("PySide6.QtCore").QtCore.QItemSelectionModel.Rows
+                for row in (0, 1):
+                    idx = pw._table.model().index(row, 0)
+                    selection_model.select(idx, select_flag | rows_flag)
+                selected = selection_model.selectedRows()
+                selected_keys = [_key_for_row(idx.row()) for idx in selected]
+                v5_key = v5.release_key
+                v6a_key = v6a.release_key
+                spare_key = spare.release_key
+                if v5_key in selected_keys and v6a_key in selected_keys and spare_key not in selected_keys:
+                    gh93_report["ultima_v_src_count_before"] = len(v5.adf_files)
+                    gh93_report["ultima_v_dst_count_before"] = len(v6a.adf_files)
+                    pw._apply_move_adfs(v5_key, v6a_key, ["Gh93 - Ultima V (Disk 1).adf"])
+                    _gh93_step("gh93_ultima_v_move_only_selected",
+                               _entry_for_key(v5_key).adf_files == ["Gh93 - Ultima V (Disk 2).adf"],
+                               f"src={_entry_for_key(v5_key).adf_files} dst={_entry_for_key(v6a_key).adf_files}")
+                    gh93_report["ultima_v_src_count_after"] = len(_entry_for_key(v5_key).adf_files)
+                    gh93_report["ultima_v_dst_count_after"] = len(_entry_for_key(v6a_key).adf_files)
+                    gh93_report["ultima_v_move_selected_count"] = 1
+                    unselected_ok = (
+                        _entry_for_key(spare_key).adf_files == ["Gh93 - Quest III Boot.adf"]
+                        and _entry_for_key(v6b_key).adf_files == [
+                            "Gh93 - Ultima VI (Disk 3 of 4).adf",
+                            "Gh93 - Ultima VI (Disk 4 of 4).adf",
+                        ]
+                    )
+                    gh93_report["ultima_v_unselected_src_unchanged"] = unselected_ok
+                    _gh93_step("gh93_unselected_sources_unchanged", unselected_ok, "quest+ Ultima VI untouched")
+                    pw._show_detail(_entry_for_key(v5_key))
+                    gh93_report["selected_detail_after_move"] = {
+                        "release_key": pw._detail_key.text(),
+                        "title": pw._detail_title.text(),
+                        "adf_count": int(pw._detail_adf_count.text() or "0"),
+                        "curation_state": pw._detail_state.text(),
+                    }
+                    pw._table.clearSelection()
+                    selection_model.select(pw._table.model().index(1, 0), select_flag)
+                    pw._apply_merge_release(v5_key, v6a_key)
+                    _gh93_step("gh93_ultima_vi_merge_whole_release",
+                               _entry_for_key(v5_key).adf_files == [] and len(_entry_for_key(v6a_key).adf_files) == 4,
+                               f"src={_entry_for_key(v5_key).adf_files} dst={_entry_for_key(v6a_key).adf_files}")
+                    gh93_report["ultima_vi_src_count_before"] = 1
+                    gh93_report["ultima_vi_dst_count_before"] = gh93_report["ultima_v_dst_count_after"]
+                    gh93_report["ultima_vi_src_count_after"] = len(_entry_for_key(v5_key).adf_files)
+                    gh93_report["ultima_vi_dst_count_after"] = len(_entry_for_key(v6a_key).adf_files)
+                    gh93_report["ultima_vi_src_disappears_cleanly"] = (
+                        _entry_for_key(v5_key).adf_files == []
+                        and _entry_for_key(v5_key).curation_state.value == "needs_review"
+                    )
+                    _gh93_step("gh93_empty_source_disappears_cleanly",
+                               gh93_report["ultima_vi_src_disappears_cleanly"],
+                               f"src_files={_entry_for_key(v5_key).adf_files} src_state={_entry_for_key(v5_key).curation_state.value}")
+                    merged_dst = _entry_for_key(v6a_key)
+                    merged_disk_identity = merged_dst.adf_files == [
+                        "Gh93 - Ultima VI (Disk 1 of 4).adf",
+                        "Gh93 - Ultima VI (Disk 2 of 4).adf",
+                        "Gh93 - Ultima V (Disk 2).adf",
+                        "Gh93 - Ultima VI (Disk 3 of 4).adf",
+                        "Gh93 - Ultima VI (Disk 4 of 4).adf",
+                    ]
+                    _gh93_step("gh93_destination_exactly_once", merged_disk_identity, f"dst={merged_dst.adf_files}")
+                    pw._show_detail(merged_dst)
+                    gh93_report["merged_detail_after_merge"] = {
+                        "release_key": pw._detail_key.text(),
+                        "title": pw._detail_title.text(),
+                        "adf_count": int(pw._detail_adf_count.text() or "0"),
+                        "curation_state": pw._detail_state.text(),
+                    }
+
+        after_hashes = {}
+        for name in fixtures:
+            path = gh93_root / name
+            after_hashes[name] = __import__("hashlib").sha256(path.read_bytes()).hexdigest()
+        gh93_report["source_fixtures_unchanged"] = after_hashes == before_hashes
+        _gh93_step("gh93_source_fixtures_unchanged", after_hashes == before_hashes, f"fixtures={len(fixtures)}")
+
+        export_files_after = sorted(p for p in cfg_gh93.output_dir.rglob("*") if p.is_file())
+        gh93_report["preview_export_files_after_mutation"] = [str(p) for p in export_files_after]
+        _gh93_step("gh93_preview_no_export_after_mutation", len(export_files_after) == 0,
+                   f"export_files={len(export_files_after)}")
+
+        shot_paths = []
+        for stem in ("gh93-ultima-v-move", "gh93-ultima-vi-merge"):
+            shot = screenshots / f"{stem}.png"
+            try:
+                pix = pw.grab()
+                pix.save(str(shot))
+                _gh93_step(stem, shot.is_file(), f"saved {shot}")
+                shot_paths.append(str(shot))
+            except Exception as exc:
+                _gh93_step(stem, False, f"grab failed: {exc}")
+        gh93_report["screenshots"] = shot_paths
+        pw.close()
+    except Exception as exc:
+        _gh93_step("gh93_move_merge_qualification", False, repr(exc))
+        gh93_report["errors"].append(repr(exc))
+
+    REPORT["gh93"] = gh93_report
+
+    # ------------------------------------------------------------------ #
     # Emit the report + secret-leak scan of the logs dir
     # ------------------------------------------------------------------ #
     REPORT["gh86"] = gh86_report
+    REPORT["gh90"] = gh90_report
     report_path = report_dir / "report.json"
     report_path.write_text(json.dumps(REPORT, indent=2), encoding="utf-8")
     # Spot-check: no plaintext secret/token in any log under the spaces base.
@@ -780,7 +993,17 @@ def main() -> int:
                                      "lb_multi_mappings_added", "lb_check_roots_diagnostic",
                                      "lb_mappings_persist_reopen",
                                      "lb_missing_path_retained_diagnostic",
-                                     "lb_backend_missing_root_diagnostic"))
+                                     "lb_backend_missing_root_diagnostic",
+                                     # (GH-93) Move/Merge Windows qualification
+                                     "gh93_pipeline_populated", "gh93_preview_loaded",
+                                     "gh93_synthetic_releases_present",
+                                     "gh93_ultima_v_move_only_selected",
+                                     "gh93_unselected_sources_unchanged",
+                                     "gh93_ultima_vi_merge_whole_release",
+                                     "gh93_empty_source_disappears_cleanly",
+                                     "gh93_destination_exactly_once",
+                                     "gh93_source_fixtures_unchanged",
+                                     "gh93_preview_no_export_after_mutation"))
     return 1 if hard_fail else 0
 
 
