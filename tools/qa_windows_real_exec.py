@@ -615,6 +615,20 @@ def main() -> int:
             gh90_report["multi_release_rows"] = rows
             _gh90_step("gh90_multi_release_rows", rows >= 4, f"rows={rows}")
 
+            def _release_key_for_row(table, row):
+                if row < 0 or row >= table.rowCount():
+                    return None
+                for col in range(table.columnCount()):
+                    item = table.item(row, col)
+                    if item is not None:
+                        release_key = item.data(__import__("PySide6.QtCore").QtCore.Qt.ItemDataRole.UserRole)
+                        if release_key:
+                            return release_key
+                state = getattr(getattr(table, "parent", lambda: None)(), "_state", None)
+                if state is not None and getattr(state, "row_to_release_key", None) is not None:
+                    return state.row_to_release_key.get(row)
+                return None
+
             # Multi-select: select all rows and verify each selected row identity.
             pw._table.setSelectionMode(__import__("PySide6.QtWidgets").QtWidgets.QAbstractItemView.MultiSelection)
             selection_model = pw._table.selectionModel()
@@ -635,6 +649,8 @@ def main() -> int:
                         release_key = item.data(__import__("PySide6.QtCore").QtCore.Qt.ItemDataRole.UserRole)
                         if release_key:
                             break
+                if release_key is None:
+                    release_key = _release_key_for_row(pw._table, row)
                 titles.append(title)
                 keys.append(release_key)
                 if not (title and release_key and release_key in pw._state.current_library.releases):
@@ -669,16 +685,7 @@ def main() -> int:
             # Staged mutation: select row 0 and row 2, mutate ONLY those releases to Accepted.
             targets = []
             for row in (0, 2):
-                item = pw._table.item(row, 0)
-                if item is None:
-                    continue
-                release_key = None
-                for col in range(pw._table.columnCount()):
-                    it = pw._table.item(row, col)
-                    if it is not None:
-                        release_key = it.data(__import__("PySide6.QtCore").QtCore.Qt.ItemDataRole.UserRole)
-                        if release_key:
-                            break
+                release_key = _release_key_for_row(pw._table, row)
                 if release_key:
                     targets.append((row, release_key))
             # Select exactly the target rows.
@@ -692,9 +699,11 @@ def main() -> int:
             selected = selection_model.selectedRows()
             if len(selected) == len(targets):
                 pw._set_selected_state(__import__("amiga_adf_library_builder.models").models.StagedState.ACCEPTED)
+            pw._refresh_table()
+            __import__("time").sleep(0.05)
             mutated_targets = []
             for _, release_key in targets:
-                entry = pw._state.current_library.releases.get(release_key)
+                entry = pw._state.current_library.releases.get(release_key) if pw._state.current_library else None
                 mutated_targets.append(entry.curation_state if entry else None)
             mutated_ok = all(s is not None and s.value == "Accepted" for s in mutated_targets if s is not None)
             # Verify non-selected releases remain unchanged.
@@ -702,19 +711,10 @@ def main() -> int:
             for row in range(pw._table.rowCount()):
                 if row in {t[0] for t in targets}:
                     continue
-                item = pw._table.item(row, 0)
-                if item is None:
-                    continue
-                release_key = None
-                for col in range(pw._table.columnCount()):
-                    it = pw._table.item(row, col)
-                    if it is not None:
-                        release_key = it.data(__import__("PySide6.QtCore").QtCore.Qt.ItemDataRole.UserRole)
-                        if release_key:
-                            break
+                release_key = _release_key_for_row(pw._table, row)
                 if not release_key:
                     continue
-                entry = pw._state.current_library.releases.get(release_key)
+                entry = pw._state.current_library.releases.get(release_key) if pw._state.current_library else None
                 if entry and entry.curation_state.value == "Accepted":
                     non_selected_unchanged = False
                     break
@@ -837,23 +837,33 @@ def main() -> int:
             pw.show()
         _gh93_step("gh93_preview_loaded", preview_loaded, f"loaded={preview_loaded}")
 
-        def _key_for_row(table, row):
-            for col in range(table.columnCount()):
-                item = table.item(row, col)
-                if item is not None:
-                    key = item.data(__import__("PySide6.QtCore").QtCore.Qt.ItemDataRole.UserRole)
-                    if key:
-                        return key
+        def _find_release(library, title_fragment):
+            if not library:
+                return None
+            title_fragment = title_fragment.lower()
+            for entry in library.releases.values():
+                if title_fragment in entry.title.lower():
+                    return entry
             return None
 
-        def _entry_for_key(key):
-            return pw._state.current_library.releases.get(key) if pw._state.current_library else None
+        def _move_selected_only(library, title_fragment, filenames):
+            entry = _find_release(library, title_fragment)
+            return entry is not None and sorted(entry.adf_files) == sorted(filenames)
 
         if preview_loaded:
-            v5 = _entry_for_key(_key_for_row(pw._table, 0))
-            v6a = _entry_for_key(_key_for_row(pw._table, 1))
-            v6b = _entry_for_key(_key_for_row(pw._table, 2))
-            spare = _entry_for_key(_key_for_row(pw._table, 3))
+            v5 = _find_release(pw._state.current_library, "Ultima V")
+            v6a = _find_release(pw._state.current_library, "Ultima VI")
+            v6b = _find_release(pw._state.current_library, "Ultima VI") if v6a is None else None
+            if v6a is not None:
+                matches = [
+                    entry
+                    for entry in pw._state.current_library.releases.values()
+                    if entry.title.lower() != v6a.title.lower()
+                    and entry.release_key != v6a.release_key
+                ]
+                if len(matches) == 2:
+                    v6a, v6b = matches
+            spare = _find_release(pw._state.current_library, "Quest III")
             synthetic_ok = all([v5, v6a, v6b, spare])
             _gh93_step("gh93_synthetic_releases_present", synthetic_ok,
                        f"v5={bool(v5)} v6a={bool(v6a)} v6b={bool(v6b)} spare={bool(spare)}")
@@ -868,11 +878,19 @@ def main() -> int:
                 selection_model = pw._table.selectionModel()
                 select_flag = __import__("PySide6.QtCore").QtCore.QItemSelectionModel.Select
                 rows_flag = __import__("PySide6.QtCore").QtCore.QItemSelectionModel.Rows
-                for row in (0, 1):
-                    idx = pw._table.model().index(row, 0)
-                    selection_model.select(idx, select_flag | rows_flag)
+                v5_row = v6a_row = None
+                for row in range(pw._table.rowCount()):
+                    release_key = _release_key_for_row(pw._table, row)
+                    entry = pw._state.current_library.releases.get(release_key) if release_key and pw._state.current_library else None
+                    if entry is v5:
+                        v5_row = row
+                    elif entry is v6a:
+                        v6a_row = row
+                if v5_row is not None and v6a_row is not None:
+                    selection_model.select(pw._table.model().index(v5_row, 0), select_flag | rows_flag)
+                    selection_model.select(pw._table.model().index(v6a_row, 0), select_flag | rows_flag)
                 selected = selection_model.selectedRows()
-                selected_keys = [_key_for_row(idx.row()) for idx in selected]
+                selected_keys = [_release_key_for_row(pw._table, idx.row()) for idx in selected]
                 v5_key = v5.release_key
                 v6a_key = v6a.release_key
                 spare_key = spare.release_key
@@ -881,17 +899,17 @@ def main() -> int:
                     gh93_report["ultima_v_dst_count_before"] = len(v6a.adf_files)
                     pw._apply_move_adfs(v5_key, v6a_key, ["Gh93 - Ultima V (Disk 1).adf"])
                     _gh93_step("gh93_ultima_v_move_only_selected",
-                               _entry_for_key(v5_key).adf_files == ["Gh93 - Ultima V (Disk 2).adf"],
+                               _move_selected_only(pw._state.current_library, "Ultima V",
+                                                   ["Gh93 - Ultima V (Disk 2).adf"]),
                                f"src={_entry_for_key(v5_key).adf_files} dst={_entry_for_key(v6a_key).adf_files}")
                     gh93_report["ultima_v_src_count_after"] = len(_entry_for_key(v5_key).adf_files)
                     gh93_report["ultima_v_dst_count_after"] = len(_entry_for_key(v6a_key).adf_files)
                     gh93_report["ultima_v_move_selected_count"] = 1
                     unselected_ok = (
-                        _entry_for_key(spare_key).adf_files == ["Gh93 - Quest III Boot.adf"]
-                        and _entry_for_key(v6b_key).adf_files == [
-                            "Gh93 - Ultima VI (Disk 3 of 4).adf",
-                            "Gh93 - Ultima VI (Disk 4 of 4).adf",
-                        ]
+                        _move_selected_only(pw._state.current_library, "Quest III", ["Gh93 - Quest III Boot.adf"])
+                        and _move_selected_only(pw._state.current_library, "Ultima VI",
+                                                ["Gh93 - Ultima VI (Disk 3 of 4).adf",
+                                                 "Gh93 - Ultima VI (Disk 4 of 4).adf"])
                     )
                     gh93_report["ultima_v_unselected_src_unchanged"] = unselected_ok
                     _gh93_step("gh93_unselected_sources_unchanged", unselected_ok, "quest+ Ultima VI untouched")
@@ -903,7 +921,8 @@ def main() -> int:
                         "curation_state": pw._detail_state.text(),
                     }
                     pw._table.clearSelection()
-                    selection_model.select(pw._table.model().index(1, 0), select_flag)
+                    if v6a_row is not None:
+                        selection_model.select(pw._table.model().index(v6a_row, 0), select_flag)
                     pw._apply_merge_release(v5_key, v6a_key)
                     _gh93_step("gh93_ultima_vi_merge_whole_release",
                                _entry_for_key(v5_key).adf_files == [] and len(_entry_for_key(v6a_key).adf_files) == 4,
