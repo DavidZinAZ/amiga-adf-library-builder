@@ -57,6 +57,14 @@ jobs:
           QA_REPORT_DIR: "qa-windows-artifacts"
         run: python tools/qa_windows_real_exec.py
 
+      - name: Run GH-85 Windows progress qualification driver
+        env:
+          QT_QPA_PLATFORM: offscreen
+          QA_GUI_BASE: "C:\\Users\\runneradmin\\Test Dir With Spaces\\lib"
+          QA_EXE: "dist/AmigaADFLibraryBuilder/AmigaADFLibraryBuilder.exe"
+          QA_REPORT_DIR: "qa-windows-gh85-artifacts"
+        run: python tools/qa_windows_gh85_progress.py
+
       - name: Upload QA artifacts (report + screenshots + logs)
         if: always()
         uses: actions/upload-artifact@v4
@@ -64,5 +72,6 @@ jobs:
           name: qa-windows-real-exec
           path: |
             qa-windows-artifacts/
-            C:\Users\runneradmin\Test Dir With Spaces\lib\logs\
+            qa-windows-gh85-artifacts/
+            C:\\Users\\runneradmin\\Test Dir With Spaces\\lib\\logs\\
           if-no-files-found: warn
