@@ -12,7 +12,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from PySide6.QtCore import (
     QItemSelectionModel,
@@ -63,6 +63,12 @@ from amiga_adf_library_builder.library_state import (
     CurationStateManager,
     CURATION_STATE_SCHEMA_VERSION,
 )
+from amiga_adf_library_builder.lookup_workflow import (
+    LookupContext,
+    LookupResult,
+    providers_for_mode,
+    run_lookup,
+)
 from amiga_adf_library_builder.models import (
     CurationAction,
     StagedChange,
@@ -73,21 +79,97 @@ from amiga_adf_library_builder.models import (
 
 
 class PreviewWorker(QThread):
-    """Worker thread for background lookup/matching operations."""
+    """Worker thread for background lookup/matching operations.
 
-    lookup_completed = Signal(str, list)  # release_key, candidates
+    Routes the lookup through the SHARED workflow
+    (:func:`amiga_adf_library_builder.lookup_workflow.run_lookup`) so Online and
+    Offline lookups share one implementation with explicit provider routing.
+    The provider list is derived from the mode via
+    :func:`lookup_workflow.providers_for_mode` -- never hardcoded -- so an
+    offline lookup can never list or contact an online provider (GH-89).
+    """
+
+    lookup_completed = Signal(str, list)  # release_key, candidate dicts
     lookup_failed = Signal(str, str)  # release_key, error
 
-    def __init__(self, release_key: str, query: str, provider: str, parent=None):
+    def __init__(self, release_key: str, query: str, provider: str,
+                 title: str = "", disk_stems: Optional[list[str]] = None,
+                 context: Optional[LookupContext] = None, parent=None):
         super().__init__(parent)
         self.release_key = release_key
         self.query = query
         self.provider = provider
+        self._title = title
+        self._disk_stems = list(disk_stems or [])
+        self._context = context
+
+    def _build_context(self) -> LookupContext:
+        if self._context is not None:
+            return self._context
+        return LookupContext(
+            query=self.query,
+            release_key=self.release_key,
+            title=self._title,
+            disk_stems=list(self._disk_stems),
+        )
 
     def run(self) -> None:
-        # This would integrate with the existing provider architecture
-        # For now, emit a placeholder
-        self.lookup_failed.emit(self.release_key, "Provider integration not yet implemented")
+        # Real shared lookup workflow: routes online/offline explicitly and
+        # runs the provider-backed search (no placeholder).
+        ctx = self._build_context()
+        try:
+            result = run_lookup(self.provider, ctx)
+        except Exception as exc:  # never let a worker exception kill the thread
+            self.lookup_failed.emit(self.release_key, f"lookup crashed: {exc}")
+            return
+        if result.status == "error":
+            self.lookup_failed.emit(self.release_key, result.error)
+            return
+        self.lookup_completed.emit(self.release_key, [self._candidate_payload(result)])
+
+    @staticmethod
+    def _candidate_payload(result: LookupResult) -> dict:
+        """One JSON-serializable candidate dict for the result table."""
+        payload = {
+            "mode": result.mode,
+            "kind": result.kind,
+            "provider_ids": list(result.provider_ids),
+            "status": result.status,
+            "consulted": list(result.consulted),
+            "local_source_state": list(result.local_source_state),
+            "confidence": result.confidence,
+            "title": None,
+            "provider": None,
+            "year": None,
+            "developer": None,
+            "publisher": None,
+            "description": None,
+            "artwork_url": None,
+            "local_cached_path": None,
+            "local_category": None,
+            "local_outcome": None,
+            "local_review_reason": None,
+        }
+        if result.record is not None:
+            rec = result.record
+            payload.update(
+                title=rec.canonical_title,
+                provider=rec.provider,
+                year=rec.year,
+                developer=rec.developer,
+                publisher=rec.publisher,
+                description=rec.description[:400] if rec.description else None,
+                artwork_url=rec.artwork_url or None,
+            )
+        if result.local_result is not None:
+            lr = result.local_result
+            payload.update(
+                local_cached_path=str(lr.cached_path) if lr.cached_path else None,
+                local_category=lr.category,
+                local_outcome=lr.outcome,
+                local_review_reason=lr.manual_review_reason,
+            )
+        return payload
 
 
 @dataclass
@@ -115,6 +197,12 @@ class PreviewWidget(QWidget):
         self._state = PreviewWidgetState()
         self._undo_stack: list[tuple[str, StagedChange]] = []  # (release_key, action)
         self._redo_stack: list[tuple[str, StagedChange]] = []
+        # Injectable provider of the lookup execution context (cache dirs,
+        # config path). The main window wires this to the app's resolved
+        # paths; tests may supply a temp-dir context. Without it the widget
+        # falls back to resolving the app paths itself (GH-88/89).
+        self._lookup_context_provider: Optional[Callable[[], Optional[LookupContext]]] = None
+        self._lookup_worker: Optional[PreviewWorker] = None
         self._build_ui()
         self._connect_signals()
 
@@ -925,6 +1013,15 @@ class PreviewWidget(QWidget):
                         dst_entry.adf_files = dst_files_before
                 except (json.JSONDecodeError, KeyError, ValueError):
                     pass
+        elif action.action == CurationAction.METADATA_EDIT:
+            # Lookup apply: restore the pre-apply snapshot (title, source,
+            # confidence, state, artwork) from the payload.
+            if action.payload:
+                try:
+                    payload = json.loads(action.payload)
+                    self._restore_metadata_snapshot(entry, payload.get("pre") or {})
+                except (json.JSONDecodeError, TypeError):
+                    pass
         # Add more undo cases as needed
 
         # Move to redo stack
@@ -1039,6 +1136,14 @@ class PreviewWidget(QWidget):
                         src_entry.curation_state = StagedState(src_state_after)
                         dst_entry.adf_files = dst_files_after
                 except (json.JSONDecodeError, KeyError, ValueError):
+                    pass
+        elif action.action == CurationAction.METADATA_EDIT:
+            # Lookup apply: re-apply the post-apply snapshot.
+            if action.payload:
+                try:
+                    payload = json.loads(action.payload)
+                    self._restore_metadata_snapshot(entry, payload.get("post") or {})
+                except (json.JSONDecodeError, TypeError):
                     pass
 
         # Move back to undo stack
@@ -1273,49 +1378,323 @@ class PreviewWidget(QWidget):
 
                 self._refresh_table()
 
+    # --- Lookup (GH-88 + GH-89 shared online/offline implementation) ---------
+
+    def _resolve_lookup_context(self, entry: "StagedReleaseEntry") -> Optional[LookupContext]:
+        """Build the execution context for a lookup on ``entry``.
+
+        Prefers the injected :attr:`_lookup_context_provider` (the main window
+        wires this to the app's resolved paths/config so the lookup reads the
+        same metadata cache and ``[local_media]`` table the pipeline used).
+        Falls back to resolving the app paths directly.
+        """
+        base: Optional[LookupContext] = None
+        if self._lookup_context_provider is not None:
+            try:
+                base = self._lookup_context_provider()
+            except Exception:
+                base = None
+        if base is None:
+            try:
+                from ..paths import resolve_config
+
+                paths_cfg, source = resolve_config()
+                base = LookupContext(
+                    cache_dir=paths_cfg.metadata_cache_dir,
+                    curated_dir=paths_cfg.curated_metadata_dir,
+                    config_path=source.config_path,
+                )
+            except Exception:
+                base = LookupContext()
+        base.query = entry.title or ""
+        base.release_key = entry.release_key
+        base.title = entry.title or ""
+        base.disk_stems = [Path(f).stem for f in (entry.adf_files or [])]
+        return base
+
+    def _start_lookup(
+        self,
+        entry: "StagedReleaseEntry",
+        mode: str,
+        query: str,
+        worker_result: dict,
+        worker_error: dict,
+    ) -> bool:
+        """Start a background lookup for ``entry`` (no-op if one is running)."""
+        if self._lookup_worker is not None and self._lookup_worker.isRunning():
+            return False
+        ctx = self._resolve_lookup_context(entry)
+        if ctx is not None and query:
+            ctx.query = query
+        worker = PreviewWorker(
+            entry.release_key,
+            query,
+            mode,
+            title=entry.title or "",
+            disk_stems=[Path(f).stem for f in (entry.adf_files or [])],
+            context=ctx,
+            parent=self,
+        )
+        worker.lookup_completed.connect(
+            lambda key, candidates, wr=worker_result: wr.update(
+                candidates=candidates, key=key
+            )
+        )
+        worker.lookup_failed.connect(
+            lambda key, error, we=worker_error: we.update(key=key, error=error)
+        )
+        self._lookup_worker = worker
+        worker.start()
+        return True
+
     def _on_lookup(self, mode: str = "online") -> None:
-        """Perform online/offline lookup for the selected release."""
+        """Perform a real online/offline lookup for the selected release.
+
+        Online and Offline lookups share ONE implementation
+        (:mod:`amiga_adf_library_builder.lookup_workflow`); the mode only
+        selects the provider class. The provider list shown here comes from
+        :func:`lookup_workflow.providers_for_mode`, so an offline lookup never
+        lists an online provider (GH-89) and no placeholder text remains.
+        """
         if self._state.current_library is None or not self._state.selected_release_key:
             return
-
         entry = self._state.current_library.releases.get(self._state.selected_release_key)
         if not entry:
             return
 
         dialog = QDialog(self)
-        dialog.setWindowTitle(f"{mode.capitalize()} Lookup: {entry.title}")
-        dialog.resize(500, 400)
+        mode_label = "Online" if mode in ("online", "alternate") else "Offline/Local"
+        dialog.setWindowTitle(f"{mode_label} Lookup: {entry.title}")
+        dialog.resize(560, 460)
         layout = QVBoxLayout(dialog)
 
-        # Search query
+        # Search query (alternate search lets the operator override it).
         form = QFormLayout()
-        query_edit = QLineEdit(entry.title)
+        query_edit = QLineEdit(entry.title or "")
         query_edit.selectAll()
         form.addRow("Search Query:", query_edit)
         layout.addLayout(form)
 
-        # Results area
+        # Providers consulted -- derived from the shared classification, never
+        # hardcoded, so online and offline never share a provider list.
+        provider_lines = [
+            f"  - {pid}" for pid in providers_for_mode(mode)
+        ]
+        provider_text = (
+            "Local media sources (read-only, no network):\n"
+            if mode == "offline"
+            else "Online provider chain (network required):\n"
+        ) + "\n".join(provider_lines)
+        provider_label = QLabel(provider_text)
+        provider_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(provider_label)
+
+        status_label = QLabel("Starting lookup…")
+        layout.addWidget(status_label)
+
         results_label = QLabel("Results:")
         layout.addWidget(results_label)
-
         results_list = QTextEdit()
         results_list.setReadOnly(True)
         results_list.setFontFamily("monospace")
         layout.addWidget(results_list)
 
-        # Placeholder - would integrate with actual provider
-        results_list.setText(f"[{mode.capitalize()} lookup not yet implemented]\n"
-                             f"Would search for: {query_edit.text()}\n"
-                             f"Provider: Hall of Light / Launchbox / etc.")
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        apply_btn = QPushButton("Apply to release")
+        apply_btn.setEnabled(False)
+        apply_btn.setToolTip(
+            "Apply this lookup result to the selected release "
+            "(staged curation state only)"
         )
-        buttons.accepted.connect(dialog.accept)
+        layout.addWidget(apply_btn)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.rejected.connect(dialog.reject)
+        buttons.accepted.connect(dialog.accept)
         layout.addWidget(buttons)
 
-        dialog.exec()
+        worker_result: dict = {}
+        worker_error: dict = {}
+
+        def _format_candidates(candidates: list[dict]) -> str:
+            lines = []
+            for cand in candidates:
+                lines.append(f"Status: {cand.get('status', 'unknown')}")
+                if cand.get("title"):
+                    lines.append(f"Title: {cand.get('title')}")
+                if cand.get("provider"):
+                    lines.append(f"Provider: {cand.get('provider')}")
+                if cand.get("year"):
+                    lines.append(f"Year: {cand.get('year')}")
+                if cand.get("developer"):
+                    lines.append(f"Developer: {cand.get('developer')}")
+                if cand.get("publisher"):
+                    lines.append(f"Publisher: {cand.get('publisher')}")
+                if cand.get("description"):
+                    lines.append(f"Description: {cand.get('description')}")
+                if cand.get("artwork_url"):
+                    lines.append(f"Artwork URL: {cand.get('artwork_url')}")
+                if cand.get("local_cached_path"):
+                    lines.append(f"Local artwork: {cand.get('local_cached_path')}")
+                if cand.get("local_category"):
+                    lines.append(f"Category: {cand.get('local_category')}")
+                if cand.get("local_outcome"):
+                    lines.append(f"Outcome: {cand.get('local_outcome')}")
+                if cand.get("local_review_reason"):
+                    lines.append(f"Review reason: {cand.get('local_review_reason')}")
+                lines.append(f"Confidence: {cand.get('confidence', 0.0):.2f}")
+                consulted = cand.get("consulted") or []
+                if consulted:
+                    lines.append("Consulted: " + ", ".join(consulted))
+                local_state = cand.get("local_source_state") or []
+                if local_state:
+                    lines.append("Local source state:")
+                    lines.extend(f"  {line}" for line in local_state)
+                lines.append("")
+            return "\n".join(lines) if lines else "(no results)"
+
+        def _on_worker_finished() -> None:
+            if worker_result:
+                status_label.setText(f"Lookup complete: {worker_result.get('key', '')}")
+                results_list.setText(_format_candidates(worker_result.get("candidates", [])))
+                apply_btn.setEnabled(
+                    bool(worker_result) and worker_result.get("candidates", [{}])[0].get("status") in ("found", "needs_review")
+                )
+            elif worker_error:
+                status_label.setText("Lookup failed.")
+                results_list.setText(
+                    f"Lookup failed: {worker_error.get('error', 'unknown error')}\n"
+                )
+            else:
+                status_label.setText("Lookup complete (no results).")
+
+        def _on_apply() -> None:
+            candidates = worker_result.get("candidates") or []
+            if not candidates:
+                return
+            try:
+                self._apply_lookup_candidate(entry, mode, candidates[0])
+            except ValueError as exc:
+                QMessageBox.warning(self, "Apply Lookup", str(exc))
+                return
+            apply_btn.setEnabled(False)
+            status_label.setText("Result applied to staged curation state.")
+
+        apply_btn.clicked.connect(_on_apply)
+
+        if not self._start_lookup(entry, mode, query_edit.text().strip(), worker_result, worker_error):
+            status_label.setText("A lookup is already running; please wait for it to finish.")
+            results_list.setText("(lookup in progress in another dialog)")
+            apply_btn.setEnabled(False)
+
+        dialog.finished.connect(lambda _code: None)
+        # The worker updates the dialog when it finishes; the dialog stays
+        # modal-less so the user can read results as they arrive.
+        worker = self._lookup_worker
+        if worker is not None:
+            worker.finished.connect(_on_worker_finished)
+
+        dialog.show()
+        # Keep a reference so the dialog (and its worker) are not garbage
+        # collected mid-lookup; released on close.
+        dialog.finished.connect(lambda _code: self._release_lookup_worker())
+
+    def _release_lookup_worker(self) -> None:
+        worker = self._lookup_worker
+        if worker is not None and not worker.isRunning():
+            worker.deleteLater()
+            self._lookup_worker = None
+
+    # --- Apply lookup result (staged curation state only) --------------------
+
+    @staticmethod
+    def _metadata_snapshot(entry: "StagedReleaseEntry") -> dict:
+        """Snapshot of exactly the fields a lookup apply may change."""
+        return {
+            "title": entry.title,
+            "metadata_source": entry.metadata_source,
+            "match_confidence": entry.match_confidence,
+            "confidence": entry.confidence,
+            "artwork_front": entry.artwork_front,
+            "curation_state": entry.curation_state.value,
+        }
+
+    @staticmethod
+    def _restore_metadata_snapshot(entry: "StagedReleaseEntry", snap: dict) -> None:
+        """Restore one pre/post snapshot onto ``entry`` (undo/redo support)."""
+        entry.title = snap.get("title")
+        entry.metadata_source = snap.get("metadata_source")
+        entry.match_confidence = snap.get("match_confidence")
+        entry.confidence = snap.get("confidence", 0.0) or 0.0
+        entry.artwork_front = snap.get("artwork_front")
+        try:
+            entry.curation_state = StagedState(snap.get("curation_state") or "pending")
+        except (TypeError, ValueError):
+            pass
+
+    def _apply_lookup_candidate(
+        self, entry: "StagedReleaseEntry", mode: str, candidate: dict
+    ) -> None:
+        """Apply one lookup candidate to the staged entry.
+
+        Mutates STAGED curation state only: the in-memory release entry and
+        its decision-log action. No export artifacts are written and no ADF /
+        original files are touched -- that happens only at an explicit Export.
+        Release identity (release_key, edition, group, adf_files, folder) is
+        never changed by a lookup apply.
+        """
+        status = candidate.get("status")
+        if status not in ("found", "needs_review"):
+            raise ValueError(
+                f"lookup candidate has no applicable result (status: {status!r})"
+            )
+        kind = candidate.get("kind", "online")
+
+        pre = self._metadata_snapshot(entry)
+        if kind == "online":
+            # Real provider-backed record: apply the canonical metadata
+            # fields. The artwork URL is surfaced in the dialog but is NOT
+            # written into path fields (artwork selection is a separate
+            # curation action).
+            entry.title = candidate.get("title") or entry.title
+            entry.metadata_source = candidate.get("provider") or entry.metadata_source
+            entry.match_confidence = candidate.get("confidence") or entry.match_confidence
+            detail = (
+                f"Online lookup applied: {entry.title!r} "
+                f"(provider: {entry.metadata_source}, "
+                f"conf {entry.match_confidence:.2f})"
+            )
+        else:
+            # Offline: local LaunchBox media source. Never references an
+            # online provider. auto_match has already cached the artwork
+            # (LocalMediaProvider guarantee); needs_review only flags it.
+            entry.metadata_source = "local_media"
+            entry.match_confidence = candidate.get("confidence") or entry.match_confidence
+            if candidate.get("local_cached_path"):
+                entry.artwork_front = candidate["local_cached_path"]
+            reason = candidate.get("local_review_reason") or ""
+            detail = (
+                f"Offline lookup applied: local media "
+                f"{candidate.get('local_outcome') or 'match'} "
+                f"(conf {entry.match_confidence:.2f})"
+                + (f"; review: {reason}" if reason else "")
+            )
+        entry.confidence = entry.match_confidence or entry.confidence
+        entry.curation_state = (
+            StagedState.NEEDS_REVIEW if status == "needs_review" else StagedState.MODIFIED
+        )
+        post = self._metadata_snapshot(entry)
+
+        action = StagedChange(
+            action=CurationAction.METADATA_EDIT,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            details=detail,
+            payload=json.dumps({"kind": kind, "pre": pre, "post": post}),
+        )
+        entry.actions.append(action)
+        self._record_action_for_undo(entry.release_key, action)
+        self._refresh_table()
+        self._update_summary()
+        self.state_changed.emit()
 
     def _on_alternate_lookup(self) -> None:
         """Perform alternate search with custom query."""
