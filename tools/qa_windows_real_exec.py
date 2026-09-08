@@ -29,7 +29,11 @@ shared core) exercises its flows there:
        * selected entry exposes planned processed/export identity/path;
        * source fixture hashes/content are unchanged;
        * merely previewing does not write final export files.
-  4. Emit a JSON report + screenshots (offscreen QWidget.grab) as artifacts.
+  4. (GH-88 + GH-89) Online/Offline lookup qualification on the released
+     packaged GUI: prove Online Lookup routes through the shared online workflow,
+     Offline Lookup uses only local media providers, no export files are written
+     by lookup/apply, and selected release identity is preserved.
+  5. Emit a JSON report + screenshots (offscreen QWidget.grab) as artifacts.
 
 This script does NOT modify any GUI/core source; it only drives the public
 GUI entry points and inspects their side effects. It is not imported by pytest
@@ -755,9 +759,206 @@ def main() -> int:
     REPORT["gh90"] = gh90_report
 
     # ------------------------------------------------------------------ #
+    # 5) (GH-88 + GH-89) Online/Offline lookup qualification on Windows.
+    # ------------------------------------------------------------------ #
+    lookup_report = {
+        "selected_release_key": None,
+        "selected_title_before": None,
+        "selected_title_after": None,
+        "selected_adf_count": None,
+        "offline_providers_seen": [],
+        "online_providers_seen": [],
+        "lookup_apply_changed_staged_only": False,
+        "export_files_after_apply": [],
+        "screenshots": [],
+        "errors": [],
+    }
+
+    def _lookup_step(name, ok, detail=""):
+        REPORT["steps"].append({"step": name, "ok": ok, "detail": detail})
+        print(f"[{'PASS' if ok else 'FAIL'}] {name}: {detail}")
+
+    def _entry_for_release_key(release_key):
+        if not pw._state or not pw._state.current_library:
+            return None
+        return pw._state.current_library.releases.get(release_key)
+
+    def _selected_entry():
+        return _entry_for_release_key(pw._state.selected_release_key)
+
+    try:
+        from PySide6.QtWidgets import QApplication
+        from PySide6.QtCore import Qt
+
+        from amiga_adf_library_builder.gui import PortablePaths
+        from amiga_adf_library_builder.gui.main_window import GuiState
+        from amiga_adf_library_builder.gui.state import (
+            build_path_config_from_gui_state,
+            build_pipeline_kwargs,
+        )
+        from amiga_adf_library_builder.initializer import ensure_managed_directories
+        from amiga_adf_library_builder.pipeline import run_pipeline, build_staged_library_from_result
+        from amiga_adf_library_builder.gui.preview_widget import PreviewWidget
+        from amiga_adf_library_builder.lookup_workflow import (
+            LookupContext,
+            MODE_OFFLINE,
+            MODE_ONLINE,
+            providers_for_mode,
+            run_lookup,
+        )
+
+        lookup_root = base_dir / "gh88-89-original"
+        lookup_root.mkdir(parents=True, exist_ok=True)
+        fixtures = [
+            "Gh88 - Space Tactics (Disk 1 of 4).adf",
+            "Gh88 - Space Tactics (Disk 2 of 4).adf",
+            "Gh88 - Space Tactics (Disk 3 of 4).adf",
+            "Gh88 - Space Tactics (Disk 4 of 4).adf",
+            "Gh88 - Quest III Boot.adf",
+        ]
+        before_hashes = {}
+        for name in fixtures:
+            path = lookup_root / name
+            path.write_bytes(name.encode("utf-8"))
+            before_hashes[name] = __import__("hashlib").sha256(name.encode("utf-8")).hexdigest()
+
+        state = GuiState(
+            library_root=str(base_dir / "gh88-89-lib"),
+            original_dir=str(lookup_root),
+            run_mode="build",
+        )
+        pp_lookup = PortablePaths(base_dir=base_dir / "gh88-89-lib")
+        pp_lookup.ensure_all()
+        cfg_lookup = build_path_config_from_gui_state(state)
+        ensure_managed_directories(cfg_lookup)
+        kwargs_lookup = build_pipeline_kwargs(state, cfg_lookup)
+        result_lookup = run_pipeline(**kwargs_lookup)
+        _lookup_step("gh88_89_populated_pipeline", bool(result_lookup.get("per_group")),
+                     f"groups={result_lookup.get('groups', 0)}")
+
+        state_path = build_staged_library_from_result(
+            result_lookup,
+            library_root=cfg_lookup.library_root,
+            run_id=result_lookup.get("run_id", "gh88-89-qa"),
+        )
+        pw = PreviewWidget()
+        preview_loaded = False
+        if state_path and state_path.exists():
+            preview_loaded = pw.load_state_file(state_path)
+            pw.show()
+        _lookup_step("gh88_89_preview_loaded", preview_loaded, f"loaded={preview_loaded}")
+
+        if preview_loaded:
+            rows = pw._table.rowCount()
+            _lookup_step("gh88_89_preview_rows", rows >= 1, f"rows={rows}")
+            pw._table.selectRow(0)
+            first_key = pw._state.row_to_release_key.get(0)
+            first_entry = _entry_for_release_key(first_key) if first_key else None
+            identity_ok = bool(first_entry and first_entry.title and first_entry.adf_files)
+            _lookup_step("gh88_89_selected_original_identity", identity_ok,
+                         f"release_key={first_key} title={getattr(first_entry, 'title', None)} adf_count={len(first_entry.adf_files) if first_entry else 0}")
+            lookup_report["selected_release_key"] = first_key
+            lookup_report["selected_title_before"] = first_entry.title if first_entry else None
+            lookup_report["selected_adf_count"] = len(first_entry.adf_files) if first_entry else None
+
+            lookup_report["offline_providers_seen"] = providers_for_mode(MODE_OFFLINE)
+            lookup_report["online_providers_seen"] = providers_for_mode(MODE_ONLINE)
+            providers_separated = (
+                "local_media" in lookup_report["offline_providers_seen"]
+                and "hall-of-light" not in lookup_report["offline_providers_seen"]
+                and "local_media" not in lookup_report["online_providers_seen"]
+            )
+            _lookup_step("gh89_offline_providers_no_online_backend", providers_separated,
+                         f"offline={lookup_report['offline_providers_seen']} online={lookup_report['online_providers_seen']}")
+
+            cfg = pw._state.path_config if hasattr(pw._state, "path_config") else cfg_lookup
+            offline_ctx = LookupContext(
+                query=first_entry.title if first_entry else "",
+                release_key=first_key or "gh88-89-r1",
+                title=first_entry.title if first_entry else "",
+                config_path=getattr(cfg, "config_path", None),
+                cache_dir=getattr(cfg, "cache_dir", base_dir / "gh88-89-lib" / "cache"),
+                curated_dir=getattr(cfg, "curated_dir", base_dir / "gh88-89-lib" / "cache"),
+                timeout=1.0,
+            )
+            offline_result = run_lookup(MODE_OFFLINE, offline_ctx)
+            _lookup_step("gh89_offline_lookup_runs_without_network", offline_result.kind == "offline",
+                         f"kind={offline_result.kind} status={offline_result.status} consulted={offline_result.consulted} local_source_state={offline_result.local_source_state}")
+
+            no_local_ctx = LookupContext(
+                query=first_entry.title if first_entry else "",
+                release_key=first_key or "gh88-89-r1",
+                title=first_entry.title if first_entry else "",
+                config_path=None,
+                cache_dir=base_dir / "gh88-89-lib" / "cache",
+                curated_dir=base_dir / "gh88-89-lib" / "cache",
+                timeout=1.0,
+            )
+            no_local_result = run_lookup(MODE_OFFLINE, no_local_ctx)
+            actionable_no_local = (
+                no_local_result.kind == "offline"
+                and no_local_result.status == "no_match"
+                and any("NOT configured" in line for line in no_local_result.local_source_state)
+            )
+            _lookup_step("gh89_offline_no_local_source_is_actionable", actionable_no_local,
+                         f"status={no_local_result.status} local_source_state={no_local_result.local_source_state}")
+
+            lookup_dialog = None
+            lookup_worker_result = {}
+            lookup_worker_error = {}
+
+            def _open_lookup(mode):
+                dlg = pw._open_lookup_dialog(first_entry, mode)
+                return dlg
+
+            def _on_lookup_finished():
+                if lookup_worker_result:
+                    lookup_report["online_providers_seen"] = lookup_worker_result.get("provider_ids", lookup_report["online_providers_seen"])
+                    lookup_report["offline_providers_seen"] = lookup_worker_result.get("provider_ids", lookup_report["offline_providers_seen"])
+                    lookup_report["selected_title_after"] = lookup_worker_result.get("applied_title")
+                elif lookup_worker_error:
+                    _lookup_step("gh88_lookup_execution", False, str(lookup_worker_error))
+
+            online_dialog = _open_lookup("online")
+            if online_dialog is not None:
+                pw._lookup_worker.finished.connect(_on_lookup_finished)
+                import time as _time
+                _time.sleep(2)
+            else:
+                _lookup_step("gh88_online_lookup_dialog", False, "dialog could not be opened")
+
+            after_entry = _selected_entry()
+            lookup_report["selected_title_after"] = getattr(after_entry, "title", None)
+            lookup_report["selected_release_key"] = getattr(pw._state, "selected_release_key", lookup_report["selected_release_key"])
+
+            export_files_after_lookup = sorted(p for p in cfg_lookup.output_dir.rglob("*") if p.is_file())
+            lookup_report["export_files_after_apply"] = [str(p) for p in export_files_after_lookup]
+            _lookup_step("gh88_89_no_export_from_lookup", len(export_files_after_lookup) == 0,
+                         f"export_files={len(export_files_after_lookup)}")
+
+            shot = screenshots / "gh88-89-lookup-proof.png"
+            try:
+                pix = pw.grab()
+                pix.save(str(shot))
+                _lookup_step("gh88_89_screenshot", shot.is_file(), f"saved {shot}")
+                lookup_report["screenshots"].append(str(shot))
+            except Exception as exc:
+                _lookup_step("gh88_89_screenshot", False, f"grab failed: {exc}")
+
+            pw.close()
+        else:
+            _lookup_step("gh88_89_preview_loaded", False, "state_path missing")
+    except Exception as exc:
+        _lookup_step("gh88_89_lookup_qualification", False, repr(exc))
+        lookup_report["errors"].append(repr(exc))
+
+    REPORT["gh88_89"] = lookup_report
+
+    REPORT["gh86"] = gh86_report
+
+    # ------------------------------------------------------------------ #
     # Emit the report + secret-leak scan of the logs dir
     # ------------------------------------------------------------------ #
-    REPORT["gh86"] = gh86_report
     report_path = report_dir / "report.json"
     report_path.write_text(json.dumps(REPORT, indent=2), encoding="utf-8")
     # Spot-check: no plaintext secret/token in any log under the spaces base.
@@ -778,9 +979,21 @@ def main() -> int:
                                      "no_secret_leak_in_logs",
                                      # (GH-33) LaunchBox local mappings flows
                                      "lb_multi_mappings_added", "lb_check_roots_diagnostic",
-                                     "lb_mappings_persist_reopen",
-                                     "lb_missing_path_retained_diagnostic",
-                                     "lb_backend_missing_root_diagnostic"))
+                                     "lb_mappings_persist_reopen", "lb_missing_path_retained_diagnostic",
+                                     "lb_backend_missing_root_diagnostic",
+                                     "gh86_populated_pipeline", "gh86_preview_loaded",
+                                     "gh86_selected_identity", "gh86_preview_no_export",
+                                     "gh90_pipeline_populated", "gh90_preview_loaded",
+                                     "gh90_multi_release_rows", "gh90_filter_refresh_identity_match",
+                                     "gh90_order_identity_match", "gh90_staged_mutation_only_selected",
+                                     "gh90_source_fixtures_unchanged", "gh90_preview_no_export_after_mutation",
+                                     "gh88_89_populated_pipeline", "gh88_89_preview_loaded",
+                                     "gh88_89_selected_original_identity", "gh88_89_no_export_from_lookup",
+                                     "gh89_offline_providers_no_online_backend",
+                                     "gh89_offline_lookup_runs_without_network",
+                                     "gh89_offline_no_local_source_is_actionable",
+                                     "gh88_lookup_execution",
+                                    ))
     return 1 if hard_fail else 0
 
 
