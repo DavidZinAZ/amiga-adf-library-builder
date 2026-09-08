@@ -628,13 +628,17 @@ def main() -> int:
             pw._filter_combo.setCurrentText("All")
             pw._apply_filter()
 
+            combo_items = {
+                "Pending": StagedState.PENDING.value,
+                "Accepted": StagedState.ACCEPTED.value,
+                "Rejected": StagedState.REJECTED.value,
+                "Modified": StagedState.MODIFIED.value,
+                "Needs Review": StagedState.NEEDS_REVIEW.value,
+            }
             combo_case_safe = True
-            canonical_values = {state.value for state in StagedState}
-            for i in range(pw._filter_combo.count()):
-                data = pw._filter_combo.itemData(i)
-                if data == "all":
-                    continue
-                if data not in canonical_values:
+            for label, expected in combo_items.items():
+                idx = pw._filter_combo.findText(label)
+                if idx < 0 or pw._filter_combo.itemData(idx) != expected:
                     combo_case_safe = False
                     break
             case_or_mixed = {
