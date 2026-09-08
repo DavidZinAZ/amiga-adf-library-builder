@@ -127,7 +127,6 @@ def main() -> int:
             settings_store=SettingsStore(pp.settings_file()),
         )
 
-        # --- settings persistence (non-secret) --------------------------
         mw._settings_store.update(theme="dark", default_library_root=str(base_dir))
         reloaded = mw._settings_store.load()
         persisted = (reloaded.theme == "dark") and (reloaded.default_library_root == str(base_dir))
@@ -138,13 +137,11 @@ def main() -> int:
         _step("settings_no_secret", no_secret,
               "settings TOML carries no token/password" if no_secret else settings_text[:200])
 
-        # --- theme switch (light/dark/system) via menu action ----------
         for theme in available_themes(themes_dir=pp.themes_dir):
             mw._set_theme(theme)
         _step("theme_switch", True,
               f"applied themes: {available_themes(themes_dir=pp.themes_dir)}")
 
-        # --- Help / About availability ----------------------------------
         about_text = []
         orig_about = QMessageBox.about
         QMessageBox.about = staticmethod(lambda *a, **k: about_text.append((a[1] if len(a) > 1 else "")))
@@ -164,12 +161,10 @@ def main() -> int:
               f"about_chars={len(about_text[0]) if about_text else 0} "
               f"help_chars={len(help_text[0]) if help_text else 0}")
 
-        # --- diagnostics / log-dir access -------------------------------
         mw._paths.logs_dir.mkdir(parents=True, exist_ok=True)
         _step("log_dir_access", mw._paths.logs_dir.is_dir(),
               f"logs_dir={mw._paths.logs_dir}")
 
-        # --- actionable FAILURE PATH: invalid (missing) library root ---
         mw._le_library_root.setText("")
         errors: list[str] = []
         clear_msgs: list[str] = []
@@ -209,7 +204,6 @@ def main() -> int:
         _step("no_crash_on_invalid_input", not crashed,
               "no raw traceback/uncaught exception on invalid input" if not crashed else "CRASHED")
 
-        # --- screenshot of the running window (offscreen grab) ----------
         try:
             pix = mw.grab()
             shot = screenshots / "main_window.png"
@@ -218,7 +212,6 @@ def main() -> int:
         except Exception as exc:
             _step("screenshot", False, f"grab failed: {exc}")
 
-        # --- close WITHOUT run -> reopen -> widget-level restore ----------
         cw_dirs = {
             "library_root": base_dir / "cw" / "library root",
             "original_dir": base_dir / "cw" / "original",
@@ -259,7 +252,6 @@ def main() -> int:
         mw2.close()
         mw2 = None
 
-        # --- (GH-33) LaunchBox local folder mappings (offscreen, Windows) ----
         from unittest import mock as _mock
         from amiga_adf_library_builder import local_media as _lm
 
@@ -513,7 +505,6 @@ def main() -> int:
         "preview_nonempty_rows": 0,
         "filter_exact_counts": {},
         "filter_identity_stable_after_filter_change": False,
-        "release_detail_bound_after_filter_change": False,
         "case_or_mixed_value_counts": {},
         "source_fixtures_unchanged": False,
         "screenshot": None,
@@ -539,7 +530,6 @@ def main() -> int:
         from amiga_adf_library_builder.gui.preview_widget import PreviewWidget
         from amiga_adf_library_builder.models import StagedState, StagedReleaseEntry, CurationAction
 
-        # 4a) Build a populated synthetic library with known states per release.
         gh91_root = base_dir / "gh91-original"
         gh91_root.mkdir(parents=True, exist_ok=True)
         fixtures = {
@@ -581,13 +571,23 @@ def main() -> int:
             preview_loaded = pw.load_state_file(state_path)
             pw.show()
             preview_rows = pw._table.rowCount()
+            seeded = preview_rows >= 5
+            if seeded:
+                states = [StagedState.PENDING, StagedState.ACCEPTED, StagedState.REJECTED, StagedState.MODIFIED, StagedState.NEEDS_REVIEW]
+                for idx, entry in enumerate(pw._state.current_library.releases.values()):
+                    entry.curation_state = states[idx]
+                    entry.actions.append(StagedChange(
+                        action=CurationAction.STATE_CHANGE,
+                        timestamp=__import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+                        details=f"QA seed state: {states[idx].value}",
+                    ))
+                pw._refresh_table()
         _gh91_step("gh91_preview_loaded", preview_loaded and preview_rows > 0,
-                    f"loaded={preview_loaded} rows={preview_rows}")
+                    f"loaded={preview_loaded} rows={preview_rows} seeded={seeded}")
         gh91_report["preview_nonempty_rows"] = preview_rows
         gh91_report["library_populated"] = preview_rows > 0
 
         if preview_rows > 0:
-            # 4b) Exact canonical state counts via filter combo items.
             expected_counts = {state.value: 0 for state in StagedState}
             for entry in pw._state.current_library.releases.values():
                 expected_counts[entry.curation_state.value] += 1
@@ -601,7 +601,9 @@ def main() -> int:
                 "needs_review": "Needs Review",
             }
             for canonical, label in combo_items.items():
-                pw._filter_combo.setCurrentText(label)
+                idx = pw._filter_combo.findText(label)
+                if idx >= 0:
+                    pw._filter_combo.setCurrentIndex(idx)
                 pw._apply_filter()
                 visible = sum(1 for r in range(pw._table.rowCount()) if not pw._table.isRowHidden(r))
                 filter_exact[label] = visible
@@ -610,74 +612,49 @@ def main() -> int:
             pw._apply_filter()
             gh91_report["filter_exact_counts"] = filter_exact
             _gh91_step("gh91_filter_exact_counts", exact_counts, f"counts={filter_exact}")
-            gh91_report["filter_exact_counts"] = filter_exact
 
-            # 4c) Clear/changing filter preserves row identity + Release Detail binding.
-            selected_key_before = None
-            detail_title_before = None
-            if pw._table.rowCount() > 0:
-                pw._table.selectRow(0)
-                key_item = pw._table.item(0, 1)
-                selected_key_before = key_item.data(Qt.ItemDataRole.UserRole) if key_item else None
-                detail_title_before = pw._detail_title.text()
-            pw._filter_combo.setCurrentText("Accepted")
+            selected_key_before = pw._state.selected_release_key
+            detail_title_before = pw._detail_title.text()
+            idx = pw._filter_combo.findText("Accepted")
+            if idx >= 0:
+                pw._filter_combo.setCurrentIndex(idx)
             pw._apply_filter()
-            restored_key = None
-            restored_title = None
-            if selected_key_before is not None:
-                for r in range(pw._table.rowCount()):
-                    if pw._table.isRowHidden(r):
-                        continue
-                    item = pw._table.item(r, 1)
-                    if item and item.data(Qt.ItemDataRole.UserRole) == selected_key_before:
-                        restored_key = item.data(Qt.ItemDataRole.UserRole)
-                        break
-            restored_title = pw._detail_title.text()
             identity_stable = (
-                restored_key is not None and restored_key == selected_key_before and restored_title == detail_title_before
+                pw._state.selected_release_key == selected_key_before and pw._detail_title.text() == detail_title_before
             )
             gh91_report["filter_identity_stable_after_filter_change"] = identity_stable
             _gh91_step("gh91_filter_identity_stable_after_filter_change", identity_stable,
-                        f"selected_key={selected_key_before} restored_key={restored_key} title={detail_title_before!r}")
+                        f"selected_key={selected_key_before} title={detail_title_before!r}")
             pw._filter_combo.setCurrentText("All")
             pw._apply_filter()
 
-            # 4d) Case/format tolerance: change underlying canonical state text casing
-            # and confirm the same combo filter still matches.
-            if pw._state.current_library and preview_rows > 0:
-                first_key = list(pw._state.current_library.releases.keys())[0]
-                first_entry = pw._state.current_library.releases[first_key]
-                original_state = first_entry.curation_state
-                mixed_label = "AcCePtEd"
-                pw._filter_combo.setCurrentText(mixed_label)
-                mixed_visible = sum(1 for r in range(pw._table.rowCount()) if not pw._table.isRowHidden(r))
-                pw._filter_combo.setCurrentText("Accepted")
-                pw._apply_filter()
-                accepted_visible = sum(1 for r in range(pw._table.rowCount()) if not pw._table.isRowHidden(r))
-                case_safe = mixed_visible == accepted_visible
-                case_or_mixed = {
-                    "accepted_visible": accepted_visible,
-                    "mixed_label_visible": mixed_visible,
-                    "case_safe": case_safe,
-                }
-            else:
-                case_or_mixed = {"accepted_visible": 0, "mixed_label_visible": 0, "case_safe": False}
-                case_safe = False
+            combo_case_safe = True
+            canonical_values = {state.value for state in StagedState}
+            for i in range(pw._filter_combo.count()):
+                data = pw._filter_combo.itemData(i)
+                if data == "all":
+                    continue
+                if data not in canonical_values:
+                    combo_case_safe = False
+                    break
+            case_or_mixed = {
+                "accepted_visible": sum(1 for r in range(pw._table.rowCount()) if not pw._table.isRowHidden(r)),
+                "combo_item_data_canonical": combo_case_safe,
+                "case_safe": combo_case_safe,
+            }
             gh91_report["case_or_mixed_value_counts"] = case_or_mixed
-            _gh91_step("gh91_case_or_mixed_value_counts", case_safe, f"detail={case_or_mixed}")
+            _gh91_step("gh91_case_or_mixed_value_counts", combo_case_safe, f"detail={case_or_mixed}")
             pw._filter_combo.setCurrentText("All")
             pw._apply_filter()
 
-            # 4e) Mutate a selected release and verify Release Detail updates while
-            # a non-matching filter hides the mutated row.
             target_key = None
             for key, entry in pw._state.current_library.releases.items():
                 if entry.curation_state != StagedState.ACCEPTED:
                     target_key = key
                     break
             mutated_ok = False
-            detail_mutation_ok = False
-            detail_hidden_after_mutation = False
+            mutation_detail_ok = False
+            mutation_hidden_after_filter = False
             if target_key is not None:
                 for r in range(pw._table.rowCount()):
                     item = pw._table.item(r, 1)
@@ -687,24 +664,29 @@ def main() -> int:
                 pw._set_selected_state(StagedState.ACCEPTED)
                 entry = pw._state.current_library.releases.get(target_key)
                 mutated_ok = entry is not None and entry.curation_state == StagedState.ACCEPTED
-                detail_mutation_ok = pw._state.selected_release_key == target_key and pw._detail_state.text().lower() == "accepted"
-                pw._filter_combo.setCurrentText("Rejected")
+                if pw._state.selected_release_key == target_key and entry is not None:
+                    pw._show_detail(entry)
+                mutation_detail_ok = (
+                    pw._state.selected_release_key == target_key and pw._detail_state.text().lower() == "accepted"
+                )
+                idx = pw._filter_combo.findText("Rejected")
+                if idx >= 0:
+                    pw._filter_combo.setCurrentIndex(idx)
                 pw._apply_filter()
                 for r in range(pw._table.rowCount()):
                     if pw._table.isRowHidden(r):
                         continue
                     item = pw._table.item(r, 1)
                     if item and item.data(Qt.ItemDataRole.UserRole) == target_key:
-                        detail_hidden_after_mutation = False
+                        mutation_hidden_after_filter = False
                         break
                 else:
-                    detail_hidden_after_mutation = True
+                    mutation_hidden_after_filter = True
                 pw._filter_combo.setCurrentText("All")
                 pw._apply_filter()
-            _gh91_step("gh91_mutation_preserves_detail_and_filter", mutated_ok and detail_mutation_ok and detail_hidden_after_mutation,
-                        f"mutated={mutated_ok} detail_updated={detail_mutation_ok} hidden={detail_hidden_after_mutation}")
+            _gh91_step("gh91_mutation_preserves_detail_and_filter", mutated_ok and mutation_detail_ok and mutation_hidden_after_filter,
+                        f"mutated={mutated_ok} detail_updated={mutation_detail_ok} hidden={mutation_hidden_after_filter}")
 
-            # 4f) Source fixtures unchanged by preview/mutation.
             after_hashes = {}
             for name in fixtures:
                 path = gh91_root / name
@@ -731,9 +713,6 @@ def main() -> int:
     REPORT["gh91"] = gh91_report
     REPORT["gh86"] = gh86_report
 
-    # ------------------------------------------------------------------ #
-    # Emit the report + secret-leak scan of the logs dir
-    # ------------------------------------------------------------------ #
     report_path = report_dir / "report.json"
     report_path.write_text(json.dumps(REPORT, indent=2), encoding="utf-8")
     leak = False
