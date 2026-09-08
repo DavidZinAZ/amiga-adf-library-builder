@@ -191,20 +191,21 @@ class PreviewWidget(QWidget):
         filter_bar = QHBoxLayout()
 
         self._filter_combo = QComboBox()
-        self._filter_combo.addItems([
-            "All",
-            "Pending",
-            "Accepted",
-            "Rejected",
-            "Modified",
-            "Needs Review",
-            "Missing Artwork",
-            "Missing RTFM",
-            "Unmatched",
-            "Excluded",
-        ])
+        # Store canonical state values as item data for reliable filtering.
+        # Display text can be user-friendly; item data is the exact StagedState value.
+        self._filter_combo.addItem("All", "all")
+        self._filter_combo.addItem("Pending", StagedState.PENDING.value)
+        self._filter_combo.addItem("Accepted", StagedState.ACCEPTED.value)
+        self._filter_combo.addItem("Rejected", StagedState.REJECTED.value)
+        self._filter_combo.addItem("Modified", StagedState.MODIFIED.value)
+        self._filter_combo.addItem("Needs Review", StagedState.NEEDS_REVIEW.value)
+        # Additional filter criteria (not direct StagedState values) - use sentinel values
+        self._filter_combo.addItem("Missing Artwork", "missing_artwork")
+        self._filter_combo.addItem("Missing RTFM", "missing_rtfm")
+        self._filter_combo.addItem("Unmatched", "unmatched")
+        self._filter_combo.addItem("Excluded", "excluded")
         self._filter_combo.setToolTip("Filter releases by curation state")
-        self._filter_combo.currentTextChanged.connect(self._apply_filter)
+        self._filter_combo.currentIndexChanged.connect(self._apply_filter)
         filter_bar.addWidget(QLabel("Filter:"))
         filter_bar.addWidget(self._filter_combo)
 
@@ -516,17 +517,22 @@ class PreviewWidget(QWidget):
 
     def _apply_filter(self) -> None:
         """Apply the current filter and search to the table."""
-        filter_text = self._filter_combo.currentText()
+        # Use item data (canonical state value) for reliable filtering.
+        # Display text is user-friendly; item data matches the stored state values.
+        filter_data = self._filter_combo.currentData()
         search_text = self._search.text().strip().lower()
 
         for row in range(self._table.rowCount()):
             show = True
 
             # State filter
-            if filter_text != "All":
+            if filter_data != "all":
                 state_item = self._table.item(row, 0)
-                if state_item and state_item.text() != filter_text:
-                    show = False
+                if state_item:
+                    # The canonical state value is stored in UserRole+1
+                    row_state = state_item.data(Qt.ItemDataRole.UserRole + 1)
+                    if row_state != filter_data:
+                        show = False
 
             # Search filter
             if show and search_text:
