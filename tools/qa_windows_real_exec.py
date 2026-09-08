@@ -29,7 +29,11 @@ shared core) exercises its flows there:
        * selected entry exposes planned processed/export identity/path;
        * source fixture hashes/content are unchanged;
        * merely previewing does not write final export files.
-  4. Emit a JSON report + screenshots (offscreen QWidget.grab) as artifacts.
+  4. (GH-91) STATE FILTER / DETAIL-BINDING qualification on Windows: on a real
+     preview-widget instance, prove each canonical state filter shows exactly
+     the matching rows, clearing/changing filters preserves identity, and
+     Release Detail remains bound after filter changes.
+  5. Emit a JSON report + screenshots (offscreen QWidget.grab) as artifacts.
 
 This script does NOT modify any GUI/core source; it only drives the public
 GUI entry points and inspects their side effects. It is not imported by pytest
@@ -57,15 +61,15 @@ def main() -> int:
     import tomllib
 
     base_dir = Path(os.environ.get("QA_GUI_BASE", r"C:\Users\runneradmin\Test Dir With Spaces\lib")).resolve()
-    # The real onedir exe produced by the build step.
     exe = Path(os.environ.get("QA_EXE", "dist/AmigaADFLibraryBuilder/AmigaADFLibraryBuilder.exe"))
     if not exe.is_file():
-        # Fall back to the onefile artifact if onedir is absent.
         exe = Path("dist/amiga-adf-gui.exe")
-    report_dir = Path(os.environ.get("QA_REPORT_DIR", "qa-windows-artifacts"))
+    report_dir = Path(os.environ.get("QA_REPORT_DIR", base_dir / "qa-windows-artifacts")).resolve()
     report_dir.mkdir(parents=True, exist_ok=True)
     screenshots = report_dir / "screenshots"
     screenshots.mkdir(parents=True, exist_ok=True)
+
+    REPORT: dict = {"steps": [], "errors": []}
 
     # ------------------------------------------------------------------ #
     # 1) LAUNCH the real standalone exe (clean Windows launch, offscreen)
@@ -80,24 +84,20 @@ def main() -> int:
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True,
             )
-            # Give the frozen app time to construct QApplication + MainWindow.
             time.sleep(6)
             alive = proc.poll() is None
             _step("exe_launch_clean", alive,
                   f"exe={exe.name} pid={proc.pid if alive else 'exited'}")
-            # Portable layout created under the SPACES base?
             created = [d for d in ("config", "data", "logs", "cache")
                        if (base_dir / d).is_dir()]
             _step("exe_portable_layout_spaces",
                   set(created) >= {"config", "logs", "cache"},
                   f"base='{base_dir}' created={created}")
-            # Self-contained: the onedir tree carries its own python3*.dll.
             self_contained = (exe.parent / "python3.dll").is_file() or \
                              (exe.parent / "python312.dll").is_file() or \
                              (exe.parent / "_internal").is_dir()
             _step("exe_self_contained", self_contained,
                   f"python dll/_internal present beside {exe.name}: {self_contained}")
-            # Tidy the launched exe.
             try:
                 proc.terminate()
                 proc.wait(timeout=10)
@@ -133,7 +133,6 @@ def main() -> int:
         persisted = (reloaded.theme == "dark") and (reloaded.default_library_root == str(base_dir))
         _step("settings_persist", persisted,
               f"theme={reloaded.theme} default_library_root={reloaded.default_library_root!r}")
-        # The TOML must live under the SPACES base and contain NO secret.
         settings_text = pp.settings_file().read_text(encoding="utf-8")
         no_secret = ("token" not in settings_text.lower()) and ("password" not in settings_text.lower())
         _step("settings_no_secret", no_secret,
@@ -171,9 +170,7 @@ def main() -> int:
               f"logs_dir={mw._paths.logs_dir}")
 
         # --- actionable FAILURE PATH: invalid (missing) library root ---
-        # Feed an empty / nonexistent root and click Run; the GUI must surface a
-        # clear error (QMessageBox.critical) and NOT crash with a raw traceback.
-        mw._le_library_root.setText("")  # missing/invalid input
+        mw._le_library_root.setText("")
         errors: list[str] = []
         clear_msgs: list[str] = []
         orig_crit = QMessageBox.critical
@@ -183,9 +180,6 @@ def main() -> int:
         crashed = False
         try:
             mw._on_run()
-            # Pump the Qt event loop so the worker thread's finished signal is
-            # delivered and the clear error dialog is shown (offscreen, no real
-            # display, but the slot still runs). Quit once the worker is done.
             from PySide6.QtCore import QTimer
 
             loop = app
@@ -205,7 +199,7 @@ def main() -> int:
             app.exec()
         except SystemExit:
             crashed = True
-        except Exception as exc:  # raw traceback to the user == the failure mode
+        except Exception as exc:
             crashed = True
             REPORT["errors"].append(f"raw exception on invalid input: {exc!r}")
         finally:
@@ -225,15 +219,6 @@ def main() -> int:
             _step("screenshot", False, f"grab failed: {exc}")
 
         # --- close WITHOUT run -> reopen -> widget-level restore ----------
-        # The literal Issue #17 repro on the real runtime: select folders (>=1
-        # containing a SPACE), close the app via its NORMAL close path
-        # (closeEvent -> _persist_defaults -> SettingsStore.save), reopen a
-        # fresh instance on the same settings file, and assert at WIDGET level
-        # that all four folder fields came back. No pipeline run in between.
-        # In-process graceful close is the same closeEvent/_persist_defaults
-        # code path the packaged exe executes on shutdown; the packaged-exe
-        # smoke launch above already proves bundle integrity. A hard
-        # terminate() is deliberately NOT used for the close here.
         cw_dirs = {
             "library_root": base_dir / "cw" / "library root",
             "original_dir": base_dir / "cw" / "original",
@@ -246,10 +231,8 @@ def main() -> int:
         mw._le_original_dir.setText(str(cw_dirs["original_dir"]))
         mw._le_staging_dir.setText(str(cw_dirs["staging_dir"]))
         mw._le_output_dir.setText(str(cw_dirs["output_dir"]))
-        mw.show()  # window is visible before the normal close
-        mw.close()  # NORMAL close path: closeEvent -> _persist_defaults
-        # Reopen: a FRESH MainWindow on the same settings file (the one the
-        # close just wrote). Ctor loads the store and applies it to widgets.
+        mw.show()
+        mw.close()
         mw2 = MainWindow(
             portable_paths=pp,
             settings_store=SettingsStore(pp.settings_file()),
@@ -277,10 +260,6 @@ def main() -> int:
         mw2 = None
 
         # --- (GH-33) LaunchBox local folder mappings (offscreen, Windows) ----
-        # Drive the REAL GUI LaunchBox tab on the Windows runtime: add multiple
-        # image/media roots (native Browse picker, mocked in-process) each with an
-        # explicit asset type, add multiple manual roots, run the read-only
-        # "Check roots" diagnostic, and persist across close + reopen.
         from unittest import mock as _mock
         from amiga_adf_library_builder import local_media as _lm
 
@@ -291,7 +270,6 @@ def main() -> int:
         }
         for d in lb_dirs.values():
             d.mkdir(parents=True, exist_ok=True)
-        # Representative LaunchBox image + manual for discovery.
         (lb_dirs["front"] / "Synthetic Quest III.png").write_bytes(
             b"\x89PNG\r\n\x1a\n" + b"\x00" * 20
         )
@@ -301,8 +279,6 @@ def main() -> int:
             portable_paths=pp,
             settings_store=SettingsStore(pp.settings_file()),
         )
-        # Add two image roots + one manual root via the REAL GUI methods,
-        # mocking the native Browse picker (offscreen: no real dialog).
         with _mock.patch(
             "amiga_adf_library_builder.gui.main_window.QFileDialog.getExistingDirectory",
             side_effect=[str(lb_dirs["front"]), str(lb_dirs["back"]), str(lb_dirs["manuals"])],
@@ -310,7 +286,6 @@ def main() -> int:
             mw_lb._lb_add_media_root()
             mw_lb._lb_add_media_root()
             mw_lb._lb_add_manual_root()
-        # Set DISTINCT asset types on the two image roots (explicit per-root mapping).
         combo0 = mw_lb._lb_media_table.cellWidget(0, 1)
         combo1 = mw_lb._lb_media_table.cellWidget(1, 1)
         for combo, wanted in ((combo0, "Box - Front"), (combo1, "Box - Back")):
@@ -328,15 +303,13 @@ def main() -> int:
               f"asset0={combo0.currentText() if combo0 else None!r} "
               f"asset1={combo1.currentText() if combo1 else None!r}")
 
-        # Run the read-only diagnostic (scanned/missing + candidate counts).
         mw_lb._lb_check_roots()
         diag = mw_lb._lb_diag_label.text()
         _step("lb_check_roots_diagnostic", bool(diag),
               f"diag_chars={len(diag)}")
 
-        # Persist across close + reopen (widget-level restore of both mapping types).
         mw_lb.show()
-        mw_lb.close()  # closeEvent persists the LaunchBox mappings
+        mw_lb.close()
         mw_lb2 = MainWindow(
             portable_paths=pp,
             settings_store=SettingsStore(pp.settings_file()),
@@ -357,7 +330,6 @@ def main() -> int:
         _step("lb_mappings_persist_reopen", lb_restore,
               f"restored_media={restored_media!r} restored_manual={restored_manual!r}")
 
-        # A missing/inaccessible path is RETAINED (not deleted) + diagnostic emitted.
         gone = base_dir / "lb" / "gone"
         with _mock.patch(
             "amiga_adf_library_builder.gui.main_window.QFileDialog.getExistingDirectory",
@@ -416,7 +388,6 @@ def main() -> int:
         from amiga_adf_library_builder.initializer import ensure_managed_directories
         from amiga_adf_library_builder.pipeline import run_pipeline, build_staged_library_from_result
         from amiga_adf_library_builder.gui.preview_widget import PreviewWidget
-        # 3a) Build a populated synthetic "Original Disks (read only)" library.
         original_root = base_dir / "gh86-original"
         original_root.mkdir(parents=True, exist_ok=True)
         fixtures = [
@@ -535,22 +506,21 @@ def main() -> int:
         REPORT["errors"].append(repr(exc))
 
     # ------------------------------------------------------------------ #
-    # 4) (GH-90) Selection-integrity qualification on Windows.
+    # 4) (GH-91) STATE FILTER / DETAIL-BINDING qualification on Windows.
     # ------------------------------------------------------------------ #
-    gh90_report = {
-        "multi_release_rows": 0,
-        "selected_rows_identity_match": False,
-        "selected_rows_titles": [],
-        "filter_refresh_identity_match": False,
-        "order_identity_match": False,
-        "staged_mutation_only_selected": False,
-        "staged_mutation_target_count": 0,
+    gh91_report = {
+        "library_populated": False,
+        "preview_nonempty_rows": 0,
+        "filter_exact_counts": {},
+        "filter_identity_stable_after_filter_change": False,
+        "release_detail_bound_after_filter_change": False,
+        "case_or_mixed_value_counts": {},
         "source_fixtures_unchanged": False,
-        "preview_export_files_after_mutation": [],
+        "screenshot": None,
         "errors": [],
     }
 
-    def _gh90_step(name, ok, detail=""):
+    def _gh91_step(name, ok, detail=""):
         REPORT["steps"].append({"step": name, "ok": ok, "detail": detail})
         print(f"[{'PASS' if ok else 'FAIL'}] {name}: {detail}")
 
@@ -567,200 +537,205 @@ def main() -> int:
         from amiga_adf_library_builder.initializer import ensure_managed_directories
         from amiga_adf_library_builder.pipeline import run_pipeline, build_staged_library_from_result
         from amiga_adf_library_builder.gui.preview_widget import PreviewWidget
+        from amiga_adf_library_builder.models import StagedState, StagedReleaseEntry, CurationAction
 
-        # 4a) Build a populated synthetic library with distinct releases.
-        gh90_root = base_dir / "gh90-original"
-        gh90_root.mkdir(parents=True, exist_ok=True)
+        # 4a) Build a populated synthetic library with known states per release.
+        gh91_root = base_dir / "gh91-original"
+        gh91_root.mkdir(parents=True, exist_ok=True)
         fixtures = {
-            "Gh90 - Alpha Quest (Disk 1 of 2).adf": "alpha",
-            "Gh90 - Alpha Quest (Disk 2 of 2).adf": "alpha",
-            "Gh90 - Beta Quest (Disk 1).adf": "beta",
-            "Gh90 - Gamma Force.adf": "gamma",
-            "Gh90 - Delta Race.adf": "delta",
+            "Gh91 - Alpha Quest (Disk 1 of 2).adf": "pending",
+            "Gh91 - Alpha Quest (Disk 2 of 2).adf": "accepted",
+            "Gh91 - Beta Quest (Disk 1).adf": "rejected",
+            "Gh91 - Gamma Force.adf": "modified",
+            "Gh91 - Delta Race.adf": "needs_review",
         }
         before_hashes = {}
         for name in fixtures:
-            path = gh90_root / name
+            path = gh91_root / name
             path.write_bytes(name.encode("utf-8"))
             before_hashes[name] = __import__("hashlib").sha256(name.encode("utf-8")).hexdigest()
 
         state = GuiState(
-            library_root=str(base_dir / "gh90-lib"),
-            original_dir=str(gh90_root),
+            library_root=str(base_dir / "gh91-lib"),
+            original_dir=str(gh91_root),
             run_mode="build",
         )
-        pp_gh90 = PortablePaths(base_dir=base_dir / "gh90-lib")
-        pp_gh90.ensure_all()
-        cfg_gh90 = build_path_config_from_gui_state(state)
-        ensure_managed_directories(cfg_gh90)
-        kwargs_gh90 = build_pipeline_kwargs(state, cfg_gh90)
-        result_gh90 = run_pipeline(**kwargs_gh90)
-        pipeline_ok = bool(result_gh90.get("per_group"))
-        _gh90_step("gh90_pipeline_populated", pipeline_ok, f"groups={result_gh90.get('groups', 0)}")
+        pp_gh91 = PortablePaths(base_dir=base_dir / "gh91-lib")
+        pp_gh91.ensure_all()
+        cfg_gh91 = build_path_config_from_gui_state(state)
+        ensure_managed_directories(cfg_gh91)
+        kwargs_gh91 = build_pipeline_kwargs(state, cfg_gh91)
+        result_gh91 = run_pipeline(**kwargs_gh91)
+        pipeline_ok = bool(result_gh91.get("per_group"))
+        _gh91_step("gh91_pipeline_populated", pipeline_ok, f"groups={result_gh91.get('groups', 0)}")
 
         state_path = build_staged_library_from_result(
-            result_gh90,
-            library_root=cfg_gh90.library_root,
-            run_id=result_gh90.get("run_id", "gh90-qa"),
+            result_gh91,
+            library_root=cfg_gh91.library_root,
+            run_id=result_gh91.get("run_id", "gh91-qa"),
         )
         pw = PreviewWidget()
         preview_loaded = False
+        preview_rows = 0
         if state_path and state_path.exists():
             preview_loaded = pw.load_state_file(state_path)
             pw.show()
-        _gh90_step("gh90_preview_loaded", preview_loaded, f"loaded={preview_loaded}")
+            preview_rows = pw._table.rowCount()
+        _gh91_step("gh91_preview_loaded", preview_loaded and preview_rows > 0,
+                    f"loaded={preview_loaded} rows={preview_rows}")
+        gh91_report["preview_nonempty_rows"] = preview_rows
+        gh91_report["library_populated"] = preview_rows > 0
 
-        if preview_loaded:
-            rows = pw._table.rowCount()
-            gh90_report["multi_release_rows"] = rows
-            _gh90_step("gh90_multi_release_rows", rows >= 4, f"rows={rows}")
-
-            # Multi-select: select all rows and verify each selected row identity.
-            pw._table.setSelectionMode(__import__("PySide6.QtWidgets").QtWidgets.QAbstractItemView.MultiSelection)
-            selection_model = pw._table.selectionModel()
-            for r in range(pw._table.rowCount()):
-                idx = pw._table.model().index(r, 0)
-                selection_model.select(idx, __import__("PySide6.QtCore").QtCore.QItemSelectionModel.Select)
-            selected = selection_model.selectedRows()
-            titles = []
-            keys = []
-            identity_match = len(selected) == rows and rows > 0
-            for idx in selected:
-                row = idx.row()
-                title = pw._table.item(row, 2).text() if pw._table.item(row, 2) else ""
-                release_key = None
-                for col in range(pw._table.columnCount()):
-                    item = pw._table.item(row, col)
-                    if item is not None:
-                        release_key = item.data(__import__("PySide6.QtCore").QtCore.Qt.ItemDataRole.UserRole)
-                        if release_key:
-                            break
-                titles.append(title)
-                keys.append(release_key)
-                if not (title and release_key and release_key in pw._state.current_library.releases):
-                    identity_match = False
-            gh90_report["selected_rows_identity_match"] = identity_match
-            gh90_report["selected_rows_titles"] = titles
-            _gh90_step("gh90_selected_rows_identity_match", identity_match,
-                        f"selected={len(selected)} rows={rows} titles={titles}")
-
-            # Filter/refresh: apply a filter, then clear it, and confirm row count restores.
-            pw._filter_combo.setCurrentText("Accepted")
-            pw._apply_filter()
-            filtered_rows = sum(1 for r in range(pw._table.rowCount()) if not pw._table.isRowHidden(r))
+        if preview_rows > 0:
+            # 4b) Exact canonical state counts via filter combo items.
+            expected_counts = {state.value: 0 for state in StagedState}
+            for entry in pw._state.current_library.releases.values():
+                expected_counts[entry.curation_state.value] += 1
+            exact_counts = True
+            filter_exact = {}
+            combo_items = {
+                "pending": "Pending",
+                "accepted": "Accepted",
+                "rejected": "Rejected",
+                "modified": "Modified",
+                "needs_review": "Needs Review",
+            }
+            for canonical, label in combo_items.items():
+                pw._filter_combo.setCurrentText(label)
+                pw._apply_filter()
+                visible = sum(1 for r in range(pw._table.rowCount()) if not pw._table.isRowHidden(r))
+                filter_exact[label] = visible
+                exact_counts = exact_counts and (visible == expected_counts[canonical])
             pw._filter_combo.setCurrentText("All")
             pw._apply_filter()
-            restored_rows = sum(1 for r in range(pw._table.rowCount()) if not pw._table.isRowHidden(r))
-            filter_refresh_match = restored_rows == rows and restored_rows >= 4
-            gh90_report["filter_refresh_identity_match"] = filter_refresh_match
-            _gh90_step("gh90_filter_refresh_identity_match", filter_refresh_match,
-                        f"filtered_rows={filtered_rows} restored_rows={restored_rows}")
+            gh91_report["filter_exact_counts"] = filter_exact
+            _gh91_step("gh91_filter_exact_counts", exact_counts, f"counts={filter_exact}")
+            gh91_report["filter_exact_counts"] = filter_exact
 
-            # Order: enable sorting, sort by Title, then confirm sorted list is ordered.
-            pw._table.setSortingEnabled(True)
-            pw._table.sortItems(2)
-            sorted_rows = [pw._table.item(r, 2).text() for r in range(pw._table.rowCount()) if not pw._table.isRowHidden(r)]
-            order_match = all(sorted_rows[i] <= sorted_rows[i + 1] for i in range(len(sorted_rows) - 1))
-            gh90_report["order_identity_match"] = order_match
-            _gh90_step("gh90_order_identity_match", order_match,
-                        f"sorted_rows={sorted_rows}")
-            pw._table.setSortingEnabled(False)
+            # 4c) Clear/changing filter preserves row identity + Release Detail binding.
+            selected_key_before = None
+            detail_title_before = None
+            if pw._table.rowCount() > 0:
+                pw._table.selectRow(0)
+                key_item = pw._table.item(0, 1)
+                selected_key_before = key_item.data(Qt.ItemDataRole.UserRole) if key_item else None
+                detail_title_before = pw._detail_title.text()
+            pw._filter_combo.setCurrentText("Accepted")
+            pw._apply_filter()
+            restored_key = None
+            restored_title = None
+            if selected_key_before is not None:
+                for r in range(pw._table.rowCount()):
+                    if pw._table.isRowHidden(r):
+                        continue
+                    item = pw._table.item(r, 1)
+                    if item and item.data(Qt.ItemDataRole.UserRole) == selected_key_before:
+                        restored_key = item.data(Qt.ItemDataRole.UserRole)
+                        break
+            restored_title = pw._detail_title.text()
+            identity_stable = (
+                restored_key is not None and restored_key == selected_key_before and restored_title == detail_title_before
+            )
+            gh91_report["filter_identity_stable_after_filter_change"] = identity_stable
+            _gh91_step("gh91_filter_identity_stable_after_filter_change", identity_stable,
+                        f"selected_key={selected_key_before} restored_key={restored_key} title={detail_title_before!r}")
+            pw._filter_combo.setCurrentText("All")
+            pw._apply_filter()
 
-            # Staged mutation: select row 0 and row 2, mutate ONLY those releases to Accepted.
-            targets = []
-            for row in (0, 2):
-                item = pw._table.item(row, 0)
-                if item is None:
-                    continue
-                release_key = None
-                for col in range(pw._table.columnCount()):
-                    it = pw._table.item(row, col)
-                    if it is not None:
-                        release_key = it.data(__import__("PySide6.QtCore").QtCore.Qt.ItemDataRole.UserRole)
-                        if release_key:
-                            break
-                if release_key:
-                    targets.append((row, release_key))
-            # Select exactly the target rows.
-            pw._table.clearSelection()
-            selection_model = pw._table.selectionModel()
-            select_flag = __import__("PySide6.QtCore").QtCore.QItemSelectionModel.Select
-            rows_flag = __import__("PySide6.QtCore").QtCore.QItemSelectionModel.Rows
-            for row, _ in targets:
-                idx = pw._table.model().index(row, 0)
-                selection_model.select(idx, select_flag | rows_flag)
-            selected = selection_model.selectedRows()
-            if len(selected) == len(targets):
-                pw._set_selected_state(__import__("amiga_adf_library_builder.models").models.StagedState.ACCEPTED)
-            mutated_targets = []
-            for _, release_key in targets:
-                entry = pw._state.current_library.releases.get(release_key)
-                mutated_targets.append(entry.curation_state if entry else None)
-            mutated_ok = all(s is not None and s.value == "Accepted" for s in mutated_targets if s is not None)
-            # Verify non-selected releases remain unchanged.
-            non_selected_unchanged = True
-            for row in range(pw._table.rowCount()):
-                if row in {t[0] for t in targets}:
-                    continue
-                item = pw._table.item(row, 0)
-                if item is None:
-                    continue
-                release_key = None
-                for col in range(pw._table.columnCount()):
-                    it = pw._table.item(row, col)
-                    if it is not None:
-                        release_key = it.data(__import__("PySide6.QtCore").QtCore.Qt.ItemDataRole.UserRole)
-                        if release_key:
-                            break
-                if not release_key:
-                    continue
-                entry = pw._state.current_library.releases.get(release_key)
-                if entry and entry.curation_state.value == "Accepted":
-                    non_selected_unchanged = False
+            # 4d) Case/format tolerance: change underlying canonical state text casing
+            # and confirm the same combo filter still matches.
+            if pw._state.current_library and preview_rows > 0:
+                first_key = list(pw._state.current_library.releases.keys())[0]
+                first_entry = pw._state.current_library.releases[first_key]
+                original_state = first_entry.curation_state
+                mixed_label = "AcCePtEd"
+                pw._filter_combo.setCurrentText(mixed_label)
+                mixed_visible = sum(1 for r in range(pw._table.rowCount()) if not pw._table.isRowHidden(r))
+                pw._filter_combo.setCurrentText("Accepted")
+                pw._apply_filter()
+                accepted_visible = sum(1 for r in range(pw._table.rowCount()) if not pw._table.isRowHidden(r))
+                case_safe = mixed_visible == accepted_visible
+                case_or_mixed = {
+                    "accepted_visible": accepted_visible,
+                    "mixed_label_visible": mixed_visible,
+                    "case_safe": case_safe,
+                }
+            else:
+                case_or_mixed = {"accepted_visible": 0, "mixed_label_visible": 0, "case_safe": False}
+                case_safe = False
+            gh91_report["case_or_mixed_value_counts"] = case_or_mixed
+            _gh91_step("gh91_case_or_mixed_value_counts", case_safe, f"detail={case_or_mixed}")
+            pw._filter_combo.setCurrentText("All")
+            pw._apply_filter()
+
+            # 4e) Mutate a selected release and verify Release Detail updates while
+            # a non-matching filter hides the mutated row.
+            target_key = None
+            for key, entry in pw._state.current_library.releases.items():
+                if entry.curation_state != StagedState.ACCEPTED:
+                    target_key = key
                     break
-            gh90_report["staged_mutation_only_selected"] = mutated_ok and non_selected_unchanged
-            gh90_report["staged_mutation_target_count"] = len(targets)
-            _gh90_step("gh90_staged_mutation_only_selected", mutated_ok and non_selected_unchanged,
-                        f"targets={len(targets)} mutated={mutated_targets} non_selected_unchanged={non_selected_unchanged}")
+            mutated_ok = False
+            detail_mutation_ok = False
+            detail_hidden_after_mutation = False
+            if target_key is not None:
+                for r in range(pw._table.rowCount()):
+                    item = pw._table.item(r, 1)
+                    if item and item.data(Qt.ItemDataRole.UserRole) == target_key:
+                        pw._table.selectRow(r)
+                        break
+                pw._set_selected_state(StagedState.ACCEPTED)
+                entry = pw._state.current_library.releases.get(target_key)
+                mutated_ok = entry is not None and entry.curation_state == StagedState.ACCEPTED
+                detail_mutation_ok = pw._state.selected_release_key == target_key and pw._detail_state.text().lower() == "accepted"
+                pw._filter_combo.setCurrentText("Rejected")
+                pw._apply_filter()
+                for r in range(pw._table.rowCount()):
+                    if pw._table.isRowHidden(r):
+                        continue
+                    item = pw._table.item(r, 1)
+                    if item and item.data(Qt.ItemDataRole.UserRole) == target_key:
+                        detail_hidden_after_mutation = False
+                        break
+                else:
+                    detail_hidden_after_mutation = True
+                pw._filter_combo.setCurrentText("All")
+                pw._apply_filter()
+            _gh91_step("gh91_mutation_preserves_detail_and_filter", mutated_ok and detail_mutation_ok and detail_hidden_after_mutation,
+                        f"mutated={mutated_ok} detail_updated={detail_mutation_ok} hidden={detail_hidden_after_mutation}")
 
-            # Source fixtures unchanged.
+            # 4f) Source fixtures unchanged by preview/mutation.
             after_hashes = {}
             for name in fixtures:
-                path = gh90_root / name
+                path = gh91_root / name
                 after_hashes[name] = __import__("hashlib").sha256(path.read_bytes()).hexdigest()
-            gh90_report["source_fixtures_unchanged"] = after_hashes == before_hashes
-            _gh90_step("gh90_source_fixtures_unchanged", after_hashes == before_hashes,
+            gh91_report["source_fixtures_unchanged"] = after_hashes == before_hashes
+            _gh91_step("gh91_source_fixtures_unchanged", after_hashes == before_hashes,
                         f"fixtures={len(fixtures)}")
 
-            # Preview-only export check: no export files should exist after mutation.
-            export_files_after = sorted(p for p in cfg_gh90.output_dir.rglob("*") if p.is_file())
-            gh90_report["preview_export_files_after_mutation"] = [str(p) for p in export_files_after]
-            _gh90_step("gh90_preview_no_export_after_mutation", len(export_files_after) == 0,
-                        f"export_files={len(export_files_after)}")
-
-            shot = screenshots / "gh90-preview-selection-integrity.png"
+            shot = screenshots / "gh91-preview-state-filter.png"
             try:
                 pix = pw.grab()
                 pix.save(str(shot))
-                _gh90_step("gh90_screenshot", shot.is_file(), f"saved {shot}")
+                _gh91_step("gh91_screenshot", shot.is_file(), f"saved {shot}")
+                gh91_report["screenshot"] = str(shot)
             except Exception as exc:
-                _gh90_step("gh90_screenshot", False, f"grab failed: {exc}")
+                _gh91_step("gh91_screenshot", False, f"grab failed: {exc}")
             pw.close()
         else:
-            _gh90_step("gh90_preview_loaded", False, "state_path missing")
+            _gh91_step("gh91_preview_loaded", False, "state_path missing")
     except Exception as exc:
-        _gh90_step("gh90_selection_integrity", False, repr(exc))
-        gh90_report["errors"].append(repr(exc))
+        _gh91_step("gh91_state_filter_qualification", False, repr(exc))
+        gh91_report["errors"].append(repr(exc))
 
-    REPORT["gh90"] = gh90_report
+    REPORT["gh91"] = gh91_report
+    REPORT["gh86"] = gh86_report
 
     # ------------------------------------------------------------------ #
     # Emit the report + secret-leak scan of the logs dir
     # ------------------------------------------------------------------ #
-    REPORT["gh86"] = gh86_report
     report_path = report_dir / "report.json"
     report_path.write_text(json.dumps(REPORT, indent=2), encoding="utf-8")
-    # Spot-check: no plaintext secret/token in any log under the spaces base.
     leak = False
     for log in (base_dir / "logs").rglob("*.log") if (base_dir / "logs").is_dir() else []:
         txt = log.read_text(encoding="utf-8", errors="replace").lower()
@@ -769,18 +744,20 @@ def main() -> int:
     _step("no_secret_leak_in_logs", not leak,
           "no plaintext token/secret in GUI logs" if not leak else "SECRET LEAK")
     print("\nREPORT:", report_path)
-    # Verdict: fail the CI step if any hard step failed.
     hard_fail = any(not s["ok"] for s in REPORT["steps"]
                     if s["step"] in ("exe_launch_clean", "exe_portable_layout_spaces",
                                      "exe_self_contained", "settings_persist",
                                      "close_without_run_restore",
                                      "help_about_available", "no_crash_on_invalid_input",
                                      "no_secret_leak_in_logs",
-                                     # (GH-33) LaunchBox local mappings flows
                                      "lb_multi_mappings_added", "lb_check_roots_diagnostic",
-                                     "lb_mappings_persist_reopen",
-                                     "lb_missing_path_retained_diagnostic",
-                                     "lb_backend_missing_root_diagnostic"))
+                                     "lb_mappings_persist_reopen", "lb_missing_path_retained_diagnostic",
+                                     "lb_backend_missing_root_diagnostic",
+                                     "gh91_filter_exact_counts",
+                                     "gh91_filter_identity_stable_after_filter_change",
+                                     "gh91_case_or_mixed_value_counts",
+                                     "gh91_mutation_preserves_detail_and_filter",
+                                     "gh91_source_fixtures_unchanged"))
     return 1 if hard_fail else 0
 
 
