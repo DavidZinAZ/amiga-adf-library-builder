@@ -31,6 +31,9 @@ from pathlib import Path
 
 REPORT: dict = {"steps": [], "errors": [], "gh85": {}}
 
+if "src" not in sys.path:
+    sys.path.insert(0, "src")
+
 
 def _step(name: str, ok: bool, detail: str = "") -> None:
     REPORT["steps"].append({"step": name, "ok": ok, "detail": detail})
@@ -108,7 +111,7 @@ def _build_state(base_dir: Path, original_dir: Path, library_root: Path):
 def _run_gh85_normal(base_dir: Path, original_dir: Path, library_root: Path):
     from threading import Event
 
-    from .worker import PipelineWorker
+    from amiga_adf_library_builder.gui.worker import PipelineWorker
 
     app, state, pp, cfg, kwargs = _build_state(base_dir, original_dir, library_root)
     cancel_event = Event()
@@ -120,7 +123,7 @@ def _run_gh85_normal(base_dir: Path, original_dir: Path, library_root: Path):
 def _run_gh85_error(base_dir: Path):
     from threading import Event
 
-    from .worker import PipelineWorker
+    from amiga_adf_library_builder.gui.worker import PipelineWorker
 
     library_root = base_dir / "gh85-err-lib"
     original_dir = base_dir / "gh85-err-orig"
@@ -138,7 +141,7 @@ def _run_gh85_error(base_dir: Path):
 def _run_gh85_zero(base_dir: Path):
     from threading import Event
 
-    from .worker import PipelineWorker
+    from amiga_adf_library_builder.gui.worker import PipelineWorker
 
     library_root = base_dir / "gh85-zero-lib"
     original_dir = base_dir / "gh85-zero-orig"

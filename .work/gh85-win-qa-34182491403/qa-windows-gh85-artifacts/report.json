@@ -1,0 +1,36 @@
+{
+  "steps": [
+    {
+      "step": "exe_launch_clean",
+      "ok": true,
+      "detail": "exe=AmigaADFLibraryBuilder.exe pid=2352"
+    },
+    {
+      "step": "exe_portable_layout_spaces",
+      "ok": true,
+      "detail": "base='C:\\Users\\runneradmin\\Test Dir With Spaces\\lib' created=['config', 'data', 'logs', 'cache']"
+    },
+    {
+      "step": "exe_self_contained",
+      "ok": true,
+      "detail": "python dll/_internal beside AmigaADFLibraryBuilder.exe: True"
+    },
+    {
+      "step": "gh85_qualification",
+      "ok": false,
+      "detail": "ImportError('attempted relative import with no known parent package')"
+    }
+  ],
+  "errors": [
+    "ImportError('attempted relative import with no known parent package')"
+  ],
+  "gh85": {
+    "normal_run": {},
+    "error_run": {},
+    "zero_release_run": {},
+    "screenshot": null,
+    "errors": [
+      "ImportError('attempted relative import with no known parent package')"
+    ]
+  }
+}
