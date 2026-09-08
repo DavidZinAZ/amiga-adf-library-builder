@@ -19,19 +19,16 @@
     34126061118; QA PASS); released with Windows assets
     `amiga-adf-gui-portable.zip` and `amiga-adf-gui.exe`.
 
-## Unreleased
+## 0.2.10 — 2026-09-08
 
-- GH-90: Fix Preview/Curation selection integrity (P0 — released v0.2.7 Windows GUI showed
-  mismatched selection mapping between Preview table rows and Release Detail pane).
-  - Row identity and Release Detail identity are now reliably bound through stable
-    UserRole data; sort/filter/refresh no longer cross-wire selection mapping.
-  - All row-level actions route through the selected release’s UserRole, preventing
-    Accept/Reject/Pending/Modified/Rename/Lookup/Add Note from mutating the wrong release.
-  - Regression coverage proves actions cannot be applied to a neighboring/shifted release.
+- GH-85: Fix Windows GUI progress calculation/updates.
+  - The Windows packaged GUI no longer miscounts processed versus total items during
+    enrichment, preventing progress from stalling or miscounting before completion.
+  - Focused regression coverage proves monotonic progress, enrichment-count consistency,
+    and 100% only at completion.
   - Independently qualified on real packaged Windows (Windows-R3 Actions run
-    34075294316; parent QA PASS); residual Windows harness quirk documented and excluded
-    from source changes.
-  - Shipped with Windows assets: `amiga-adf-gui-portable.zip` and `amiga-adf-gui.exe`.
+    34182674167; QA PASS); released with Windows assets
+    `amiga-adf-gui-portable.zip` and `amiga-adf-gui.exe`.
 
 ## 0.2.7 — 2026-09-06
 
