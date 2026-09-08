@@ -1,0 +1,201 @@
+{
+  "steps": [
+    {
+      "step": "exe_launch_clean",
+      "ok": true,
+      "detail": "exe=AmigaADFLibraryBuilder.exe pid=9004"
+    },
+    {
+      "step": "exe_portable_layout_spaces",
+      "ok": true,
+      "detail": "base='C:\\Users\\runneradmin\\Test Dir With Spaces\\lib' created=['config', 'data', 'logs', 'cache']"
+    },
+    {
+      "step": "exe_self_contained",
+      "ok": true,
+      "detail": "python dll/_internal present beside AmigaADFLibraryBuilder.exe: True"
+    },
+    {
+      "step": "settings_persist",
+      "ok": true,
+      "detail": "theme=dark default_library_root='C:\\\\Users\\\\runneradmin\\\\Test Dir With Spaces\\\\lib'"
+    },
+    {
+      "step": "settings_no_secret",
+      "ok": true,
+      "detail": "settings TOML carries no token/password"
+    },
+    {
+      "step": "theme_switch",
+      "ok": true,
+      "detail": "applied themes: ['light', 'dark', 'system']"
+    },
+    {
+      "step": "help_about_available",
+      "ok": true,
+      "detail": "about_chars=5 help_chars=4"
+    },
+    {
+      "step": "log_dir_access",
+      "ok": true,
+      "detail": "logs_dir=C:\\Users\\runneradmin\\Test Dir With Spaces\\lib\\logs"
+    },
+    {
+      "step": "failure_path_clear_error",
+      "ok": true,
+      "detail": "clear_msg=Run failed crashed=False"
+    },
+    {
+      "step": "no_crash_on_invalid_input",
+      "ok": true,
+      "detail": "no raw traceback/uncaught exception on invalid input"
+    },
+    {
+      "step": "screenshot",
+      "ok": true,
+      "detail": "saved qa-windows-artifacts\\screenshots\\main_window.png"
+    },
+    {
+      "step": "close_without_run_restore",
+      "ok": true,
+      "detail": "close_without_run_exercised=True library_root='C:\\\\Users\\\\runneradmin\\\\Test Dir With Spaces\\\\lib\\\\cw\\\\library root' original_dir='C:\\\\Users\\\\runneradmin\\\\Test Dir With Spaces\\\\lib\\\\cw\\\\original' staging_dir='C:\\\\Users\\\\runneradmin\\\\Test Dir With Spaces\\\\lib\\\\cw\\\\staging' output_dir='C:\\\\Users\\\\runneradmin\\\\Test Dir With Spaces\\\\lib\\\\cw\\\\output'"
+    },
+    {
+      "step": "lb_multi_mappings_added",
+      "ok": true,
+      "detail": "media_rows=2 manual_rows=1 asset0='Box - Front' asset1='Box - Back'"
+    },
+    {
+      "step": "lb_check_roots_diagnostic",
+      "ok": true,
+      "detail": "diag_chars=341"
+    },
+    {
+      "step": "lb_mappings_persist_reopen",
+      "ok": true,
+      "detail": "restored_media=['C:\\\\Users\\\\runneradmin\\\\Test Dir With Spaces\\\\lib\\\\lb\\\\box front', 'C:\\\\Users\\\\runneradmin\\\\Test Dir With Spaces\\\\lib\\\\lb\\\\box back'] restored_manual=['C:\\\\Users\\\\runneradmin\\\\Test Dir With Spaces\\\\lib\\\\lb\\\\manuals']"
+    },
+    {
+      "step": "lb_missing_path_retained_diagnostic",
+      "ok": true,
+      "detail": "media_rows=3 diag_mentions_gone=True"
+    },
+    {
+      "step": "gh86_populated_pipeline",
+      "ok": true,
+      "detail": "groups=3"
+    },
+    {
+      "step": "gh86_source_fixtures_unchanged",
+      "ok": true,
+      "detail": "fixtures=7"
+    },
+    {
+      "step": "gh86_preview_loaded",
+      "ok": true,
+      "detail": "loaded=True rows=3"
+    },
+    {
+      "step": "gh86_screenshot",
+      "ok": true,
+      "detail": "saved qa-windows-artifacts\\screenshots\\gh86-preview-populated.png"
+    },
+    {
+      "step": "gh86_selected_identity",
+      "ok": true,
+      "detail": "release_key=gh86spacetactics|||||| title=Gh86 Space Tactics adf_count=4"
+    },
+    {
+      "step": "gh86_selected_planned_export_path",
+      "ok": true,
+      "detail": "path=C:\\Users\\runneradmin\\Test Dir With Spaces\\lib\\gh86-lib\\output\\Gh86 Space Tactics"
+    },
+    {
+      "step": "gh86_preview_no_export",
+      "ok": true,
+      "detail": "export_files=0"
+    },
+    {
+      "step": "lb_backend_missing_root_diagnostic",
+      "ok": true,
+      "detail": "missing_roots=1 reported_in_lines=True"
+    },
+    {
+      "step": "gh90_pipeline_populated",
+      "ok": true,
+      "detail": "groups=4"
+    },
+    {
+      "step": "gh90_preview_loaded",
+      "ok": true,
+      "detail": "loaded=True"
+    },
+    {
+      "step": "gh90_multi_release_rows",
+      "ok": true,
+      "detail": "rows=4"
+    },
+    {
+      "step": "gh90_selected_rows_identity_match",
+      "ok": false,
+      "detail": "selected=0 rows=4 titles=[]"
+    },
+    {
+      "step": "gh90_filter_refresh_identity_match",
+      "ok": true,
+      "detail": "filtered_rows=0 restored_rows=4"
+    },
+    {
+      "step": "gh90_order_identity_match",
+      "ok": true,
+      "detail": "sorted_rows=['Gh90 Alpha Quest', 'Gh90 Beta Quest', 'Gh90 Delta Race', 'Gh90 Gamma Force']"
+    },
+    {
+      "step": "gh90_staged_mutation_only_selected",
+      "ok": false,
+      "detail": "targets=2 mutated=[<StagedState.ACCEPTED: 'accepted'>, <StagedState.ACCEPTED: 'accepted'>] non_selected_unchanged=True"
+    },
+    {
+      "step": "gh90_source_fixtures_unchanged",
+      "ok": true,
+      "detail": "fixtures=5"
+    },
+    {
+      "step": "gh90_preview_no_export_after_mutation",
+      "ok": true,
+      "detail": "export_files=0"
+    },
+    {
+      "step": "gh90_screenshot",
+      "ok": true,
+      "detail": "saved qa-windows-artifacts\\screenshots\\gh90-preview-selection-integrity.png"
+    }
+  ],
+  "errors": [],
+  "close_without_run_exercised": true,
+  "gh90": {
+    "multi_release_rows": 4,
+    "selected_rows_identity_match": false,
+    "selected_rows_titles": [],
+    "filter_refresh_identity_match": true,
+    "order_identity_match": true,
+    "staged_mutation_only_selected": false,
+    "staged_mutation_target_count": 2,
+    "source_fixtures_unchanged": true,
+    "preview_export_files_after_mutation": [],
+    "errors": []
+  },
+  "gh86": {
+    "library_populated": true,
+    "preview_nonempty_rows": 3,
+    "selected_release_key": "gh86spacetactics||||||",
+    "selected_title": "Gh86 Space Tactics",
+    "selected_adf_count": 4,
+    "selected_original_identity": "Gh86 - Space Tactics (Disk 1 of 4).adf",
+    "selected_planned_export_path": "C:\\Users\\runneradmin\\Test Dir With Spaces\\lib\\gh86-lib\\output\\Gh86 Space Tactics",
+    "source_fixtures_unchanged": true,
+    "export_files_written_after_preview": [],
+    "screenshot": "qa-windows-artifacts\\screenshots\\gh86-preview-populated.png",
+    "errors": []
+  }
+}
