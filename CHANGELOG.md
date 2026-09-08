@@ -42,6 +42,18 @@
     34194129782; QA PASS); released with Windows assets
     `amiga-adf-gui-portable.zip` and `amiga-adf-gui.exe`.
 
+## 0.2.12 — 2026-09-08
+
+- GH-88+GH-89: Shared Online/Offline lookup workflow.
+  - Online Lookup routes through the shared lookup workflow to online metadata providers, preserving existing release identity and metadata provenance.
+  - Offline Lookup routes through the same workflow with offline-only provider selection, preventing online providers from appearing in offline lookup results.
+  - Preview/Curation uses the shared provider-selection logic, so offline mode no longer lists Hall of Light/LaunchBox or other online providers.
+  - Offline lookup remains network-absent when no local-media source is configured, with explicit local-source state reported rather than placeholder behavior.
+  - Apply remains staged-only: it mutates staged release metadata and records curation actions without exporting or changing ADF files.
+  - Focused regression coverage covers online/offline routing, offline provider selection, staged-only apply behavior, release-identity preservation, and preview-detail binding.
+  - Independently qualified on real packaged Windows (Windows-R3 Actions run 34234564787; QA PASS); released with Windows assets
+    `amiga-adf-gui-portable.zip` and `amiga-adf-gui.exe`.
+
 ## 0.2.7 — 2026-09-06
 
 - GH-86: Fix Preview/Curation population (P0 — released v0.2.6 Windows GUI showed an
