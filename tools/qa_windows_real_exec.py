@@ -778,6 +778,28 @@ def main() -> int:
         "errors": [],
     }
 
+    def _make_lookup_ctx(title: str, release_key: str, **kwargs) -> LookupContext:
+        query = title or kwargs.get("query") or ""
+        try:
+            return LookupContext(
+                query=query,
+                release_key=release_key,
+                title=title,
+                **kwargs,
+            )
+        except TypeError:
+            return LookupContext(
+                query,
+                release_key,
+                title,
+                kwargs.get("disk_stems") or [],
+                kwargs.get("cache_dir"),
+                kwargs.get("curated_dir"),
+                kwargs.get("config_path"),
+                kwargs.get("opener"),
+                float(kwargs.get("timeout") or 20.0),
+            )
+
     def _lookup_step(name, ok, detail=""):
         REPORT["steps"].append({"step": name, "ok": ok, "detail": detail})
         print(f"[{'PASS' if ok else 'FAIL'}] {name}: {detail}")
@@ -919,10 +941,9 @@ def main() -> int:
                     _tomli_w.dump(data, fh)
                 lookup_report["offline_local_source_configured"] = True
 
-            offline_ctx = LookupContext(
-                query=first_entry.title if first_entry else "",
-                release_key=first_key or "gh88-89-r2",
+            offline_ctx = _make_lookup_ctx(
                 title=first_entry.title if first_entry else "",
+                release_key=first_key or "gh88-89-r2",
                 config_path=gui_config_path,
                 cache_dir=cfg_lookup.metadata_cache_dir,
                 curated_dir=cfg_lookup.curated_metadata_dir,
@@ -957,10 +978,9 @@ def main() -> int:
             _lookup_step("gh89_offline_local_source_is_actionable", actionable_offline,
                          f"status={offline_result.status} local_source_state={offline_result.local_source_state}")
 
-            no_local_ctx = LookupContext(
-                query=first_entry.title if first_entry else "",
-                release_key=first_key or "gh88-89-r2",
+            no_local_ctx = _make_lookup_ctx(
                 title=first_entry.title if first_entry else "",
+                release_key=first_key or "gh88-89-r2",
                 config_path=None,
                 cache_dir=cfg_lookup.metadata_cache_dir,
                 curated_dir=cfg_lookup.curated_metadata_dir,
