@@ -14,6 +14,9 @@ redaction comes from :func:`amiga_adf_library_builder.logging_utils.redact`
 (same filter the per-run log file uses) so a folder path or provider detail can
 never leak a secret value into the UI.
 
+GH-85: The worker now computes progress during the enrichment phase based on
+completed releases / total releases rather than staying fixed at 55%.
+
 The worker imports the core pipeline lazily so the GUI can be imported (for the
 ``build_path_config_from_gui_state`` equivalence tests) without necessarily
 running a pipeline.
@@ -22,7 +25,7 @@ running a pipeline.
 from __future__ import annotations
 
 import threading
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QObject, QThread, Signal
 
@@ -84,6 +87,29 @@ class PipelineWorker(QObject):
     def _run(self) -> None:
         from .. import pipeline  # lazy import keeps GUI importable headless
 
+        # GH-85: progress tracking state for enrichment phase
+        self._enrich_total = 0
+        self._enrich_completed = 0
+
+        def _enrich_progress_activity(msg: str) -> None:
+            """Activity callback that tracks enrichment progress for the progress bar."""
+            # GH-85: parse "Preparing release X of Y" messages to track progress
+            import re
+            match = re.match(r"Preparing release (\d+) of (\d+)", msg)
+            if match:
+                self._enrich_completed = int(match.group(1))
+                self._enrich_total = int(match.group(2))
+                if self._enrich_total > 0:
+                    # Map from 55% to 95% based on completion ratio
+                    progress = 55 + int(40 * (self._enrich_completed / self._enrich_total))
+                    self.progress.emit(
+                        f"Filling in missing metadata ({self._enrich_completed}/{self._enrich_total})",
+                        progress,
+                        ""
+                    )
+            # Also emit the activity for the Diagnostics log
+            self._act(msg)
+
         try:
             self._act("Run started.")
             self.progress.emit("Checking your settings", 2, "")
@@ -104,7 +130,7 @@ class PipelineWorker(QObject):
 
             kwargs = build_pipeline_kwargs(
                 self._state, cfg, config_path=self._config_path,
-                activity=self._act,
+                activity=_enrich_progress_activity,
                 # (GH-33) GUI LaunchBox mappings are merged into a managed
                 # provider config under the app's own cache dir (deterministic,
                 # atomic, never inside the read-only original corpus).
@@ -128,6 +154,7 @@ class PipelineWorker(QObject):
             if self._cancelled():
                 return
 
+            # GH-85: The initial 55% emit is kept as the starting point for enrichment
             self.progress.emit("Filling in missing metadata", 55, "")
             if self._cancelled():
                 return
@@ -138,6 +165,8 @@ class PipelineWorker(QObject):
                 return
 
             self.progress.emit("Finishing up", 95, "")
+            # GH-85: Emit 100% on actual completion
+            self.progress.emit("Done", 100, "")
             self.finished.emit(result, "", False, cfg)
         except Exception as exc:  # never let a pipeline error kill the GUI thread
             self._act(f"Run stopped with an error: {redact(str(exc))}")
