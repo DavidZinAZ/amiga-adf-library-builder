@@ -1,0 +1,67 @@
+name: QA Windows GH-85 progress qualification
+
+# Independent Windows qualification for GH-85 packaged GUI progress behavior.
+# Uses the same established Windows runner path as the existing QA workflow,
+# but exercises the GH-85-specific progress harness instead of the broader
+# GH-86/GH-90/GH-33 driver. This workflow is QA-owned harness only.
+
+on:
+  workflow_dispatch:
+    inputs:
+      qualification_sha:
+        description: "Exact commit SHA to qualify"
+        required: true
+        type: string
+      report_dir:
+        description: "Artifact report dir override"
+        required: false
+        default: "qa-windows-gh85-artifacts"
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  qa-windows-gh85:
+    name: GH-85 Windows packaged progress qualification
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout exact qualification ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.qualification_sha }}
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build + QA dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[gui]" pyinstaller pillow
+
+      - name: Build onedir portable app (real artifact)
+        run: python tools/build_windows.py --target onedir --clean
+
+      - name: Run GH-85 Windows progress qualification driver
+        env:
+          QT_QPA_PLATFORM: offscreen
+          QA_GUI_BASE: "C:\\Users\\runneradmin\\Test Dir With Spaces\\lib"
+          QA_EXE: "dist/AmigaADFLibraryBuilder/AmigaADFLibraryBuilder.exe"
+          QA_REPORT_DIR: ${{ inputs.report_dir }}
+        run: python tools/qa_windows_gh85_progress.py
+
+      - name: Upload GH-85 QA artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-windows-gh85-progress
+          path: |
+            ${{ inputs.report_dir }}/
+            C:\\Users\\runneradmin\\Test Dir With Spaces\\lib\\logs\\
+          if-no-files-found: warn
