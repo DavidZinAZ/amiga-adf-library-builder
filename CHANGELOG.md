@@ -30,6 +30,18 @@
     34182674167; QA PASS); released with Windows assets
     `amiga-adf-gui-portable.zip` and `amiga-adf-gui.exe`.
 
+## 0.2.11 — 2026-09-08
+
+- GH-91: Fix Preview/Curation state filtering.
+  - The Preview/Curation workspace now preserves the correct curation state filter
+    and detail-binding behavior when switching selections, preventing filtered views
+    from losing their applied state and hidden status.
+  - Focused regression coverage proves case-safe combo-item identity, filter-change
+    stability, and detail binding after state transitions.
+  - Independently qualified on real packaged Windows (Windows-R3 Actions run
+    34194129782; QA PASS); released with Windows assets
+    `amiga-adf-gui-portable.zip` and `amiga-adf-gui.exe`.
+
 ## 0.2.7 — 2026-09-06
 
 - GH-86: Fix Preview/Curation population (P0 — released v0.2.6 Windows GUI showed an
