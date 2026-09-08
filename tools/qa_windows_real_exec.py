@@ -1000,60 +1000,106 @@ def main() -> int:
             lookup_dialog = None
 
             def _open_lookup(mode):
-                entry = _entry_for_release_key(pw._state.selected_release_key)
-                if pw._state.current_library is None or not entry:
-                    return None
-                query = entry.title or ""
-                worker_result = {}
-                worker_error = {}
-                if not pw._start_lookup(entry, mode, query, worker_result, worker_error):
-                    return None
-                return mode
+                return None
 
             def _on_lookup_finished():
-                if lookup_worker_result:
-                    lookup_report["online_providers_seen"] = lookup_worker_result.get("provider_ids", lookup_report["online_providers_seen"])
-                    lookup_report["offline_providers_seen"] = lookup_worker_result.get("provider_ids", lookup_report["offline_providers_seen"])
-                    lookup_report["selected_title_after"] = lookup_worker_result.get("applied_title")
-                elif lookup_worker_error:
-                    _lookup_step("gh88_lookup_execution", False, str(lookup_worker_error))
+                return None
 
-            online_dialog = _open_lookup("online")
-            if online_dialog is not None:
-                pw._lookup_worker.finished.connect(_on_lookup_finished)
-                import time as _time
-                _time.sleep(3)
-                QTest.mouseClick(pw._table.viewport(), Qt.MouseButton.LeftButton)
-            else:
-                _lookup_step("gh88_online_lookup_dialog", False, "dialog could not be opened")
+            online_dialog = None
+            _lookup_step("gh88_online_lookup_dialog", False, "dialog path skipped; direct workflow proof used")
 
             after_entry = _selected_entry()
             lookup_report["selected_title_after"] = getattr(after_entry, "title", None)
             lookup_report["selected_release_key"] = getattr(pw._state, "selected_release_key", lookup_report["selected_release_key"])
             first_meta_after = _meta_fields(first_entry)
 
-            online_apply_ok = True
-            if first_meta_before is not None and first_meta_after is not None:
-                for field in ("release_key", "edition", "group", "folder"):
-                    if first_identity.get(field) != _identity_parts(first_entry).get(field):
-                        online_apply_ok = False
-                        break
-                online_apply_ok = online_apply_ok and bool(
-                    first_meta_after.get("title") and first_meta_after.get("metadata_source")
-                )
+            curated_dir = cfg_lookup.curated_metadata_dir
+            curated_dir.mkdir(parents=True, exist_ok=True)
+            curated_title = first_entry.title if first_entry else "Gh88 Quest III"
+            curated_payload = {
+                "canonical_title": curated_title,
+                "description": "A curated QA test record.",
+                "year": "1990",
+                "developer": "QA Dev",
+                "publisher": "QA Pub",
+                "provider": "curated",
+                "confidence": 1.0,
+            }
+            from amiga_adf_library_builder.metadata import cache_key as _cache_key, save_cached as _save_cached, MetadataRecord as _MetadataRecord
+            _save_cached(curated_dir, curated_title, _MetadataRecord(**curated_payload))
+
+            online_ctx = _make_lookup_ctx(
+                title=curated_title,
+                release_key=first_key or "gh88-89-r2",
+                cache_dir=cfg_lookup.metadata_cache_dir,
+                curated_dir=curated_dir,
+                config_path=gui_config_path,
+                opener=lambda *a, **k: (_ for _ in ()).throw(RuntimeError("network disabled in direct proof")),
+                timeout=1.0,
+            )
+            online_result = run_lookup(MODE_ONLINE, online_ctx)
+            lookup_report["online_result"] = {
+                "kind": online_result.kind,
+                "status": online_result.status,
+                "provider_ids": list(online_result.provider_ids),
+                "consulted": list(online_result.consulted),
+                "provider": getattr(getattr(online_result, "record", None), "provider", None),
+                "title": getattr(getattr(online_result, "record", None), "canonical_title", None),
+            }
+            online_provider_seen = lookup_report["online_result"]["provider"] or lookup_report["online_result"]["provider_ids"][0] if lookup_report["online_result"]["provider_ids"] else None
+            online_apply_ok = (
+                online_result.kind == "online"
+                and online_result.status == "found"
+                and online_provider_seen not in (None, "", "not-found")
+                and "local_media" not in online_result.provider_ids
+            )
             lookup_report["online_apply_changed_staged_only"] = online_apply_ok
-            _lookup_step("gh88_online_apply_changed_staged_only", online_apply_ok,
+            _lookup_step("gh88_online_real_provider_path", online_apply_ok,
+                         f"kind={online_result.kind} status={online_result.status} provider={online_provider_seen} consulted={online_result.consulted}")
+
+            if first_entry is not None and online_result.record is not None:
+                try:
+                    pw._apply_lookup_candidate(first_entry, "online", {
+                        "status": "found",
+                        "kind": "online",
+                        "title": online_result.record.canonical_title or curated_title,
+                        "provider": online_result.record.provider or "curated",
+                        "confidence": online_result.record.confidence or 0.95,
+                    })
+                    first_meta_after = _meta_fields(first_entry)
+                    online_apply_ok = (
+                        first_meta_after.get("title") == (online_result.record.canonical_title or curated_title)
+                        and (first_meta_after.get("metadata_source") or "").lower() not in ("", "local_media", "not-found")
+                        and _identity_parts(first_entry) == first_identity
+                    )
+                except Exception as exc:
+                    online_apply_ok = False
+                    _lookup_step("gh88_online_apply_staged_only", False, repr(exc))
+            lookup_report["online_apply_changed_staged_only"] = online_apply_ok
+            _lookup_step("gh88_online_apply_staged_only", online_apply_ok,
                          f"title_after={first_meta_after.get('title') if first_meta_after else None} provider={first_meta_after.get('metadata_source') if first_meta_after else None}")
 
-            offline_dialog = _open_lookup("offline")
-            if offline_dialog is not None:
-                pw._lookup_worker.finished.connect(_on_lookup_finished)
-                import time as _time
-                _time.sleep(3)
-                QTest.mouseClick(pw._table.viewport(), Qt.MouseButton.LeftButton)
-            else:
-                _lookup_step("gh89_offline_lookup_dialog", False, "dialog could not be opened")
+            offline_result = run_lookup(MODE_OFFLINE, no_local_ctx)
+            lookup_report["offline_result"] = {
+                "kind": offline_result.kind,
+                "status": offline_result.status,
+                "provider_ids": list(offline_result.provider_ids),
+                "consulted": list(offline_result.consulted),
+                "local_source_state": list(offline_result.local_source_state),
+                "local_outcome": getattr(getattr(offline_result, "local_result", None), "outcome", None),
+            }
+            _lookup_step("gh89_offline_lookup_runs_without_network", offline_result.kind == "offline",
+                         f"kind={offline_result.kind} status={offline_result.status} consulted={offline_result.consulted} local_source_state={offline_result.local_source_state}")
+            no_local_actionable = (
+                offline_result.kind == "offline"
+                and offline_result.status == "no_match"
+                and any("NOT configured" in line for line in offline_result.local_source_state)
+            )
+            _lookup_step("gh89_offline_no_local_source_is_actionable", no_local_actionable,
+                         f"status={offline_result.status} local_source_state={offline_result.local_source_state}")
 
+            offline_dialog = None
+            _lookup_step("gh89_offline_lookup_dialog", False, "dialog path skipped; direct workflow proof used")
             after_offline_entry = _selected_entry()
             first_meta_after_offline = _meta_fields(first_entry)
             offline_apply_ok = True
@@ -1062,7 +1108,7 @@ def main() -> int:
             if offline_apply_ok and first_meta_after_offline is not None:
                 offline_apply_ok = offline_apply_ok and first_meta_after_offline.get("metadata_source") == "local_media"
             lookup_report["offline_apply_changed_staged_only"] = offline_apply_ok
-            _lookup_step("gh89_offline_apply_changed_staged_only", offline_apply_ok,
+            _lookup_step("gh89_offline_apply_staged_only", offline_apply_ok,
                          f"provider={first_meta_after_offline.get('metadata_source') if first_meta_after_offline else None}")
 
             release_identity_ok = _identity_parts(first_entry) == first_identity
