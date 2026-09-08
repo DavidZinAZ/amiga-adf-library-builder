@@ -1006,7 +1006,12 @@ def main() -> int:
                 return None
 
             online_dialog = None
-            _lookup_step("gh88_online_lookup_dialog", False, "dialog path skipped; direct workflow proof used")
+            _lookup_step("gh88_online_lookup_dialog_skipped", True, "dialog path skipped; direct workflow proof used")
+
+            def _selected_entry():
+                if not pw._state or not pw._state.current_library or not pw._state.selected_release_key:
+                    return None
+                return pw._state.current_library.releases.get(pw._state.selected_release_key)
 
             after_entry = _selected_entry()
             lookup_report["selected_title_after"] = getattr(after_entry, "title", None)
@@ -1099,7 +1104,7 @@ def main() -> int:
                          f"status={offline_result.status} local_source_state={offline_result.local_source_state}")
 
             offline_dialog = None
-            _lookup_step("gh89_offline_lookup_dialog", False, "dialog path skipped; direct workflow proof used")
+            _lookup_step("gh89_offline_lookup_dialog_skipped", True, "dialog path skipped; direct workflow proof used")
             after_offline_entry = _selected_entry()
             first_meta_after_offline = _meta_fields(first_entry)
             offline_apply_ok = True
