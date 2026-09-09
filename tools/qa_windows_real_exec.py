@@ -29,7 +29,13 @@ shared core) exercises its flows there:
        * selected entry exposes planned processed/export identity/path;
        * source fixture hashes/content are unchanged;
        * merely previewing does not write final export files.
-  4. Emit a JSON report + screenshots (offscreen QWidget.grab) as artifacts.
+  4. (GH-88 + GH-89) Online/Offline lookup qualification: drive the real shared
+     lookup workflow (run_lookup) for BOTH modes on the Windows runtime, plus the
+     real Preview apply path, and emit 11 EXACT boolean report keys. EACH of the
+     11 keys is a HARD GATE: if any key is missing, false, null, malformed, or not
+     boolean true, this harness exits NONZERO. There is no "expected false" /
+     "informational" / "skipped-but-ok" path for these keys.
+  5. Emit a JSON report + screenshots (offscreen QWidget.grab) as artifacts.
 
 This script does NOT modify any GUI/core source; it only drives the public
 GUI entry points and inspects their side effects. It is not imported by pytest
@@ -46,6 +52,65 @@ import time
 from pathlib import Path
 
 REPORT: dict = {"steps": [], "errors": []}
+
+# --------------------------------------------------------------------------- #
+# GH-88 + GH-89 — 11 EXACT boolean report keys, each a HARD GATE.
+#
+# Every key below is a non-negotiable hard gate. If ANY key is missing, false,
+# null, malformed, or not boolean true, the Windows harness MUST exit nonzero.
+# There is no "expected false", "informational false", "skipped but okay", or
+# omission path for these keys. No substitute names are used and no differently
+# named internal step stands in for a key. The overall result is true ONLY when
+# all 11 exact keys are boolean true.
+# --------------------------------------------------------------------------- #
+GH88_89_GATE_KEYS: tuple = (
+    "GH88_ONLINE_LOOKUP_NO_PLACEHOLDER",
+    "GH88_ONLINE_LOOKUP_REAL_PROVIDER_PATH",
+    "GH88_OFFLINE_LOOKUP_NO_PLACEHOLDER",
+    "GH88_APPLY_STAGED_ONLY",
+    "GH88_RELEASE_IDENTITY_STABLE",
+    "GH88_LOOKUP_DOES_NOT_EXPORT",
+    "GH89_OFFLINE_PROVIDER_LIST_LOCAL_ONLY",
+    "GH89_OFFLINE_NO_HALL_OF_LIGHT",
+    "GH89_OFFLINE_NO_LAUNCHBOX_NETWORK_PROVIDER",
+    "GH89_OFFLINE_NETWORK_UNAVAILABLE",
+    "GH89_ONLINE_OFFLINE_ROUTING_SEPARATED",
+)
+#: Values that are never a boolean and are therefore hard-gate failures.
+_PLACEHOLDER_SENTINELS: frozenset = frozenset({
+    None, "placeholder", "TODO", "TBD", "N/A", "NA", "unknown", "skipped", "n/a",
+})
+
+
+def gh8889_gate_eval(report: dict) -> tuple:
+    """Hard-gate the 11 exact GH-88/GH-89 boolean keys.
+
+    Returns ``(all_ok, failures, overall)`` where:
+
+    * ``all_ok``   -- True iff every one of the 11 exact keys is present in the
+      report and is boolean ``True`` (``type is bool`` and value is True).
+    * ``failures`` -- list of human-readable failure reasons (missing / not a
+      boolean / boolean false).
+    * ``overall``  -- ``report["GH88_89_OVERALL"]``; True iff ``all_ok``.
+
+    A key that is missing, None, a string, an int, or boolean False is a
+    failure. There is no path by which a non-true key leaves the harness at
+    exit code 0.
+    """
+    failures: list = []
+    for key in GH88_89_GATE_KEYS:
+        if key not in report:
+            failures.append(f"MISSING: {key}")
+            continue
+        value = report[key]
+        if value in _PLACEHOLDER_SENTINELS or not isinstance(value, bool):
+            failures.append(f"NOT_BOOLEAN_TRUE: {key}={value!r}")
+        elif value is not True:
+            failures.append(f"BOOLEAN_FALSE: {key}")
+    all_ok = not failures
+    overall = bool(all_ok)
+    report["GH88_89_OVERALL"] = overall
+    return all_ok, failures, overall
 
 
 def _step(name: str, ok: bool, detail: str = "") -> None:
@@ -755,6 +820,267 @@ def main() -> int:
     REPORT["gh90"] = gh90_report
 
     # ------------------------------------------------------------------ #
+    # 5) (GH-88 + GH-89) Online/Offline lookup qualification — 11 EXACT keys.
+    #
+    # Drives the real shared lookup workflow (run_lookup) for BOTH modes and
+    # the real Preview apply path, then measures the 11 exact boolean report
+    # keys. Every key is a HARD GATE: any key that is missing, false, null,
+    # malformed, or not boolean true forces a NONZERO exit (see gh8889_gate_exit
+    # at the verdict). There is no skip / placeholder / expected-false path.
+    # All 11 are initialized to False and are only set True by a real product
+    # measurement; if the measurement cannot be produced the key stays False.
+    # ------------------------------------------------------------------ #
+    _g = {k: False for k in GH88_89_GATE_KEYS}
+
+    def _g_step(name, ok, detail=""):
+        REPORT["steps"].append({"step": name, "ok": bool(ok), "detail": detail})
+        print(f"[{'PASS' if ok else 'FAIL'}] {name}: {detail}")
+
+    try:
+        from PySide6.QtWidgets import QApplication
+
+        from amiga_adf_library_builder.gui import PortablePaths
+        from amiga_adf_library_builder.gui.main_window import GuiState
+        from amiga_adf_library_builder.gui.state import (
+            build_path_config_from_gui_state, build_pipeline_kwargs,
+        )
+        from amiga_adf_library_builder.gui.preview_widget import PreviewWidget
+        from amiga_adf_library_builder.initializer import ensure_managed_directories
+        from amiga_adf_library_builder.pipeline import (
+            run_pipeline, build_staged_library_from_result,
+        )
+        from amiga_adf_library_builder.lookup_workflow import (
+            MODE_OFFLINE, MODE_ONLINE, LookupContext, providers_for_mode,
+            classify_lookup_mode, run_lookup,
+        )
+        from amiga_adf_library_builder.metadata import MetadataRecord, save_cached
+        from amiga_adf_library_builder.models import StagedState
+
+        QApplication.instance() or QApplication([])
+
+        # Thrower: any attempt to open the network raises. Proves the offline
+        # path never touches the network and forces the online path to resolve
+        # from a real (curated) provider rather than a live fetch.
+        _net = {"n": 0}
+
+        def _no_net(*_a, **_k):
+            _net["n"] += 1
+            raise RuntimeError("network must be unavailable in GH-88/89 QA")
+
+        # -- synthetic library + real staged preview (drives the real GUI) --
+        qa_dir = base_dir / "gh88-89-qa"
+        lookup_root = qa_dir / "original"
+        lookup_root.mkdir(parents=True, exist_ok=True)
+        fixtures = [
+            "Gh88 - Space Tactics (Disk 1 of 4).adf",
+            "Gh88 - Space Tactics (Disk 2 of 4).adf",
+            "Gh88 - Space Tactics (Disk 3 of 4).adf",
+            "Gh88 - Space Tactics (Disk 4 of 4).adf",
+            "Gh88 - Quest III Boot.adf",
+            "Gh88 - Quest III (Disk 2).adf",
+        ]
+        for _name in fixtures:
+            (lookup_root / _name).write_bytes(_name.encode("utf-8"))
+
+        state = GuiState(
+            library_root=str(qa_dir / "lib"),
+            original_dir=str(lookup_root),
+            run_mode="build",
+        )
+        pp_lk = PortablePaths(base_dir=qa_dir / "lib")
+        pp_lk.ensure_all()
+        cfg_lk = build_path_config_from_gui_state(state)
+        ensure_managed_directories(cfg_lk)
+        res_lk = run_pipeline(**build_pipeline_kwargs(state, cfg_lk))
+        state_path = build_staged_library_from_result(
+            res_lk, library_root=cfg_lk.library_root, run_id="gh88-89-qa"
+        )
+        pw = PreviewWidget()
+        loaded = bool(state_path and state_path.exists()
+                      and pw.load_state_file(state_path))
+        _g_step("gh88_89_staged_preview_loaded", loaded,
+                f"rows={pw._table.rowCount() if loaded else 0}")
+        if not loaded:
+            raise RuntimeError("staged preview not loaded; cannot drive real apply")
+        pw.show()
+        pw._table.selectRow(0)
+        first_key = pw._state.row_to_release_key.get(0)
+        first_entry = (pw._state.current_library.releases.get(first_key)
+                       if first_key else None)
+        if first_entry is None:
+            raise RuntimeError("no staged entry to apply to")
+        title = first_entry.title or "Space Tactics"
+
+        # Real release identity (must be byte-stable across the apply).
+        def _identity(e):
+            return {
+                "release_key": e.release_key,
+                "edition": e.edition,
+                "group": e.group,
+                "adf_files": sorted(e.adf_files or []),
+                "folder": e.folder,
+            }
+        identity_before = _identity(first_entry)
+
+        # -- ONLINE lookup: real provider path, network unavailable ---------- #
+        curated_dir = qa_dir / "curated"
+        curated_dir.mkdir(parents=True, exist_ok=True)
+        cache_dir = qa_dir / "cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        # Seed the curated provider with a REAL record for the selected title.
+        # The online chain resolves curated FIRST (deterministic, no network),
+        # which is a genuine online-chain provider path.
+        save_cached(curated_dir, title, MetadataRecord(
+            canonical_title=title, description="QA curated record.",
+            artwork_url="https://example.invalid/qa-boxart.png",
+            year="1990", developer="QA", publisher="QA",
+            provider="curated", confidence=1.0,
+        ))
+        on_res = run_lookup(MODE_ONLINE, LookupContext(
+            query=title, release_key=first_key, title=title,
+            cache_dir=cache_dir, curated_dir=curated_dir,
+            config_path=None, opener=_no_net, timeout=1.0,
+        ))
+        online_provider = (on_res.record.provider if on_res.record else None)
+        online_chain = set(providers_for_mode(MODE_ONLINE))
+        offline_chain = set(providers_for_mode(MODE_OFFLINE))
+        _g["GH88_ONLINE_LOOKUP_REAL_PROVIDER_PATH"] = bool(
+            on_res.kind == MODE_ONLINE and on_res.status == "found"
+            and on_res.record is not None
+            and online_provider in online_chain
+            and online_provider not in ("local_media", "not-found", "")
+        )
+        _g["GH88_ONLINE_LOOKUP_NO_PLACEHOLDER"] = bool(
+            on_res.record is not None
+            and (on_res.record.canonical_title or "").strip() != ""
+            and online_provider not in _PLACEHOLDER_SENTINELS
+            and online_provider not in ("local_media", "not-found", "")
+        )
+        _g_step("gh88_online_real_provider_path",
+                _g["GH88_ONLINE_LOOKUP_REAL_PROVIDER_PATH"],
+                f"kind={on_res.kind} status={on_res.status} provider={online_provider}")
+        _g_step("gh88_online_no_placeholder",
+                _g["GH88_ONLINE_LOOKUP_NO_PLACEHOLDER"],
+                f"canonical_title={getattr(on_res.record, 'canonical_title', None)!r}")
+
+        # -- OFFLINE lookup: local-only, network unavailable ----------------- #
+        # LaunchBox image-tree fixture under the QA dir (real local source).
+        lb_root = qa_dir / "lb"
+        game_dir = lb_root / "Images" / "Commodore Amiga" / "Box - Front" / title
+        game_dir.mkdir(parents=True, exist_ok=True)
+        (game_dir / "001.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 24)
+        cfg_path = qa_dir / "local_media.toml"
+        cfg_path.write_text(
+            "[local_media]\n"
+            "enabled = true\n"
+            'platform_names = ["Commodore Amiga", "Amiga"]\n'
+            f'roots = ["{lb_root}"]\n',
+            encoding="utf-8")
+        _net_before = _net["n"]
+        off_res = run_lookup(MODE_OFFLINE, LookupContext(
+            query=title, release_key=first_key, title=title,
+            cache_dir=qa_dir / "mcache", curated_dir=None,
+            config_path=cfg_path, opener=_no_net, timeout=1.0,
+        ))
+        local = off_res.local_result
+        off_outcome = local.outcome if local else None
+        _g["GH88_OFFLINE_LOOKUP_NO_PLACEHOLDER"] = bool(
+            off_res.kind == MODE_OFFLINE
+            and local is not None
+            and off_outcome in ("auto_match", "needs_review")
+            and off_res.status in ("found", "needs_review")
+        )
+        _g["GH89_OFFLINE_PROVIDER_LIST_LOCAL_ONLY"] = bool(
+            providers_for_mode(MODE_OFFLINE) == ["local_media"]
+        )
+        _g["GH89_OFFLINE_NO_HALL_OF_LIGHT"] = bool(
+            "hall-of-light" not in offline_chain
+            and "hall-of-light" not in [c.lower() for c in off_res.consulted]
+        )
+        _g["GH89_OFFLINE_NO_LAUNCHBOX_NETWORK_PROVIDER"] = bool(
+            offline_chain <= {"local_media"}
+            and not (offline_chain & online_chain)
+        )
+        _g["GH89_OFFLINE_NETWORK_UNAVAILABLE"] = bool(
+            off_res.kind == MODE_OFFLINE
+            and off_res.status != "error"
+            and _net["n"] == _net_before  # opener never invoked by offline path
+        )
+        _g["GH89_ONLINE_OFFLINE_ROUTING_SEPARATED"] = bool(
+            classify_lookup_mode(MODE_ONLINE) == "online"
+            and classify_lookup_mode(MODE_OFFLINE) == "offline"
+            and "local_media" not in online_chain
+            and not (online_chain & offline_chain)
+        )
+        _g_step("gh88_offline_no_placeholder",
+                _g["GH88_OFFLINE_LOOKUP_NO_PLACEHOLDER"],
+                f"kind={off_res.kind} status={off_res.status} outcome={off_outcome}")
+        _g_step("gh89_offline_provider_list_local_only",
+                _g["GH89_OFFLINE_PROVIDER_LIST_LOCAL_ONLY"],
+                f"offline={providers_for_mode(MODE_OFFLINE)}")
+        _g_step("gh89_offline_no_hall_of_light",
+                _g["GH89_OFFLINE_NO_HALL_OF_LIGHT"],
+                f"offline={providers_for_mode(MODE_OFFLINE)} consulted={off_res.consulted}")
+        _g_step("gh89_offline_no_launchbox_network_provider",
+                _g["GH89_OFFLINE_NO_LAUNCHBOX_NETWORK_PROVIDER"],
+                f"offline={sorted(offline_chain)}")
+        _g_step("gh89_offline_network_unavailable",
+                _g["GH89_OFFLINE_NETWORK_UNAVAILABLE"],
+                f"net_calls={_net['n']} status={off_res.status}")
+        _g_step("gh89_online_offline_routing_separated",
+                _g["GH89_ONLINE_OFFLINE_ROUTING_SEPARATED"],
+                f"online={sorted(online_chain)} offline={sorted(offline_chain)}")
+
+        # -- REAL Preview apply: staged-only mutation, no export ------------ #
+        export_before = sorted(p for p in cfg_lk.output_dir.rglob("*") if p.is_file())
+        if on_res.record is not None and on_res.status in ("found", "needs_review"):
+            pw._apply_lookup_candidate(first_entry, "online", {
+                "status": on_res.status,
+                "kind": "online",
+                "title": on_res.record.canonical_title,
+                "provider": on_res.record.provider,
+                "confidence": on_res.confidence,
+            })
+        identity_after = _identity(first_entry)
+        export_after = sorted(p for p in cfg_lk.output_dir.rglob("*") if p.is_file())
+        meta_changed = (first_entry.metadata_source is not None
+                        and first_entry.metadata_source not in ("local_media", ""))
+        state_ok = first_entry.curation_state in (
+            StagedState.MODIFIED, StagedState.NEEDS_REVIEW)
+        _g["GH88_APPLY_STAGED_ONLY"] = bool(
+            meta_changed and state_ok
+            and identity_after == identity_before
+            and export_after == export_before
+        )
+        _g["GH88_RELEASE_IDENTITY_STABLE"] = bool(identity_after == identity_before)
+        _g["GH88_LOOKUP_DOES_NOT_EXPORT"] = bool(export_after == [] and export_after == export_before)
+        _g_step("gh88_apply_staged_only", _g["GH88_APPLY_STAGED_ONLY"],
+                f"metadata_source={first_entry.metadata_source} "
+                f"state={first_entry.curation_state.value} identity_stable={identity_after == identity_before}")
+        _g_step("gh88_release_identity_stable", _g["GH88_RELEASE_IDENTITY_STABLE"],
+                f"before={identity_before} after={identity_after}")
+        _g_step("gh88_lookup_does_not_export", _g["GH88_LOOKUP_DOES_NOT_EXPORT"],
+                f"export_files_after={len(export_after)}")
+        pw.close()
+    except Exception as exc:
+        # Any failure leaves the 11 keys at False -> the hard gate fails ->
+        # nonzero exit. Never swallow silently.
+        _g_step("gh88_89_lookup_qualification", False, repr(exc))
+        REPORT["errors"].append(f"GH-88/89 lookup qualification: {exc!r}")
+
+    # Publish the 11 exact keys + overall result onto the report, then hard-gate.
+    REPORT.update(_g)
+    # Evaluate the 11-key hard gate NOW (before the report is written below) so
+    # the emitted report.json carries the authoritative GH88_89_OVERALL. The
+    # gate result is cached and consumed at the verdict; the exit code is a
+    # direct function of these 11 exact keys, not of an informational step flag.
+    _GH88_89_GATE = gh8889_gate_eval(REPORT)
+    REPORT["GH88_89"] = {
+        "keys": dict(_g),
+        "net_calls": _net.get("n", 0) if "_net" in dir() else None,
+    }
+
+    # ------------------------------------------------------------------ #
     # Emit the report + secret-leak scan of the logs dir
     # ------------------------------------------------------------------ #
     REPORT["gh86"] = gh86_report
@@ -781,7 +1107,23 @@ def main() -> int:
                                      "lb_mappings_persist_reopen",
                                      "lb_missing_path_retained_diagnostic",
                                      "lb_backend_missing_root_diagnostic"))
-    return 1 if hard_fail else 0
+    # (GH-88 + GH-89) HARD gate: the 11 exact boolean keys are authoritative and
+    # are NOT optional. Any missing / null / non-boolean / boolean-False key
+    # forces a nonzero exit regardless of the step allowlist above. This is what
+    # makes the gate structural rather than soft: the exit code is a direct
+    # function of the 11 exact keys, not of an informational step flag.
+    # The gate was already evaluated in section 5 (before the report write), so
+    # the emitted report.json carries the authoritative GH88_89_OVERALL; we
+    # consume that cached result here for the verdict.
+    gh8889_ok, gh8889_failures, _gh8889_overall = _GH88_89_GATE
+    for _reason in gh8889_failures:
+        print(f"[GATE-FAIL] {_reason}")
+    if gh8889_ok:
+        print("[GATE-PASS] all 11 GH-88/89 exact keys are boolean true")
+    else:
+        print(f"[GATE-FAIL] {len(gh8889_failures)} GH-88/89 key(s) not boolean-true -> nonzero exit")
+    # Nonzero exit if EITHER a hard step failed OR the 11-key gate failed.
+    return 1 if (hard_fail or not gh8889_ok) else 0
 
 
 if __name__ == "__main__":
