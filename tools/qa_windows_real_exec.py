@@ -970,11 +970,17 @@ def main() -> int:
         game_dir.mkdir(parents=True, exist_ok=True)
         (game_dir / "001.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 24)
         cfg_path = qa_dir / "local_media.toml"
+        # TOML LITERAL strings (single quotes) for the root path: on real
+        # Windows the root contains backslashes, which a TOML BASIC
+        # (double-quoted) string would interpret as escape sequences
+        # ("\U" = invalid hex) so tomllib rejects the whole file and the
+        # offline lookup errors out (the r3 false-key defect). A literal
+        # string carries the path byte-for-byte on every platform.
         cfg_path.write_text(
             "[local_media]\n"
             "enabled = true\n"
             'platform_names = ["Commodore Amiga", "Amiga"]\n'
-            f'roots = ["{lb_root}"]\n',
+            f"roots = ['{lb_root}']\n",
             encoding="utf-8")
         _net_before = _net["n"]
         off_res = run_lookup(MODE_OFFLINE, LookupContext(
