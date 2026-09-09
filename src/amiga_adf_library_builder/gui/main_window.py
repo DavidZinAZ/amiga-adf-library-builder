@@ -423,6 +423,12 @@ class MainWindow(QMainWindow):
         # (GH-80) Library Preview & Curation workspace.
         self._preview_widget = PreviewWidget(self)
         self._preview_widget.status_message.connect(self._on_preview_status_message)
+        # (GH-99 defect 3) Persist curation decisions as soon as they change:
+        # every staged-state mutation fires state_changed, and we re-save the
+        # loaded state atomically. The pipeline's carry_over then restores
+        # these decisions (keyed by release_key) on the next build, so the
+        # operator never repeats the same merge/match/review work.
+        self._preview_widget.state_changed.connect(self._on_preview_state_changed)
         tabs.addTab(self._preview_widget, "Preview & Curation")
         tabs.addTab(self._build_diagnostics_tab(), "Diagnostics")
 
@@ -1145,6 +1151,21 @@ class MainWindow(QMainWindow):
     def _on_preview_status_message(self, message: str) -> None:
         """Handle status messages from the PreviewWidget."""
         self._append_diag(f"Preview & Curation: {message}")
+
+    def _on_preview_state_changed(self) -> None:
+        """(GH-99 defect 3) Auto-save staged curation state on change.
+
+        Called when the PreviewWidget emits ``state_changed`` (any staged
+        curation mutation). Persists the loaded state atomically so prior
+        decisions are available to the pipeline's carry_over on the next
+        build. Best-effort: a failed save is logged but never breaks the
+        curation workflow.
+        """
+        try:
+            if self._preview_widget.auto_save_state():
+                self._append_diag("Preview & Curation: state saved")
+        except OSError as exc:
+            self._append_diag(f"Preview & Curation: state save failed: {exc}")
 
     def _run_marker(self, text: str) -> None:
         """Append a run boundary line (start/end) even when the live log is off."""
