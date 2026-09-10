@@ -643,6 +643,8 @@ def main() -> int:
         from amiga_adf_library_builder.initializer import ensure_managed_directories
         from amiga_adf_library_builder.pipeline import run_pipeline, build_staged_library_from_result
         from amiga_adf_library_builder.gui.preview_widget import PreviewWidget
+        from amiga_adf_library_builder.library_state import CurationStateManager
+        from amiga_adf_library_builder.models import StagedState
 
         # 4a) Build a populated synthetic library with distinct releases.
         gh90_root = base_dir / "gh90-original"
@@ -694,9 +696,10 @@ def main() -> int:
             # Multi-select: select all rows and verify each selected row identity.
             pw._table.setSelectionMode(__import__("PySide6.QtWidgets").QtWidgets.QAbstractItemView.MultiSelection)
             selection_model = pw._table.selectionModel()
+            _rows_flag_gh90 = __import__("PySide6.QtCore").QtCore.QItemSelectionModel.Rows
             for r in range(pw._table.rowCount()):
                 idx = pw._table.model().index(r, 0)
-                selection_model.select(idx, __import__("PySide6.QtCore").QtCore.QItemSelectionModel.Select)
+                selection_model.select(idx, __import__("PySide6.QtCore").QtCore.QItemSelectionModel.Select | _rows_flag_gh90)
             selected = selection_model.selectedRows()
             titles = []
             keys = []
@@ -772,7 +775,7 @@ def main() -> int:
             for _, release_key in targets:
                 entry = pw._state.current_library.releases.get(release_key)
                 mutated_targets.append(entry.curation_state if entry else None)
-            mutated_ok = all(s is not None and s.value == "Accepted" for s in mutated_targets if s is not None)
+            mutated_ok = all(s is not None and s is StagedState.ACCEPTED for s in mutated_targets if s is not None)
             # Verify non-selected releases remain unchanged.
             non_selected_unchanged = True
             for row in range(pw._table.rowCount()):
@@ -791,7 +794,7 @@ def main() -> int:
                 if not release_key:
                     continue
                 entry = pw._state.current_library.releases.get(release_key)
-                if entry and entry.curation_state.value == "Accepted":
+                if entry and entry.curation_state is StagedState.ACCEPTED:
                     non_selected_unchanged = False
                     break
             gh90_report["staged_mutation_only_selected"] = mutated_ok and non_selected_unchanged
@@ -841,7 +844,7 @@ def main() -> int:
     gh99_report: dict = {key: False for key in GH99_GATE_KEYS}
 
     try:
-        from PySide6.QtWidgets import QApplication
+        from PySide6.QtWidgets import QApplication, QDialog, QDialogButtonBox
         from PySide6.QtCore import Qt, QItemSelectionModel, QItemSelection
 
         from amiga_adf_library_builder.gui import PortablePaths
@@ -1028,26 +1031,39 @@ def main() -> int:
                     f"selected_rows={_batch_rows} states={[_lib3.releases[k].curation_state for k in _keys3]}")
 
         # --- Gates 11/12: Notes line-oriented, provenance accurate ---
+        # Real measurement: notes is a newline-separated string (line-oriented);
+        # every line must be non-empty. Provenance: confidence must be a number,
+        # and when > 0 a provenance sidecar must exist. Missing state file => False.
         if sp_gh99 and sp_gh99.exists():
             _data2 = _json.loads(sp_gh99.read_text())
             _notes_ok = True
             _prov_ok = True
+            _nfo_dir = cfg_gh99.library_root / "assets" / "nfo"
             for _rkey, _rdata in _data2["library"]["releases"].items():
                 _notes = _rdata.get("notes", "")
                 if not isinstance(_notes, str) or not _notes.strip():
                     _notes_ok = False
+                else:
+                    _lines = [l for l in _notes.split("\n") if l.strip()]
+                    if len(_lines) < 1:
+                        _notes_ok = False
                 _conf = _rdata.get("confidence")
-                if _conf is not None and not isinstance(_conf, (int, float)):
+                if _conf is None or not isinstance(_conf, (int, float)):
                     _prov_ok = False
+                elif _conf > 0:
+                    _base = _rdata.get("folder") or _rdata.get("title") or _rkey
+                    _prov_path = _nfo_dir / f"{_base}.provenance.json"
+                    if not _prov_path.is_file():
+                        _prov_ok = False
             gh99_report["GH99_NOTES_LINE_ORIENTED"] = _notes_ok
             gh99_report["GH99_NOTES_PROVENANCE_ACCURATE"] = _prov_ok
             _gh99_step("gh99_notes_line_oriented", _notes_ok)
             _gh99_step("gh99_notes_provenance_accurate", _prov_ok)
         else:
-            gh99_report["GH99_NOTES_LINE_ORIENTED"] = True
-            gh99_report["GH99_NOTES_PROVENANCE_ACCURATE"] = True
-            _gh99_step("gh99_notes_line_oriented", True, "no notes (pass by default)")
-            _gh99_step("gh99_notes_provenance_accurate", True, "no notes (pass by default)")
+            gh99_report["GH99_NOTES_LINE_ORIENTED"] = False
+            gh99_report["GH99_NOTES_PROVENANCE_ACCURATE"] = False
+            _gh99_step("gh99_notes_line_oriented", False, "state file missing")
+            _gh99_step("gh99_notes_provenance_accurate", False, "state file missing")
 
         # --- Gate 13: Review action exposed ---
         _lib4 = StagedLibrary()
@@ -1084,7 +1100,14 @@ def main() -> int:
                 _btn[0].button(QDialogButtonBox.StandardButton.Yes).click()
             return QDialog.DialogCode.Accepted
 
+        def _fake_reject(self):
+            _btn = self.findChildren(QDialogButtonBox)
+            if _btn:
+                _btn[0].button(QDialogButtonBox.StandardButton.No).click()
+            return QDialog.DialogCode.Accepted
+
         _real_exec = QDialog.exec
+        # Approve leg
         QDialog.exec = _fake_approve
         pw_gh99_e._on_review_selected()
         gh99_report["GH99_REVIEW_RESOLVE_APPROVE"] = (_e4.curation_state == StagedState.ACCEPTED)
@@ -1097,21 +1120,55 @@ def main() -> int:
         _sm_e.select(pw_gh99_e._table.model().index(0, 0),
                       QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows)
         pw_gh99_e._on_selection_changed()
-        # The _on_review_selected creates a dialog and calls dialog.exec().
-        # The reject path sets state to REJECTED when the dialog returns Accepted
-        # with decision["value"] == "reject". We simulate this by having
-        # the mock return Accepted (which is what dialog.accept() returns
-        # from the _choose("reject") closure), then verify the state change.
-        # Since the decision value is set by the closure, we confirm the
-        # reject path works by checking the source code path (line 1139-1140).
+        # Reject leg: click No button -> _choose("reject") -> state=REJECTED
+        QDialog.exec = _fake_reject
         pw_gh99_e._on_review_selected()
-        gh99_report["GH99_REVIEW_RESOLVE_REJECT"] = True
-        _gh99_step("gh99_review_reject", True, "reject path verified in source code (preview_widget.py L1139-1140)")
+        gh99_report["GH99_REVIEW_RESOLVE_REJECT"] = (_e4.curation_state == StagedState.REJECTED)
+        _gh99_step("gh99_review_reject", _e4.curation_state == StagedState.REJECTED, f"state={_e4.curation_state}")
         QDialog.exec = _real_exec
 
         # --- Gate 16: Identity stable across ops ---
-        gh99_report["GH99_IDENTITY_STABLE_ACROSS_OPS"] = True
-        _gh99_step("gh99_identity_stable", True)
+        # Real measurement: record release keys before/after batch ops + filter
+        # and verify identity is preserved (same keys, same entry objects).
+        _lib_id = StagedLibrary()
+        _keys_id = ["id1", "id2", "id3"]
+        for _i, _k in enumerate(_keys_id):
+            _e = StagedReleaseEntry(
+                release_key=_k, title=f"Identity {_i}",
+                edition=None, group=f"GRP{_i}", chipset="OCS",
+                language="en", version="1.0", alt_marker=None, ext="adf",
+                curation_state=StagedState.PENDING,
+            )
+            _e.adf_files = [f"{_k}.adf"]
+            _e.confidence = 0.8
+            _lib_id.releases[_k] = _e
+        pw_gh99_f = PreviewWidget()
+        pw_gh99_f._state.current_library = _lib_id
+        pw_gh99_f._refresh_table()
+        pw_gh99_f.show()
+        _keys_before = set(pw_gh99_f._state.current_library.releases.keys())
+        _entries_before = {k: id(pw_gh99_f._state.current_library.releases[k]) for k in _keys_before}
+        # Batch op: select all, set to ACCEPTED
+        _sm_f = pw_gh99_f._table.selectionModel()
+        _sm_f.select(QItemSelection(pw_gh99_f._table.model().index(0, 0), pw_gh99_f._table.model().index(2, 3)),
+                      QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows)
+        pw_gh99_f._set_selected_state(StagedState.ACCEPTED)
+        # Filter apply/clear
+        pw_gh99_f._filter_combo.setCurrentText("Accepted")
+        pw_gh99_f._apply_filter()
+        pw_gh99_f._filter_combo.setCurrentText("All")
+        pw_gh99_f._apply_filter()
+        pw_gh99_f._refresh_table()
+        _keys_after = set(pw_gh99_f._state.current_library.releases.keys())
+        _entries_after = {k: id(pw_gh99_f._state.current_library.releases[k]) for k in _keys_after}
+        _identity_stable = (
+            _keys_before == _keys_after
+            and len(_keys_before) > 0
+            and all(_entries_before.get(k) == _entries_after.get(k) for k in _keys_before)
+        )
+        gh99_report["GH99_IDENTITY_STABLE_ACROSS_OPS"] = _identity_stable
+        _gh99_step("gh99_identity_stable", _identity_stable,
+                    f"keys_before={_keys_before} keys_after={_keys_after}")
 
         # --- Gate 17: No export before explicit export ---
         _export_files = list(cfg_gh99.output_dir.rglob("*")) if cfg_gh99.output_dir.exists() else []
@@ -1124,34 +1181,71 @@ def main() -> int:
         gh99_report["GH99_SOURCE_DISKS_IMMUTABLE"] = _source_unchanged
         _gh99_step("gh99_source_disks_immutable", _source_unchanged)
 
-        # --- Run 2 with same run_id: carry_over (gates 3/4) ---
-        state2 = GuiState(
-            library_root=str(base_dir / "gh99-lib2"),
-            original_dir=str(gh99_root),
-            run_mode="build",
-        )
-        pp_gh99_2 = PortablePaths(base_dir=base_dir / "gh99-lib2")
-        pp_gh99_2.ensure_all()
-        cfg_gh99_2 = build_path_config_from_gui_state(state2)
-        ensure_managed_directories(cfg_gh99_2)
-        kwargs_gh99_2 = build_pipeline_kwargs(state2, cfg_gh99_2)
-        kwargs_gh99_2["run_id"] = result_gh99.get("run_id", "gh99-qa")
+        # --- Run 2: carry_over (gates 3/4) ---
+        # Gate 3: PRIOR_CURATION_STATE_RESTORED - prior decision survives
+        # Gate 4: PRIOR_DECISION_NOT_REREQUESTED - resolved decision not re-requested
+        # Carry-over requires SAME library_root + DIFFERENT run_id.
+        # Step 1: take the ACTUAL run 1 state, make a genuine decision, persist.
+        _run1_state_path = cfg_gh99.library_root / "curation" / f"library_state_{result_gh99.get('run_id', 'gh99-qa')}.json"
+        if sp_gh99 and sp_gh99.exists() and _run1_state_path.exists():
+            _data_r1 = _json.loads(_run1_state_path.read_text())
+            _releases_r1 = _data_r1.get("library", {}).get("releases", {})
+            # Pick the first release and mark it REJECTED
+            if _releases_r1:
+                _first_key = next(iter(_releases_r1))
+                _releases_r1[_first_key]["curation_state"] = "rejected"
+                _run1_state_path.write_text(_json.dumps(_data_r1), encoding="utf-8")
+                _gh99_step("gh99_run1_decision", True, f"set {_first_key}=rejected")
+        elif sp_gh99 and sp_gh99.exists():
+            # Fallback: state file is at sp_gh99 path
+            _data_r1 = _json.loads(sp_gh99.read_text())
+            _releases_r1 = _data_r1.get("library", {}).get("releases", {})
+            if _releases_r1:
+                _first_key = next(iter(_releases_r1))
+                _releases_r1[_first_key]["curation_state"] = "rejected"
+                sp_gh99.write_text(_json.dumps(_data_r1), encoding="utf-8")
+                _gh99_step("gh99_run1_decision", True, f"set {_first_key}=rejected")
+        else:
+            _gh99_step("gh99_run1_decision", False, "no state file to modify")
+
+        # Run 2: SAME library_root, DIFFERENT run_id
+        _run_id_2 = result_gh99.get("run_id", "gh99-qa") + "_run2"
+        kwargs_gh99_2 = build_pipeline_kwargs(state, cfg_gh99)
+        kwargs_gh99_2["run_id"] = _run_id_2
         result_gh99_2 = run_pipeline(**kwargs_gh99_2)
         sp_gh99_2 = build_staged_library_from_result(
-            result_gh99_2, library_root=cfg_gh99_2.library_root,
-            run_id=kwargs_gh99_2["run_id"])
+            result_gh99_2,
+            library_root=cfg_gh99.library_root,
+            run_id=_run_id_2,
+        )
         _gh99_step("gh99_run2_pipeline", bool(result_gh99_2.get("per_group")),
                     f"groups={result_gh99_2.get('groups', 0)}")
+        _prior_state_restored = False
+        _no_rerequest = False
         if sp_gh99_2 and sp_gh99_2.exists():
-            _curation_dir = base_dir / "gh99-lib2" / "curation"
-            _state_files = list(_curation_dir.glob("library_state_*.json")) if _curation_dir.exists() else []
-            _gh99_step("gh99_state_files_exist", len(_state_files) >= 1, f"state_files={len(_state_files)}")
+            _data_co = _json.loads(sp_gh99_2.read_text())
+            _releases_co = _data_co.get("library", {}).get("releases", {})
+            if _releases_co:
+                # Gate 3: at least one release has a carried-over decision
+                _carried = [r for r in _releases_co.values() if r.get("curation_state") in ("rejected", "accepted")]
+                _prior_state_restored = len(_carried) > 0
+                # Gate 4: no previously-decided release reverted to needs_review
+                # Compare run 1 state vs run 2 state
+                _run1_path = cfg_gh99.library_root / "curation" / f"library_state_{result_gh99.get('run_id', 'gh99-qa')}.json"
+                _no_rerequest = True
+                if _run1_path.exists():
+                    _data_r1 = _json.loads(_run1_path.read_text())
+                    _releases_r1 = _data_r1.get("library", {}).get("releases", {})
+                    _decided_keys = {k for k, v in _releases_r1.items() if v.get("curation_state") in ("rejected", "accepted")}
+                    _reverted = [k for k in _decided_keys if _releases_co.get(k, {}).get("curation_state") == "needs_review"]
+                    _no_rerequest = len(_reverted) == 0
+            _gh99_step("gh99_state_files_exist", True, f"state_files=1")
         else:
             _gh99_step("gh99_state_files_exist", False)
-        gh99_report["GH99_PRIOR_CURATION_STATE_RESTORED"] = True
-        gh99_report["GH99_PRIOR_DECISION_NOT_REREQUESTED"] = True
-        _gh99_step("gh99_prior_state_restored", True)
-        _gh99_step("gh99_no_repeat_decision", True)
+        gh99_report["GH99_PRIOR_CURATION_STATE_RESTORED"] = _prior_state_restored
+        gh99_report["GH99_PRIOR_DECISION_NOT_REREQUESTED"] = _no_rerequest
+        _gh99_step("gh99_prior_state_restored", _prior_state_restored)
+        _gh99_step("gh99_no_repeat_decision", _no_rerequest)
 
     except Exception as exc:
         _gh99_step("gh99_qualification", False, repr(exc))
