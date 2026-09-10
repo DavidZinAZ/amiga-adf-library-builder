@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.13 — 2026-09-10
+
+- GH-99: Coherent Preview/Curation workflow repair (8 defects).
+  - Defect 1 (identity): table rows carry release_key in Qt::UserRole so selection, detail, and actions survive redraw/sort/filter.
+  - Defect 2 (canonical display): Edition/Group/Confidence columns show parsed + provider-resolved values; ADFs count column added.
+  - Defect 3 (persistence): state auto-saved on every curation change; pipeline carry_over restores prior decisions keyed by release_key.
+  - Defect 4 (edit): inline Edition/Group editing with METADATA_EDIT undo/redo.
+  - Defect 5 (multi-select): ExtendedSelection (Ctrl/Shift) enabled.
+  - Defect 6 (redundant control): Multi-Select toggle removed.
+  - Defect 7 (notes): line-oriented notes built in pipeline; detail pane is a capped read-only QTextEdit.
+  - Defect 8 (needs_review): context-menu 'Review...' opens a dialog with reason list and full candidate; approve/reject recorded as REVIEW_RESOLVED with undo/redo.
+  - Independently qualified on real packaged Windows (Windows-R3 Actions run 34466500597; QA PASS); released with Windows assets `amiga-adf-gui-portable.zip` and `amiga-adf-gui.exe`.
+
 ## 0.2.9 — 2026-09-07
 
 - GH-93: Add Move ADF(s) and Merge Release with explicit selection safety and single audit trail.
