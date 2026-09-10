@@ -76,6 +76,7 @@ def process_artwork_bytes(
     max_w: int = ARTWORK_MAX_W,
     max_h: int = ARTWORK_MAX_H,
     max_bytes: int = ARTWORK_MAX_BYTES,
+    progressive: bool = False,
 ) -> bytes:
     """Read ``master`` and return deterministic processed JPEG bytes.
 
@@ -84,7 +85,8 @@ def process_artwork_bytes(
       * never upscaled (scale capped at 1.0);
       * pixel dimensions <= (max_w, max_h);
       * file size <= max_bytes (quality stepped down if needed);
-      * deterministic for identical input + environment.
+      * deterministic for identical input + environment;
+      * progressive JPEG encoding when ``progressive=True`` (GH-102).
 
     Raises ``RuntimeError`` only if Pillow is unavailable; never silently fakes.
     """
@@ -115,11 +117,11 @@ def process_artwork_bytes(
 
         quality = _ARTWORK_QUALITY_START
         buf = io.BytesIO()
-        im.save(buf, "JPEG", quality=quality)
+        im.save(buf, "JPEG", quality=quality, progressive=progressive)
         while buf.tell() > max_bytes and quality > _ARTWORK_QUALITY_FLOOR:
             quality -= 5
             buf = io.BytesIO()
-            im.save(buf, "JPEG", quality=quality)
+            im.save(buf, "JPEG", quality=quality, progressive=progressive)
         if buf.tell() > max_bytes:
             raise RuntimeError(
                 "Artwork exceeds hard 500 KB cap even at minimum quality"
@@ -136,6 +138,7 @@ def process_artwork(
     max_w: int = ARTWORK_MAX_W,
     max_h: int = ARTWORK_MAX_H,
     max_bytes: int = ARTWORK_MAX_BYTES,
+    progressive: bool = False,
 ) -> Path:
     """Process ``master`` to ``dest`` and return ``dest`` (convenience wrapper)."""
     data = process_artwork_bytes(
@@ -145,6 +148,7 @@ def process_artwork(
         max_w=max_w,
         max_h=max_h,
         max_bytes=max_bytes,
+        progressive=progressive,
     )
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)

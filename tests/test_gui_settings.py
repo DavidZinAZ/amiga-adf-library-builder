@@ -96,3 +96,32 @@ def test_settings_default_is_system_theme(tmp_path: Path):
     s = store.load()
     assert s.theme == "system"
     assert s.presets == {}
+
+
+def test_settings_convert_progressive_jpeg_default(tmp_path: Path):
+    """GH-102: default convert_progressive_jpeg is 'never' (baseline JPEG)."""
+    store = SettingsStore(tmp_path / "gui-settings.toml")
+    s = store.load()
+    assert s.convert_progressive_jpeg == "never"
+
+
+def test_settings_convert_progressive_jpeg_round_trip(tmp_path: Path):
+    """GH-102: convert_progressive_jpeg persists through save/load."""
+    path = tmp_path / "gui-settings.toml"
+    store = SettingsStore(path)
+    store.load()
+    store.update(convert_progressive_jpeg="always")
+    store2 = SettingsStore(path)
+    s = store2.load()
+    assert s.convert_progressive_jpeg == "always"
+
+
+def test_settings_convert_progressive_jpeg_invalid_rejected(tmp_path: Path):
+    """GH-102: invalid convert_progressive_jpeg values are rejected."""
+    store = SettingsStore(tmp_path / "gui-settings.toml")
+    store.load()
+    try:
+        store.update(convert_progressive_jpeg="maybe")
+        raise AssertionError("expected SettingsError for invalid value")
+    except Exception as exc:
+        assert "unknown settings key" in str(exc) or "invalid" in str(exc).lower()

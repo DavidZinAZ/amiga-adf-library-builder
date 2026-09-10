@@ -76,6 +76,8 @@ def run_pipeline(
     retroachievements_config_path: Optional[str] = None,
     retrokit_config_path: Optional[str] = None,
     activity: Optional[Callable[[str], None]] = None,
+    # (GH-102) Progressive JPEG conversion policy.
+    convert_progressive_jpeg: str = "never",
 ) -> dict:
     """Execute phases 2-4, 5 (optional), and 6. Returns a result summary dict.
 
@@ -424,6 +426,8 @@ def run_pipeline(
             original_dir=original_dir,
             verify_only=verify_only,
             require_artwork=require_artwork,
+            # (GH-102) Progressive JPEG conversion policy.
+            convert_progressive_jpeg=convert_progressive_jpeg,
         )
         _act(
             f"Export finished: {export_result.releases_exported} release(s), "

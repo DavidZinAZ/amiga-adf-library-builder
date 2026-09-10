@@ -648,6 +648,21 @@ class MainWindow(QMainWindow):
             "time you start the app. Off by default."
         )
         advanced_layout.addWidget(self._cb_advanced)
+
+        # (GH-102) Progressive JPEG conversion policy.
+        self._combo_progressive_jpeg = QComboBox(self)
+        self._combo_progressive_jpeg.addItems([
+            "never",
+            "always",
+            "prompt",
+        ])
+        self._combo_progressive_jpeg.setToolTip(
+            "Progressive JPEG conversion policy for artwork import. "
+            "'never' keeps baseline JPEGs (default), 'always' converts "
+            "to progressive, 'prompt' asks per-run."
+        )
+        advanced_layout.addRow("Progressive JPEG:", self._combo_progressive_jpeg)
+
         layout.addWidget(advanced_box)
 
         # --- Local Asset Matching thresholds (GH-54) ---------------------------
@@ -1439,6 +1454,8 @@ class MainWindow(QMainWindow):
                 "auto_match_threshold": _parse_threshold(self._le_auto_match.text()),
                 "review_threshold": _parse_threshold(self._le_review.text()),
                 "near_tie_difference": _parse_threshold(self._le_near_tie.text()),
+                # (GH-102) Progressive JPEG conversion policy.
+                "convert_progressive_jpeg": self._combo_progressive_jpeg.currentText(),
             }
             geometry = self._current_persist_geometry()
             if geometry is not None:
@@ -1469,6 +1486,8 @@ class MainWindow(QMainWindow):
             launchbox_manual_roots=self._lb_manual_mappings(),
             run_mode="export" if self._mode_export.isChecked() else "build",
             provider_config_path=self._config_path or "",
+            # (GH-102) Progressive JPEG conversion policy.
+            convert_progressive_jpeg=self._combo_progressive_jpeg.currentText(),
         )
         return state
 
@@ -1526,6 +1545,10 @@ class MainWindow(QMainWindow):
         self._le_auto_match.setText(f"{int(s.auto_match_threshold * 100)}")
         self._le_review.setText(f"{int(s.review_threshold * 100)}")
         self._le_near_tie.setText(f"{int(s.near_tie_difference * 100)}")
+        # (GH-102) Progressive JPEG conversion policy.
+        self._combo_progressive_jpeg.setCurrentText(
+            getattr(s, "convert_progressive_jpeg", "never")
+        )
         self._lb_restore_mappings(s)
         apply_theme(s.theme or "system", themes_dir=self._paths.themes_dir)
         self._update_export_state_display()
@@ -1850,6 +1873,18 @@ class MainWindow(QMainWindow):
     def _on_run(self) -> None:
         try:
             state = self._state_from_widgets()
+            # (GH-102) Handle "prompt" for progressive JPEG conversion.
+            if state.convert_progressive_jpeg == "prompt":
+                from PyQt6.QtWidgets import QMessageBox as _QMB
+                ans = _QMB.question(
+                    self, "Progressive JPEG",
+                    "Convert artwork to progressive JPEG for this run?",
+                    _QMB.StandardButton.Yes | _QMB.StandardButton.No,
+                    _QMB.StandardButton.No,
+                )
+                state.convert_progressive_jpeg = (
+                    "always" if ans == _QMB.StandardButton.Yes else "never"
+                )
             # (GH-66) Remember the run's GuiState so the post-run review UI can
             # resolve the EXACT provider-config path the pipeline read
             # (GH-33 GUI mappings are merged into a managed file).

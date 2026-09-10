@@ -162,6 +162,8 @@ def export_release(
     nfo_dir: Optional[Path] = None,
     rtfm_dir: Optional[Path] = None,
     verify_only: bool = False,
+    # (GH-102) Progressive JPEG conversion policy.
+    convert_progressive_jpeg: str = "never",
 ) -> tuple[list[str], list[str], list[str]]:
     """Export one release group to the staging tree.
 
@@ -250,13 +252,15 @@ def export_release(
                 unchanged.append(str(rtfm_dest))
 
     # Artwork: prefer the processed enrichment artifact; otherwise process a master.
+    # (GH-102) Resolve progressive JPEG policy to a bool for this run.
+    _progressive = (convert_progressive_jpeg == "always")
     processed = Path(artwork_processed_dir) / f"{basename}.jpg" if artwork_processed_dir is not None else None
     try:
         if processed is not None and processed.is_file():
             data = processed.read_bytes()
         elif artwork_original_dir is not None:
             master = artwork_mod.find_artwork_master(group, artwork_original_dir)
-            data = artwork_mod.process_artwork_bytes(master) if master is not None else None
+            data = artwork_mod.process_artwork_bytes(master, progressive=_progressive) if master is not None else None
         else:
             data = None
         if data is not None:
@@ -308,6 +312,8 @@ def export_all(
     nfo_dir: Optional[Path] = None,
     rtfm_dir: Optional[Path] = None,
     verify_only: bool = False,
+    # (GH-102) Progressive JPEG conversion policy.
+    convert_progressive_jpeg: str = "never",
     require_artwork: bool = False,
     # Internal: original/ path used to resolve source bytes.
     original_dir: Optional[Path] = None,
@@ -403,6 +409,7 @@ def export_all(
             nfo_dir=nfo_dir,
             rtfm_dir=rtfm_dir,
             verify_only=verify_only,
+            convert_progressive_jpeg=convert_progressive_jpeg,
         )
         result.files_written.extend(written)
         result.files_unchanged.extend(unchanged)

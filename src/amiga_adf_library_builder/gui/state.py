@@ -71,6 +71,9 @@ class GuiState:
     # raw GUI checkbox, but the GUI records the intent here.
     run_mode: str = "build"  # "build" | "export"
 
+    # --- (GH-102) Progressive JPEG conversion policy ---------------------------
+    convert_progressive_jpeg: str = "never"
+
     # --- provider config ------------------------------------------------------
     # Optional explicit provider-config TOML path (where [playmatch]/[hasheous]
     # live). When empty, the GUI's own config file is used (same as ``--config``
@@ -269,6 +272,8 @@ def build_pipeline_kwargs(
         "playmatch_config_path": provider_cfg,
         "hasheous_config_path": provider_cfg,
         "retrokit_config_path": provider_cfg,
+        # (GH-102) Progressive JPEG conversion policy.
+        "convert_progressive_jpeg": str(getattr(state, "convert_progressive_jpeg", "never")),
     }
     if activity is not None:
         kwargs["activity"] = activity
