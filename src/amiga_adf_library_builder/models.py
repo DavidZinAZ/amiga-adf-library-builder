@@ -224,6 +224,7 @@ class CurationAction(Enum):
     KEEP_FILENAME = "keep_filename"
     ARTWORK_SELECTED = "artwork_selected"
     MANUAL_SELECTED = "manual_selected"
+    REVIEW_RESOLVED = "review_resolved"
 
 
 @dataclass
@@ -598,3 +599,71 @@ class StagedLibrary:
         dst_entry.actions.append(dst_action)
 
         return src_entry, dst_entry
+
+    def carry_over(self, previous: "StagedLibrary") -> int:
+        """Restore prior curation decisions from a previous state library.
+
+        (GH-99) Called by the state builder after a pipeline run, before the
+        state file is saved. For each release whose ``release_key`` was also
+        curated in ``previous``, the operator's staged decisions are restored
+        so the same merge/match/state work is never asked twice.
+
+        What is carried over (per release_key):
+          * curation_state, notes, actions (decision log);
+          * edited metadata: title, edition, group, chipset, language,
+            version, alt_marker;
+          * provenance: metadata_source, match_confidence, confidence,
+            locked_fields;
+          * artwork/RTFM path selections: artwork_front/back/spine/other,
+            rtfm_files;
+          * folder override.
+
+        What is NOT carried over: ``adf_files`` (the ADF membership always
+        comes from the fresh scan; carrying stale membership could point at
+        files that no longer exist) and ``ext``.
+
+        Strong-key discipline: identity is the pipeline-derived
+        ``release_key`` only. A previous entry is never applied to an
+        unrelated release, and previous entries that no longer exist simply
+        do not apply (they are not re-created).
+
+        Returns the number of releases that had a matching previous entry.
+        """
+        carried = 0
+        for release_key, entry in self.releases.items():
+            prev = previous.releases.get(release_key)
+            if prev is None:
+                continue
+            entry.curation_state = prev.curation_state
+            entry.title = prev.title
+            entry.edition = prev.edition
+            entry.group = prev.group
+            entry.chipset = prev.chipset
+            entry.language = prev.language
+            entry.version = prev.version
+            entry.alt_marker = prev.alt_marker
+            entry.artwork_front = prev.artwork_front
+            entry.artwork_back = prev.artwork_back
+            entry.artwork_spine = prev.artwork_spine
+            entry.artwork_other = list(prev.artwork_other)
+            entry.rtfm_files = list(prev.rtfm_files)
+            entry.metadata_source = prev.metadata_source
+            # (GH-99, defect 2) Confidence is canonical *metadata* from the
+            # current run's match, not an operator curation decision. A fresh
+            # run may have re-resolved a different (higher/lower) confidence,
+            # so a freshly-resolved value must NOT be clobbered by the previous
+            # run's. Carry the previous value over only when the current run
+            # resolved none (0.0 / None), so the column is populated from the
+            # canonical staged metadata when known but never shows a stale
+            # confidence for a changed match.
+            fresh_conf = entry.confidence
+            fresh_match = entry.match_confidence
+            if not fresh_conf and not fresh_match:
+                entry.match_confidence = prev.match_confidence
+                entry.confidence = prev.confidence
+            entry.locked_fields = list(prev.locked_fields)
+            entry.folder = prev.folder
+            entry.notes = prev.notes
+            entry.actions = list(prev.actions)
+            carried += 1
+        return carried

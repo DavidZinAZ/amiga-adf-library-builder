@@ -9,6 +9,7 @@ work). ``original/`` is read-only throughout.
 from __future__ import annotations
 
 import itertools
+import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -464,6 +465,17 @@ def run_pipeline(
             {
                 "release_key": g.release_key,
                 "title": g.title,
+                # (GH-99) Canonical staged identity fields: the ReleaseGroup
+                # already carries the parsed edition/crack-group when the
+                # filenames provide evidence. These are the values the
+                # Preview & Curation table displays (defect 2).
+                "edition": g.edition,
+                "group": g.group,
+                # (GH-99) Canonical metadata match confidence, preserved
+                # verbatim from the resolved MetadataRecord (None when no
+                # metadata resolved). Feeds the builder's confidence field and
+                # the Preview & Curation "Confidence" column (defect 2).
+                "confidence": r.metadata_confidence,
                 "quarantine_reason": g.quarantine_reason,
                 "provider": r.provider,
                 "artwork_missing": (not g.quarantine_reason) and bool(r.artwork_missing),
@@ -600,6 +612,27 @@ def build_staged_library_from_result(
     if not per_group:
         return None
 
+    curation_dir = Path(library_root) / "curation"
+    curation_dir.mkdir(parents=True, exist_ok=True)
+
+    # (GH-99, defect 3) Restore prior curation decisions from the previous
+    # state file before the fresh per-release state overwrites them. The
+    # state file is the internal curation database: it is keyed by
+    # release_key (strong identity) and holds the operator's merge/match/
+    # edition/group/state decisions. Membership (adf_files) is always
+    # rebuilt from the fresh scan; only the staged curation decisions are
+    # carried over, so a previously curated ADF does not require the same
+    # work again unless the underlying identity changed.
+    previous = StagedLibrary()
+    prev_path = _find_previous_state_file(curation_dir, run_id)
+    if prev_path is not None:
+        try:
+            with open(prev_path, "r", encoding="utf-8") as fh:
+                prev_data = json.load(fh)
+            previous = StagedLibrary.from_dict(prev_data.get("library", {}))
+        except (json.JSONDecodeError, OSError, TypeError, ValueError):
+            previous = StagedLibrary()  # unreadable prior state: start fresh
+
     library = StagedLibrary()
     for pg in per_group:
         release_key = pg.get("release_key", "")
@@ -611,6 +644,20 @@ def build_staged_library_from_result(
         source_files = list(pg.get("source_files") or [])
         folder = pg.get("folder")
 
+        # (GH-99, defect 2) Canonical staged edition/group when the scan
+        # parsed them; None (displayed blank) when unknown. Never guessed.
+        edition = pg.get("edition")
+        group = pg.get("group")
+        # (GH-99, defect 2) Canonical metadata match confidence, verbatim from
+        # the pipeline (None when no metadata resolved). Stored in both the
+        # display confidence field and the provenance match_confidence field.
+        confidence = pg.get("confidence")
+        if confidence is not None:
+            try:
+                confidence = float(confidence)
+            except (TypeError, ValueError):
+                confidence = None
+
         # Determine initial curation state based on quarantine status.
         # Quarantined / flagged releases route to review; clean ones to pending.
         curation_state = (
@@ -620,8 +667,8 @@ def build_staged_library_from_result(
         entry = StagedReleaseEntry(
             release_key=release_key,
             title=title,
-            edition=None,
-            group=None,
+            edition=edition,
+            group=group,
             chipset=None,
             language=None,
             version=None,
@@ -629,13 +676,22 @@ def build_staged_library_from_result(
             ext="adf",
             adf_files=source_files,
             folder=folder,
+            match_confidence=confidence,
+            confidence=(confidence if confidence is not None else 0.0),
             curation_state=curation_state,
         )
+        # (GH-99, defect 7) Line-oriented, human-readable notes. Each
+        # pipeline note is one line; the underlying values (paths, provider
+        # names, not-found markers) are preserved verbatim.
+        note_lines: list[str] = []
         if artwork_missing:
-            entry.notes = (entry.notes or "") + "Artwork missing from metadata providers."
-        if notes:
-            existing_notes = entry.notes or ""
-            entry.notes = (existing_notes + "; " if existing_notes else "") + "; ".join(notes)
+            note_lines.append("Artwork missing from metadata providers.")
+        for note in notes:
+            text = str(note).strip()
+            if text:
+                note_lines.append(text)
+        if note_lines:
+            entry.notes = "\n".join(note_lines)
 
         # Add initial state change action
         entry.actions.append(StagedChange(
@@ -646,9 +702,11 @@ def build_staged_library_from_result(
 
         library.releases[release_key] = entry
 
+    # (GH-99, defect 3) Restore the operator's prior staged decisions on
+    # top of the freshly built state (same release_key only).
+    library.carry_over(previous)
+
     # Save under the managed curation dir (independent of output/ and original/).
-    curation_dir = Path(library_root) / "curation"
-    curation_dir.mkdir(parents=True, exist_ok=True)
     state_path = curation_dir / f"library_state_{run_id}.json"
     from .library_state import CurationStateManager, CurationStateMeta, CurationStateFile
     meta = CurationStateMeta(
@@ -662,8 +720,36 @@ def build_staged_library_from_result(
 
     # Atomic write via temp file
     tmp_path = state_path.with_suffix(".json.tmp")
-    import json
     tmp_path.write_text(json.dumps(state_file.to_dict(), indent=2))
     tmp_path.replace(state_path)
 
     return state_path
+
+
+def _find_previous_state_file(curation_dir: Path, run_id: str) -> Optional[Path]:
+    """Return the most recent state file in ``curation_dir`` other than the
+    one being written for ``run_id`` (GH-99 defect 3).
+
+    State files are named ``library_state_<run_id>.json``. The previous run's
+    file is the newest one whose name differs from the current run's target.
+    Returns None when no prior state exists (first run).
+    """
+    current_name = f"library_state_{run_id}.json"
+    candidates = []
+    try:
+        for p in curation_dir.iterdir():
+            if p.name == current_name or not p.name.startswith("library_state_") or not p.name.endswith(".json"):
+                continue
+            if p.name.endswith(".tmp"):
+                continue
+            try:
+                mtime = p.stat().st_mtime
+            except OSError:
+                continue
+            candidates.append((mtime, p))
+    except OSError:
+        return None
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0])
+    return candidates[-1][1]

@@ -47,6 +47,11 @@ class EnrichResult:
     # exact-hash identities; the group is routed to manual review rather than
     # silently accepting a winner. Additive; defaults False for all existing paths.
     needs_manual_review: bool = False
+    # (GH-99) Canonical metadata match confidence from the resolved
+    # MetadataRecord, when one was found. None when no metadata resolved.
+    # This is the value the Preview & Curation "Confidence" column should show;
+    # it is never guessed and is preserved verbatim from the provider record.
+    metadata_confidence: Optional[float] = None
 
 
 class EnrichCategory(str, Enum):
@@ -1301,7 +1306,8 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
         events.append(_ra_success_event)
         if _ra_success_note is not None:
             notes.append(_ra_success_note)
-    return EnrichResult(nfo_path, master, processed, processed is not None, notes, metadata_path, provider, processed is None, events, needs_manual_review=needs_manual_review)
+    return EnrichResult(nfo_path, master, processed, processed is not None, notes, metadata_path, provider, processed is None, events, needs_manual_review=needs_manual_review,
+                        metadata_confidence=(metadata.confidence if metadata is not None else None))
 
 
 def enrich_all(groups: list[ReleaseGroup], *, nfo_dir: Path, scans: list[ScanRecord],
