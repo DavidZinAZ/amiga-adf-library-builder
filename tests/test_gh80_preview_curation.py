@@ -52,7 +52,7 @@ class TestCurationAction:
 
     def test_all_actions(self):
         actions = list(CurationAction)
-        assert len(actions) == 14
+        assert len(actions) == 15
 
 
 class TestStagedChange:

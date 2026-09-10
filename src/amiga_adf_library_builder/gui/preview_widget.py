@@ -53,7 +53,6 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -303,13 +302,10 @@ class PreviewWidget(QWidget):
         self._search.textChanged.connect(self._apply_filter)
         filter_bar.addWidget(self._search)
 
-        # Multi-select toggle
-        self._multi_select_btn = QToolButton()
-        self._multi_select_btn.setText("Multi-Select")
-        self._multi_select_btn.setCheckable(True)
-        self._multi_select_btn.setToolTip("Toggle multi-select mode for bulk operations")
-        self._multi_select_btn.toggled.connect(self._on_multi_select_toggled)
-        filter_bar.addWidget(self._multi_select_btn)
+        # (GH-99, defect 6) The redundant "Multi-Select" toggle is removed:
+        # the table now uses standard Windows-style Ctrl/Shift multi-selection
+        # (ExtendedSelection) always on, so the toggle no longer provides any
+        # useful behavior.
 
         return filter_bar
 
@@ -319,16 +315,20 @@ class PreviewWidget(QWidget):
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        self._table = QTableWidget(0, 6)
+        self._table = QTableWidget(0, 7)
         self._table.setHorizontalHeaderLabels([
-            "State", "Release Key", "Title", "Edition", "Group", "Confidence"
+            "State", "Release Key", "Title", "Edition", "Group", "ADFs", "Confidence"
         ])
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self._table.horizontalHeader().setStretchLastSection(True)
         self._table.verticalHeader().setVisible(False)
         self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self._table.setSelectionMode(QAbstractItemView.SingleSelection)
+        # (GH-99, defect 5) Standard Windows-style multi-select: Ctrl+Click
+        # toggles individual rows, Shift+Click extends a contiguous range.
+        # ExtendedSelection provides exactly this; the redundant Multi-Select
+        # toggle is removed (defect 6).
+        self._table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self._table.setSortingEnabled(False)
         self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._table.customContextMenuRequested.connect(self._show_context_menu)
@@ -388,12 +388,19 @@ class PreviewWidget(QWidget):
         self._detail_title.setWordWrap(True)
         detail_layout.addRow("Title:", self._detail_title)
 
-        self._detail_edition = QLabel("")
-        self._detail_edition.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        # (GH-99, defect 4) Edition and Group are editable in the staged
+        # curation state. Edits update the staged entry only (METADATA_EDIT
+        # decision-log entry); they never write final export files.
+        self._detail_edition = QLineEdit()
+        self._detail_edition.setPlaceholderText("(none)")
+        self._detail_edition.setToolTip("Edit the staged Edition (staged state only)")
+        self._detail_edition.textChanged.connect(self._on_detail_edition_changed)
         detail_layout.addRow("Edition:", self._detail_edition)
 
-        self._detail_group = QLabel("")
-        self._detail_group.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self._detail_group = QLineEdit()
+        self._detail_group.setPlaceholderText("(none)")
+        self._detail_group.setToolTip("Edit the staged Group (staged state only)")
+        self._detail_group.textChanged.connect(self._on_detail_group_changed)
         detail_layout.addRow("Group:", self._detail_group)
 
         self._detail_state = QLabel("")
@@ -598,7 +605,14 @@ class PreviewWidget(QWidget):
             self._table.setItem(row, 2, title_item)
             self._table.setItem(row, 3, QTableWidgetItem(entry.edition or ""))
             self._table.setItem(row, 4, QTableWidgetItem(entry.group or ""))
-            self._table.setItem(row, 5, QTableWidgetItem(f"{entry.confidence:.2f}" if entry.confidence > 0 else ""))
+            # (GH-99, defect 1) ADFs count column: after a Merge/Move ADFs, the
+            # refreshed table shows the new membership count so the screen
+            # visibly reflects the reconciliation.
+            adf_count_item = QTableWidgetItem(str(len(entry.adf_files)))
+            adf_count_item.setData(Qt.ItemDataRole.UserRole, entry.release_key)
+            adf_count_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._table.setItem(row, 5, adf_count_item)
+            self._table.setItem(row, 6, QTableWidgetItem(f"{entry.confidence:.2f}" if entry.confidence > 0 else ""))
 
         self._apply_filter()
         self._update_summary()
@@ -670,12 +684,105 @@ class PreviewWidget(QWidget):
                     self._show_detail(entry)
                     self._state.selected_release_key = release_key
 
-    def _on_multi_select_toggled(self, checked: bool) -> None:
-        """Toggle multi-select mode."""
-        if checked:
-            self._table.setSelectionMode(QAbstractItemView.MultiSelection)
+    # --- GH-99 defect 4: staged Edition/Group editing ---
+
+    @staticmethod
+    def _edit_field(entry: "StagedReleaseEntry", field: str, new_value: str) -> None:
+        """Apply one staged Edition/Group edit.
+
+        ``new_value`` is the trimmed field text. An empty value clears the
+        field (staged state only — no export files are written).
+        """
+        if field == "edition":
+            entry.edition = new_value or None
         else:
-            self._table.setSelectionMode(QAbstractItemView.SingleSelection)
+            entry.group = new_value or None
+
+    def _record_metadata_edit(
+        self, entry: "StagedReleaseEntry", field: str, old_value: Optional[str]
+    ) -> None:
+        """Append one METADATA_EDIT decision-log entry for an Edition/Group
+        edit and record it for undo/redo.
+
+        ``old_value`` must be captured BEFORE the edit is applied. The
+        payload carries pre/post snapshots of exactly the edited field so
+        undo/redo is precise and never disturbs other metadata.
+        """
+        new_value = entry.edition if field == "edition" else entry.group
+        action = StagedChange(
+            action=CurationAction.METADATA_EDIT,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            details=(
+                f"{field.capitalize()} changed from "
+                f"{old_value!r} to {new_value!r}"
+            ),
+            payload=json.dumps(
+                {
+                    "kind": "field_edit",
+                    "field": field,
+                    "pre": {field: old_value},
+                    "post": {field: new_value},
+                }
+            ),
+        )
+        entry.actions.append(action)
+        self._record_action_for_undo(entry.release_key, action)
+
+    def _on_detail_edition_changed(self, text: str) -> None:
+        """Apply a staged Edition edit from the detail pane (defect 4).
+
+        Edits update staged curation state only and never write final export
+        files. The change is recorded in the decision log (METADATA_EDIT)
+        and is undoable.
+        """
+        entry = self._entry_for_detail_edit()
+        if entry is None:
+            return
+        old_value = entry.edition
+        self._edit_field(entry, "edition", text)
+        self._record_metadata_edit(entry, "edition", old_value)
+        self._refresh_table()
+        self.state_changed.emit()
+
+    def _on_detail_group_changed(self, text: str) -> None:
+        """Apply a staged Group edit from the detail pane (defect 4).
+
+        Same semantics as the Edition edit: staged state only, decision-log
+        entry, undoable, no export side effect.
+        """
+        entry = self._entry_for_detail_edit()
+        if entry is None:
+            return
+        old_value = entry.group
+        self._edit_field(entry, "group", text)
+        self._record_metadata_edit(entry, "group", old_value)
+        self._refresh_table()
+        self.state_changed.emit()
+
+    def _entry_for_detail_edit(self) -> Optional["StagedReleaseEntry"]:
+        """Resolve the entry the detail pane is currently showing.
+
+        Uses the stable release_key identity (selected row, then last shown)
+        so the edit always lands on the release the operator is looking at.
+        """
+        if self._state.current_library is None:
+            return None
+        release_key = self._state.selected_release_key
+        if release_key is None:
+            # Detail pane populated but no selection recorded: resolve from
+            # the selected row via UserRole identity.
+            selected = self._table.selectionModel().selectedRows()
+            if selected:
+                row = selected[0].row()
+                for col in range(self._table.columnCount()):
+                    item = self._table.item(row, col)
+                    if item is not None:
+                        release_key = item.data(Qt.ItemDataRole.UserRole)
+                        if release_key:
+                            break
+        if release_key is None:
+            return None
+        return self._state.current_library.releases.get(release_key)
 
     def _show_context_menu(self, pos) -> None:
         """Show context menu for the table."""
@@ -689,6 +796,16 @@ class PreviewWidget(QWidget):
         # Select the row if not already selected
         self._table.selectRow(index.row())
 
+        menu = self._build_context_menu()
+        menu.exec(self._table.viewport().mapToGlobal(pos))
+
+    def _build_context_menu(self) -> QMenu:
+        """Build the table's context menu (pure construction, testable).
+
+        Kept separate from :meth:`_show_context_menu` so tests can inspect
+        the built menu (and its actions) without running a modal
+        ``QMenu.exec`` -- which the offscreen Qt platform cannot display.
+        """
         menu = QMenu(self)
 
         # State actions
@@ -786,6 +903,13 @@ class PreviewWidget(QWidget):
         restore_action.triggered.connect(lambda: self._set_selected_state(StagedState.PENDING))
         menu.addAction(restore_action)
 
+        # (GH-99, defect 8) Review: actionable workflow for needs_review rows.
+        # Explains why review is required, shows the staged candidate, and
+        # resolves to an accepted/rejected decision — never a dead end.
+        review_action = QAction("Review…", self)
+        review_action.triggered.connect(lambda: self._on_review_selected())
+        menu.addAction(review_action)
+
         menu.addSeparator()
 
         # Show source
@@ -798,14 +922,21 @@ class PreviewWidget(QWidget):
         explain_action.triggered.connect(self._on_explain_match)
         menu.addAction(explain_action)
 
-        menu.exec(self._table.viewport().mapToGlobal(pos))
+        return menu
 
     def _show_detail(self, entry: StagedReleaseEntry) -> None:
         """Show detail for the selected release entry."""
         self._detail_key.setText(entry.release_key)
         self._detail_title.setText(entry.title)
-        self._detail_edition.setText(entry.edition or "(none)")
-        self._detail_group.setText(entry.group or "(none)")
+        # (GH-99, defect 4) Edition/Group are editable QLineEdits. Block their
+        # textChanged signals while populating so a detail refresh never creates
+        # a spurious METADATA_EDIT undo entry.
+        self._detail_edition.blockSignals(True)
+        self._detail_group.blockSignals(True)
+        self._detail_edition.setText(entry.edition or "")
+        self._detail_group.setText(entry.group or "")
+        self._detail_edition.blockSignals(False)
+        self._detail_group.blockSignals(False)
         self._detail_state.setText(entry.curation_state.value)
         self._detail_confidence.setText(f"{entry.confidence:.2f}" if entry.confidence > 0 else "(none)")
         self._detail_adf_count.setText(str(len(entry.adf_files)))
@@ -913,6 +1044,170 @@ class PreviewWidget(QWidget):
         self._undo_btn.setEnabled(True)
         self._redo_btn.setEnabled(False)
 
+    # --- GH-99 defect 8: needs_review -> Review -> resolve workflow ---
+
+    def _on_review_selected(self) -> None:
+        """Open the Review dialog for the selected release(s) (defect 8).
+
+        The dialog explains WHY review is required (line-oriented, from the
+        staged decision log), shows the staged candidate, and offers
+        Approve / Reject. Both decisions update the staged curation state and
+        are recorded as REVIEW_RESOLVED decision-log entries — a
+        needs_review row is never a dead end.
+        """
+        if self._state.current_library is None:
+            return
+
+        selected = self._table.selectionModel().selectedRows()
+        if not selected:
+            return
+
+        # Resolve the primary entry via stable UserRole identity (first row).
+        row = selected[0].row()
+        release_key = None
+        for col in range(self._table.columnCount()):
+            item = self._table.item(row, col)
+            if item is not None:
+                release_key = item.data(Qt.ItemDataRole.UserRole)
+                if release_key:
+                    break
+        if not release_key:
+            return
+        entry = self._state.current_library.releases.get(release_key)
+        if entry is None:
+            return
+
+        reasons = self._review_reasons(entry)
+        candidate = self._review_candidate(entry)
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Review: {entry.title or entry.release_key}")
+        dialog.resize(560, 420)
+        layout = QVBoxLayout(dialog)
+
+        if entry.curation_state == StagedState.NEEDS_REVIEW:
+            layout.addWidget(QLabel("This release requires review before it can be accepted:"))
+        else:
+            layout.addWidget(QLabel(f"Reviewing release (current state: {entry.curation_state.value}):"))
+
+        if reasons:
+            why_edit = QTextEdit()
+            why_edit.setReadOnly(True)
+            why_edit.setPlainText("\n".join(reasons))
+            layout.addWidget(QLabel("Why review is required:"))
+            layout.addWidget(why_edit)
+        else:
+            layout.addWidget(QLabel("No specific review reason recorded in the decision log."))
+
+        layout.addWidget(QLabel("Staged candidate:"))
+        cand_edit = QTextEdit()
+        cand_edit.setReadOnly(True)
+        cand_edit.setPlainText(candidate)
+        layout.addWidget(cand_edit)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Yes | QDialogButtonBox.StandardButton.No
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        yes_btn = buttons.button(QDialogButtonBox.StandardButton.Yes)
+        no_btn = buttons.button(QDialogButtonBox.StandardButton.No)
+        cancel_btn = buttons.button(QDialogButtonBox.StandardButton.Cancel)
+        yes_btn.setText("Approve")
+        no_btn.setText("Reject")
+        cancel_btn.setText("Cancel")
+        yes_btn.setToolTip("Accept the staged release as-is (state: accepted)")
+        no_btn.setToolTip("Reject this release from export (state: rejected)")
+
+        decision: dict[str, Optional[str]] = {"value": None}
+
+        def _choose(kind: str) -> None:
+            decision["value"] = kind
+            dialog.accept()
+
+        yes_btn.clicked.connect(lambda: _choose("approve"))
+        no_btn.clicked.connect(lambda: _choose("reject"))
+        cancel_btn.clicked.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        kind = decision["value"]
+        if kind == "approve":
+            new_state = StagedState.ACCEPTED
+            decision_word = "approved"
+        elif kind == "reject":
+            new_state = StagedState.REJECTED
+            decision_word = "rejected"
+        else:
+            # Cancel or no explicit button: treat as no-op (state unchanged).
+            return
+
+        old_state = entry.curation_state
+        entry.curation_state = new_state
+        action = StagedChange(
+            action=CurationAction.REVIEW_RESOLVED,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            details=(
+                f"Review {decision_word}: state changed from {old_state.value} "
+                f"to {new_state.value}"
+            ),
+        )
+        entry.actions.append(action)
+        self._record_action_for_undo(release_key, action)
+        self._refresh_table()
+        self._show_detail(entry)
+        self.state_changed.emit()
+
+    @staticmethod
+    def _review_reasons(entry: "StagedReleaseEntry") -> list[str]:
+        """Line-oriented reasons why this release needs review.
+
+        Derived from the staged decision log: the most recent review-relevant
+        actions (lookup applications that produced needs_review, match
+        rejections, and state changes into needs_review) plus any review
+        reason text captured in the entry's notes.
+        """
+        reasons: list[str] = []
+        # Most recent review-relevant actions first (newest last in list).
+        review_relevant = (
+            CurationAction.ACCEPT_MATCH,
+            CurationAction.REJECT_MATCH,
+            CurationAction.METADATA_EDIT,
+            CurationAction.STATE_CHANGE,
+            CurationAction.REVIEW_RESOLVED,
+        )
+        for action in reversed(list(entry.actions)):
+            if action.action in review_relevant:
+                detail = action.details.strip()
+                if detail and detail not in reasons:
+                    reasons.append(detail)
+        # Cap the list so the dialog stays readable.
+        return reasons[:8]
+
+    @staticmethod
+    def _review_candidate(entry: "StagedReleaseEntry") -> str:
+        """Render the staged candidate for operator approval (line-oriented)."""
+        lines = [
+            f"Title: {entry.title or '(none)'}",
+            f"Release key: {entry.release_key}",
+            f"Edition: {entry.edition or '(none)'}",
+            f"Group: {entry.group or '(none)'}",
+            f"Chipset: {entry.chipset or '(none)'}",
+            f"Language: {entry.language or '(none)'}",
+            f"Version: {entry.version or '(none)'}",
+            f"Confidence: {entry.confidence:.2f}" if entry.confidence > 0 else "Confidence: (none)",
+            f"Metadata source: {entry.metadata_source or '(none)'}",
+            f"Match confidence: {entry.match_confidence:.2f}" if entry.match_confidence else "Match confidence: (none)",
+            f"ADF files: {len(entry.adf_files)}",
+            f"Folder: {entry.folder or '(derived)'}",
+            f"State: {entry.curation_state.value}",
+        ]
+        if entry.notes:
+            lines.append("Notes:")
+            lines.append(entry.notes)
+        return "\n".join(lines)
+
     def _on_undo(self) -> None:
         """Undo the last curation action."""
         if not self._undo_stack or self._state.current_library is None:
@@ -1014,14 +1309,30 @@ class PreviewWidget(QWidget):
                 except (json.JSONDecodeError, KeyError, ValueError):
                     pass
         elif action.action == CurationAction.METADATA_EDIT:
-            # Lookup apply: restore the pre-apply snapshot (title, source,
-            # confidence, state, artwork) from the payload.
+            # Two kinds share this action (GH-99):
+            #  * field_edit: staged Edition/Group edit — restore the pre-edit
+            #    value of exactly that field from the payload.
+            #  * lookup apply: restore the pre-apply snapshot (title, source,
+            #    confidence, state, artwork) from the payload.
             if action.payload:
                 try:
                     payload = json.loads(action.payload)
-                    self._restore_metadata_snapshot(entry, payload.get("pre") or {})
+                    if payload.get("kind") == "field_edit":
+                        field = payload.get("field")
+                        if field in ("edition", "group"):
+                            setattr(entry, field, (payload.get("pre") or {}).get(field))
+                    else:
+                        self._restore_metadata_snapshot(entry, payload.get("pre") or {})
                 except (json.JSONDecodeError, TypeError):
                     pass
+        elif action.action == CurationAction.REVIEW_RESOLVED:
+            # Parse old state from details:
+            # "Review approved: state changed from needs_review to accepted"
+            try:
+                old_state = StagedState(action.details.split(" from ")[1].split(" to ")[0])
+                entry.curation_state = old_state
+            except (IndexError, ValueError):
+                pass
         # Add more undo cases as needed
 
         # Move to redo stack
@@ -1138,13 +1449,27 @@ class PreviewWidget(QWidget):
                 except (json.JSONDecodeError, KeyError, ValueError):
                     pass
         elif action.action == CurationAction.METADATA_EDIT:
-            # Lookup apply: re-apply the post-apply snapshot.
+            # Re-apply (GH-99): field_edit re-applies the post-edit value of
+            # that one field; lookup apply re-applies the post-apply snapshot.
             if action.payload:
                 try:
                     payload = json.loads(action.payload)
-                    self._restore_metadata_snapshot(entry, payload.get("post") or {})
+                    if payload.get("kind") == "field_edit":
+                        field = payload.get("field")
+                        if field in ("edition", "group"):
+                            setattr(entry, field, (payload.get("post") or {}).get(field))
+                    else:
+                        self._restore_metadata_snapshot(entry, payload.get("post") or {})
                 except (json.JSONDecodeError, TypeError):
                     pass
+        elif action.action == CurationAction.REVIEW_RESOLVED:
+            # Parse new state from details:
+            # "Review approved: state changed from needs_review to accepted"
+            try:
+                new_state = StagedState(action.details.split(" to ")[1])
+                entry.curation_state = new_state
+            except (IndexError, ValueError):
+                pass
 
         # Move back to undo stack
         self._undo_stack.append((release_key, action))
@@ -2274,6 +2599,27 @@ class PreviewWidget(QWidget):
         self._summary_label.setText(summary)
 
     # --- Public API ---
+
+    def auto_save_state(self) -> bool:
+        """(GH-99 defect 3) Atomically re-save the loaded staged library.
+
+        Returns True when the current state was persisted to disk. Returns
+        False when there is nothing to save (no loaded state) or the write
+        failed. The main window calls this whenever ``state_changed`` fires
+        so curation decisions survive across runs: the pipeline's
+        carry_over restores them on the next build, keyed by release_key.
+        """
+        if self._state.current_library is None:
+            return False
+        manager = self._state.state_manager
+        path = self._state.current_state_path
+        if manager is None or path is None:
+            return False
+        try:
+            return manager.save(self._state.current_library)
+        except OSError as exc:
+            self.status_message.emit(f"State save failed: {exc}")
+            return False
 
     def load_state_file(self, path: Path) -> bool:
         """Load a state file programmatically."""
