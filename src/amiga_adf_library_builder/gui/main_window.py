@@ -658,8 +658,8 @@ class MainWindow(QMainWindow):
         ])
         self._combo_progressive_jpeg.setToolTip(
             "Progressive JPEG conversion policy for artwork import. "
-            "'never' keeps baseline JPEGs (default), 'always' converts "
-            "to progressive, 'prompt' asks per-run."
+            "'never' keeps the source as-is (default); 'always' converts "
+            "progressive sources to baseline; 'prompt' asks per-image."
         )
         advanced_layout.addRow("Progressive JPEG:", self._combo_progressive_jpeg)
 
@@ -1873,18 +1873,17 @@ class MainWindow(QMainWindow):
     def _on_run(self) -> None:
         try:
             state = self._state_from_widgets()
-            # (GH-102) Handle "prompt" for progressive JPEG conversion.
+            # (GH-102) Handle "prompt" for progressive JPEG conversion: ask the
+            # operator PER detected progressive source BEFORE the worker thread
+            # starts. Answers are recorded in a dict read by the prompt callback
+            # during export; the callback itself is thread-safe (read-only).
             if state.convert_progressive_jpeg == "prompt":
-                from PyQt6.QtWidgets import QMessageBox as _QMB
-                ans = _QMB.question(
-                    self, "Progressive JPEG",
-                    "Convert artwork to progressive JPEG for this run?",
-                    _QMB.StandardButton.Yes | _QMB.StandardButton.No,
-                    _QMB.StandardButton.No,
+                answers = self._collect_progressive_answers(state)
+                state.progressive_prompt_callback = (
+                    lambda basename, title, _answers=answers: _answers.get(basename, False)
                 )
-                state.convert_progressive_jpeg = (
-                    "always" if ans == _QMB.StandardButton.Yes else "never"
-                )
+            else:
+                state.progressive_prompt_callback = None
             # (GH-66) Remember the run's GuiState so the post-run review UI can
             # resolve the EXACT provider-config path the pipeline read
             # (GH-33 GUI mappings are merged into a managed file).
@@ -1915,6 +1914,46 @@ class MainWindow(QMainWindow):
             self._run_marker(f"Run could not be started: {exc}")
             QMessageBox.critical(self, "Cannot start", f"Could not start: {exc}")
             self._status_label.setText(f"Error: {exc}")
+
+    def _collect_progressive_answers(self, state: "GuiState") -> dict[str, bool]:
+        """Pre-scan original artwork for progressive JPEGs and prompt per-image.
+
+        Returns a dict mapping sanitized basename -> bool (True = convert to
+        baseline). Only actually-progressive JPEG sources trigger a prompt;
+        baseline sources are not prompted and default to False.
+        """
+        from pathlib import Path
+        from .. import artwork as artwork_mod
+
+        answers: dict[str, bool] = {}
+        original_dir = Path(state.original_dir.strip()) if state.original_dir.strip() else None
+        if original_dir is None or not original_dir.is_dir():
+            return answers
+        try:
+            for entry in sorted(original_dir.iterdir()):
+                if not entry.is_file() or entry.suffix.lower() not in (".jpg", ".jpeg"):
+                    continue
+                try:
+                    raw = entry.read_bytes()
+                except OSError:
+                    continue
+                if not artwork_mod.is_jpeg_progressive_from_bytes(raw):
+                    continue
+                # Ask the operator once per detected progressive source.
+                from PyQt6.QtWidgets import QMessageBox as _QMB
+                ans = _QMB.question(
+                    self,
+                    "Progressive JPEG detected",
+                    f"'{entry.name}' is a progressive JPEG. Convert it to baseline?\n\n"
+                    "Yes = convert to baseline  |  No = keep progressive",
+                    _QMB.StandardButton.Yes | _QMB.StandardButton.No,
+                    _QMB.StandardButton.No,
+                )
+                answers[entry.stem] = (ans == _QMB.StandardButton.Yes)
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).debug("progressive pre-scan failed (non-fatal): %s", exc)
+        return answers
 
     def _on_activity(self, line: str) -> None:
         """Worker-thread activity line -> live Diagnostics log (issue #21)."""

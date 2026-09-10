@@ -52,7 +52,8 @@ SETTINGS_KEYS = (
     "review_threshold",
     "near_tie_difference",
     # (GH-102) Progressive JPEG conversion policy during artwork import.
-    # Values: "always" (convert to progressive), "never" (keep baseline, default), "prompt" (ask per-run).| "never" | "prompt".
+    # Values: "always" (convert progressive -> baseline), "never" (keep as-is, default),
+    #         "prompt" (ask per-image for each progressive source).
     "convert_progressive_jpeg",
 )
 
@@ -139,9 +140,9 @@ class Settings:
     # Near-tie difference: if top two candidates within this -> force Needs Review (default 0.03 = 3%)
     near_tie_difference: float = 0.03
     # (GH-102) Progressive JPEG conversion policy during artwork import.
-    # Values: "always" (convert to progressive), "never" (keep baseline, default), "prompt" (ask per-run).| "never" | "prompt".
-    # Default "never" preserves the existing behavior (baseline JPEGs
-    # remain baseline; "always" re-encodes as progressive on import).
+    # Values: "always" (convert progressive -> baseline), "never" (keep as-is, default),
+    #         "prompt" (ask per-run for progressive sources).
+    # Default "never" preserves existing behavior (no conversion, no prompt).
     convert_progressive_jpeg: str = "never"
     presets: dict[str, "Preset"] = field(default_factory=dict)
 

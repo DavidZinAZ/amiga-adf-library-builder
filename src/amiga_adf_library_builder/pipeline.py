@@ -78,6 +78,12 @@ def run_pipeline(
     activity: Optional[Callable[[str], None]] = None,
     # (GH-102) Progressive JPEG conversion policy.
     convert_progressive_jpeg: str = "never",
+    # (GH-102) Per-image progressive-conversion prompt callback. Called ONLY when
+    # the source is a detected JPEG AND is progressive. Signature:
+    #   callback(basename: str, title: str) -> bool
+    # Must be idempotent and side-effect-free for testability. None disables
+    # prompting (the "prompt" policy then falls back to "never" behavior).
+    progressive_prompt_callback: Optional[Callable[[str, str], bool]] = None,
 ) -> dict:
     """Execute phases 2-4, 5 (optional), and 6. Returns a result summary dict.
 
@@ -428,6 +434,8 @@ def run_pipeline(
             require_artwork=require_artwork,
             # (GH-102) Progressive JPEG conversion policy.
             convert_progressive_jpeg=convert_progressive_jpeg,
+            # (GH-102) Forward per-image progressive-conversion prompt callback.
+            progressive_prompt_callback=progressive_prompt_callback,
         )
         _act(
             f"Export finished: {export_result.releases_exported} release(s), "
