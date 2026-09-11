@@ -206,6 +206,7 @@ class StagedState(Enum):
     REJECTED = "rejected"      # Excluded from export
     MODIFIED = "modified"      # Custom changes applied
     NEEDS_REVIEW = "needs_review"  # Requires human review
+    GHOST = "ghost"            # Emptied by user move/merge; non-actionable
 
 
 class CurationAction(Enum):
@@ -432,11 +433,11 @@ class StagedLibrary:
         # Append to destination preserving moved order
         dst_entry.adf_files.extend(filenames)
 
-        # Post-move source state: NEEDS_REVIEW when the source emptied,
+        # Post-move source state: GHOST when the source emptied,
         # otherwise unchanged. Recorded in the payload so redo can restore
         # the exact post-move state.
         src_state_after = (
-            StagedState.NEEDS_REVIEW if not src_entry.adf_files else src_state_before
+            StagedState.GHOST if not src_entry.adf_files else src_state_before
         )
 
         # Record decision log on both source and destination. The payload
@@ -473,16 +474,16 @@ class StagedLibrary:
         )
         dst_entry.actions.append(dst_action)
 
-        # If source is now empty, set to NEEDS_REVIEW (record real previous state).
+        # If source is now empty, set to GHOST (record real previous state).
         # The transition action carries the same payload so a single undo entry
         # restores files AND state together.
         if not src_entry.adf_files:
             prev_state = src_entry.curation_state
-            src_entry.curation_state = StagedState.NEEDS_REVIEW
+            src_entry.curation_state = StagedState.GHOST
             empty_action = StagedChange(
                 action=CurationAction.STATE_CHANGE,
                 timestamp=timestamp,
-                details=f"State changed from {prev_state.value} to needs_review (empty after move)",
+                details=f"State changed from {prev_state.value} to ghost (empty after move)",
                 payload=payload,
             )
             src_entry.actions.append(empty_action)
@@ -551,9 +552,11 @@ class StagedLibrary:
         # operation, not a copy of the source's unrelated history.
         # Preserve destination curation state and locked_fields.
 
-        # Empty source entry but retain it in the library with NEEDS_REVIEW
+        # Empty source entry but retain it in the library with GHOST
+        # The data persists internally for undo/history but the row is
+        # non-actionable in the curation UI.
         src_entry.adf_files = []
-        src_entry.curation_state = StagedState.NEEDS_REVIEW
+        src_entry.curation_state = StagedState.GHOST
 
         # Record decision log on both source and destination. The payload
         # carries the full undo context (before/after files + state); the UI
@@ -569,8 +572,8 @@ class StagedLibrary:
             "src_files_after": list(src_entry.adf_files),
             "dst_files_after": list(dst_entry.adf_files),
             "src_curation_state": src_state_before.value,
-            # Merge always empties the source and marks it NEEDS_REVIEW.
-            "src_state_after": StagedState.NEEDS_REVIEW.value,
+            # Merge always empties the source and marks it GHOST.
+            "src_state_after": StagedState.GHOST.value,
         })
 
         src_action = StagedChange(
@@ -585,7 +588,7 @@ class StagedLibrary:
         state_action = StagedChange(
             action=CurationAction.STATE_CHANGE,
             timestamp=timestamp,
-            details=f"State changed from {src_state_before.value} to needs_review (empty after merge)",
+            details=f"State changed from {src_state_before.value} to ghost (empty after merge)",
             payload=payload,
         )
         src_entry.actions.append(state_action)

@@ -12,7 +12,7 @@ import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, "/home/dumbo/projects/amiga-adf-library-builder/.worktrees/gh93-move-merge/src")
+sys.path.insert(0, "/tmp/amiga-adf-gh106-dev/src")
 
 import pytest
 
@@ -126,7 +126,7 @@ class TestExplicitSelection:
         lib.merge_release("src", "dst")
         assert lib.releases["dst"].adf_files == ["ultima5_d1.adf", "ultima5_d2.adf"]
         assert lib.releases["src"].adf_files == []
-        assert lib.releases["src"].curation_state == StagedState.NEEDS_REVIEW
+        assert lib.releases["src"].curation_state == StagedState.GHOST
 
     def test_four_disk_consolidation_ultima_vi(self):
         lib = make_lib(
@@ -137,20 +137,20 @@ class TestExplicitSelection:
             "ultima6_d1.adf", "ultima6_d2.adf", "ultima6_d3.adf", "ultima6_d4.adf",
         ]
         assert lib.releases["src"].adf_files == []
-        assert lib.releases["src"].curation_state == StagedState.NEEDS_REVIEW
+        assert lib.releases["src"].curation_state == StagedState.GHOST
 
     # 9. Empty-source STATE_CHANGE log accuracy
     def test_empty_source_state_change_records_real_previous_state(self):
         lib = make_lib(["disk1.adf"], [])
         lib.move_adfs("src", "dst", ["disk1.adf"])
         src = lib.releases["src"]
-        assert src.curation_state == StagedState.NEEDS_REVIEW
+        assert src.curation_state == StagedState.GHOST
         state_changes = [a for a in src.actions if a.action == CurationAction.STATE_CHANGE]
         assert len(state_changes) == 1
         details = state_changes[0].details
-        # Must record the REAL previous state (pending), not needs_review
-        assert "from pending to needs_review" in details
-        assert "from needs_review" not in details.replace("from pending to needs_review", "")
+        # Must record the REAL previous state (pending), not ghost
+        assert "from pending to ghost" in details
+        assert "from ghost" not in details.replace("from pending to ghost", "")
 
     def test_empty_source_state_change_from_accepted(self):
         lib = make_lib(["disk1.adf"], [])
@@ -160,7 +160,7 @@ class TestExplicitSelection:
             a for a in lib.releases["src"].actions if a.action == CurationAction.STATE_CHANGE
         ]
         assert len(state_changes) == 1
-        assert "from accepted to needs_review" in state_changes[0].details
+        assert "from accepted to ghost" in state_changes[0].details
 
     # 10 (model level). One coherent audit trail per operation
     def test_move_logs_exactly_one_move_entry_per_side(self):
@@ -285,7 +285,7 @@ class TestWidgetApplyMove:
         lib = widget._state.current_library
         lib.releases["src"].curation_state = StagedState.ACCEPTED
         widget._apply_move_adfs("src", "dst", ["d1.adf", "d2.adf"])
-        assert lib.releases["src"].curation_state == StagedState.NEEDS_REVIEW
+        assert lib.releases["src"].curation_state == StagedState.GHOST
         widget._on_undo()
         assert lib.releases["src"].curation_state == StagedState.ACCEPTED
         assert lib.releases["src"].adf_files == ["d1.adf", "d2.adf"]
@@ -296,7 +296,7 @@ class TestWidgetApplyMerge:
         widget._apply_merge_release("src", "dst")
         lib = widget._state.current_library
         assert lib.releases["src"].adf_files == []
-        assert lib.releases["src"].curation_state == StagedState.NEEDS_REVIEW
+        assert lib.releases["src"].curation_state == StagedState.GHOST
         assert lib.releases["dst"].adf_files == ["base.adf", "d1.adf", "d2.adf"]
         assert len(widget._undo_stack) == 1
 

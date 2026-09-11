@@ -291,6 +291,7 @@ class PreviewWidget(QWidget):
         self._filter_combo.addItem("Missing RTFM", "missing_rtfm")
         self._filter_combo.addItem("Unmatched", "unmatched")
         self._filter_combo.addItem("Excluded", "excluded")
+        self._filter_combo.addItem("Ghost", StagedState.GHOST.value)
         self._filter_combo.setToolTip("Filter releases by curation state")
         self._filter_combo.currentIndexChanged.connect(self._apply_filter)
         filter_bar.addWidget(QLabel("Filter:"))
@@ -564,13 +565,21 @@ class PreviewWidget(QWidget):
             QMessageBox.critical(self, "Export Failed", f"Could not export changes: {exc}")
 
     def _refresh_table(self) -> None:
-        """Refresh the releases table from the current library."""
+        """Refresh the releases table from the current library.
+
+        GHOST releases (zero-ADF sources emptied by user move/merge) are
+        retained internally for undo/history but excluded from the active
+        curation list so they do not appear as actionable rows.
+        """
         if self._state.current_library is None:
             self._table.setRowCount(0)
             self._state.row_to_release_key.clear()
             return
 
-        releases = list(self._state.current_library.releases.values())
+        releases = [
+            e for e in self._state.current_library.releases.values()
+            if e.curation_state != StagedState.GHOST
+        ]
         self._table.setRowCount(len(releases))
         self._state.row_to_release_key.clear()
 
@@ -594,6 +603,9 @@ class PreviewWidget(QWidget):
             elif entry.curation_state == StagedState.NEEDS_REVIEW:
                 state_item.setBackground(Qt.GlobalColor.cyan)
                 state_item.setForeground(Qt.GlobalColor.black)
+            elif entry.curation_state == StagedState.GHOST:
+                state_item.setBackground(Qt.GlobalColor.gray)
+                state_item.setForeground(Qt.GlobalColor.white)
             self._table.setItem(row, 0, state_item)
 
             key_item = QTableWidgetItem(entry.release_key)
@@ -2588,14 +2600,17 @@ class PreviewWidget(QWidget):
             counts[entry.curation_state] += 1
 
         total = len(self._state.current_library.releases)
+        visible = total - counts[StagedState.GHOST]
         summary = (
-            f"Total: {total} | "
+            f"Total: {total} ({visible} active) | "
             f"Accepted: {counts[StagedState.ACCEPTED]} | "
             f"Pending: {counts[StagedState.PENDING]} | "
             f"Rejected: {counts[StagedState.REJECTED]} | "
             f"Modified: {counts[StagedState.MODIFIED]} | "
             f"Needs Review: {counts[StagedState.NEEDS_REVIEW]}"
         )
+        if counts[StagedState.GHOST] > 0:
+            summary += f" | Ghost: {counts[StagedState.GHOST]}"
         self._summary_label.setText(summary)
 
     # --- Public API ---

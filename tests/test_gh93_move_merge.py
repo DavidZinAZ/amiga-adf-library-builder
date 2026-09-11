@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import sys
 
-sys.path.insert(0, '/home/dumbo/projects/amiga-adf-library-builder/.worktrees/gh93-move-merge/src')
+sys.path.insert(0, '/tmp/amiga-adf-gh106-dev/src')
 
 from amiga_adf_library_builder.models import (
     StagedLibrary,
@@ -70,7 +70,7 @@ class TestMoveAdfs:
         assert "src_001" in move_actions[0].details
 
     def test_move_adfs_all(self):
-        """Test moving all ADFs (source becomes empty)."""
+        """Test moving all ADFs (source becomes empty -> GHOST)."""
         lib = StagedLibrary()
 
         src = make_entry("src_001", "Source Game", adf_files=["disk1.adf", "disk2.adf"])
@@ -84,9 +84,9 @@ class TestMoveAdfs:
         assert new_src.adf_files == []
         assert new_dst.adf_files == ["disk1.adf", "disk2.adf"]
 
-        # Source should be marked NEEDS_REVIEW when empty
+        # Source should be marked GHOST when empty (non-actionable ghost)
         src_entry = lib.releases["src_001"]
-        assert src_entry.curation_state == StagedState.NEEDS_REVIEW
+        assert src_entry.curation_state == StagedState.GHOST
 
     def test_move_adfs_duplicate_prevention(self):
         """Test that moving duplicate ADF filenames raises ValueError."""
@@ -158,7 +158,7 @@ class TestMergeRelease:
 
         # Source should be empty
         assert new_src.adf_files == []
-        assert new_src.curation_state == StagedState.NEEDS_REVIEW
+        assert new_src.curation_state == StagedState.GHOST
 
         # Destination should have all ADFs
         assert new_dst.adf_files == ["existing.adf", "disk1.adf", "disk2.adf"]
@@ -310,7 +310,7 @@ class TestPersistenceRoundtrip:
 
         # Verify state preserved
         assert lib2.releases["src_001"].adf_files == []
-        assert lib2.releases["src_001"].curation_state == StagedState.NEEDS_REVIEW
+        assert lib2.releases["src_001"].curation_state == StagedState.GHOST
         assert lib2.releases["dst_001"].adf_files == ["existing.adf", "disk1.adf", "disk2.adf"]
 
         # Verify decision log preserved
@@ -352,7 +352,7 @@ class TestEdgeCases:
         new_src, new_dst = lib.merge_release("src_001", "dst_001")
 
         assert new_src.adf_files == []
-        assert new_src.curation_state == StagedState.NEEDS_REVIEW
+        assert new_src.curation_state == StagedState.GHOST
         assert new_dst.adf_files == ["disk1.adf"]
 
     def test_move_nonexistent_adf(self):
