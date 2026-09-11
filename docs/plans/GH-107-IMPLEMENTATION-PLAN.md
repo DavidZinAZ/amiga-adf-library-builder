@@ -8,8 +8,8 @@
 
 ## Current origin/main SHA
 
-`05c77b79318ddd73f4011e3ee44d13f8cdb3d872` (pre-repair main; this document's
-Slice 1 closeout state refers to the post-repair merge recorded below).
+`8963ebb4ec15a3f15bda861e2089c4b933c10dcb` (post-repair merge of PR #113;
+pre-repair main was `05c77b79318ddd73f4011e3ee44d13f8cdb3d872`).
 
 ## Architecture Principles & Invariants
 
@@ -40,14 +40,17 @@ Provenance chain (all verified, not commit-message claims):
 - PR #111 (squash-merged as `8210bd6d550569a29138a60801ce7f27684fbd55`): head `7029798` = candidate + 3 blanket test-skip lines added by QA after the candidate — suppressing 26 real GH-88/89/93 regression tests. No CI lane runs pytest, so the skips protected nothing.
 - PR #112 (merged as `05c77b7`): empty content diff; a commit-message SHA reference only — not provenance.
 - Repair commit / **FINAL_APPLICATION_SHA**: `cc7c6adb57f089f52397e4a7b7ee309b66ae9617` (branch `repair/gh-107-slice1-provenance`, PR #113) — removes the blanket skips so the tree is byte-identical to the original candidate: `git diff 45ac790 cc7c6ad` is empty; both trees hash to `7c2d3b5f2bf031393619199fbc197111ed4e47e6`.
-- Merge into main (post-repair): see MERGE_SHA recorded in SLICE1-REPAIR.md; ancestry/tree-identity proof there.
+- Merge: `8963ebb4ec15a3f15bda861e2089c4b933c10dcb` (PR #113, true merge commit —
+  `cc7c6ad` is a DIRECT ancestor of origin/main: `git merge-base --is-ancestor
+  cc7c6adb57f089f52397e4a7b7ee309b66ae9617 origin/main` exits 0). Full proof chain:
+  SLICE1-REPAIR.md in the operator archive.
 
 Verification evidence:
 
 - Local (Linux, PySide6 6.11.2, pytest 9.1.1, `QT_QPA_PLATFORM=offscreen`):
   `tests/test_metadata_source.py` 23 passed; restored `test_gh88_89_lookup_workflow.py` 21 passed and `test_gh93_dev_r2_selection.py` 21 passed; GUI import + "Metadata Sources" tab construction verified headless; per-file full suite green except 4 failures reproduced byte-identically on pristine pre-repair main (pre-existing, unrelated to Slice 1).
 - Raw DAT read-only, SQLite persistence/reopen, add/rescan/reindex/enable-disable/remove are covered by the passing `test_metadata_source.py` suite.
-- Windows: `Build Windows GUI` and `QA Windows real execution` GitHub Actions workflows on the PR head — run IDs and step results recorded in `/archive01/dumbo/project-planner/amiga-adf-library-builder/GH-107/SLICE1-REPAIR.md`.
+- Windows (PR #113 head `f30384446e6e9ebb4769892e0999603a72bef97d`): `Build Windows GUI` run 34647172197 SUCCESS (all steps incl. onedir+onefile build and GUI smoke test); `QA Windows real execution` run 34647172196 SUCCESS (all steps; downloaded `report.json` shows every real-Windows step `ok: true` — clean launch, portable layout under a path with spaces, settings persistence, theme switch, logs, no-crash failure path). Full evidence in `/archive01/dumbo/project-planner/amiga-adf-library-builder/GH-107/SLICE1-REPAIR.md`.
 
 ## Slice 2 — exact next planned slice (NOT STARTED)
 
