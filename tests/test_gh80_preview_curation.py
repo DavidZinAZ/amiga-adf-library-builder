@@ -25,12 +25,13 @@ class TestStagedState:
 
     def test_all_states(self):
         states = list(StagedState)
-        assert len(states) == 5
+        assert len(states) == 6
         assert StagedState.PENDING in states
         assert StagedState.ACCEPTED in states
         assert StagedState.REJECTED in states
         assert StagedState.MODIFIED in states
         assert StagedState.NEEDS_REVIEW in states
+        assert StagedState.GHOST in states
 
 
 class TestCurationAction:
