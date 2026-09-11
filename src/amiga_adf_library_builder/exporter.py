@@ -33,7 +33,7 @@ import hashlib
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from . import artwork as artwork_mod
 from .exporter_guard import export_gate_open
@@ -162,6 +162,14 @@ def export_release(
     nfo_dir: Optional[Path] = None,
     rtfm_dir: Optional[Path] = None,
     verify_only: bool = False,
+    # (GH-102) Progressive JPEG conversion policy.
+    convert_progressive_jpeg: str = "never",
+    # (GH-102) Per-image progressive-conversion prompt callback. Called ONLY when
+    # the source is a detected JPEG AND is progressive. Signature:
+    #   callback(basename: str, title: str) -> bool
+    # Must be idempotent and side-effect-free for testability. None disables
+    # prompting (the "prompt" policy then falls back to "never" behavior).
+    progressive_prompt_callback: Optional[Callable[[str, str], bool]] = None,
 ) -> tuple[list[str], list[str], list[str]]:
     """Export one release group to the staging tree.
 
@@ -250,13 +258,52 @@ def export_release(
                 unchanged.append(str(rtfm_dest))
 
     # Artwork: prefer the processed enrichment artifact; otherwise process a master.
+    # (GH-102) Progressive-to-baseline conversion policy:
+    #   Detect whether the SOURCE is an actually-progressive JPEG (SOF2 marker).
+    #   The OUTPUT encoding is then decided:
+    #     - Source baseline  -> output baseline (no conversion ever).
+    #     - Source progressive + "always" -> output baseline.
+    #     - Source progressive + "never"  -> output progressive (keep as-is).
+    #     - Source progressive + "prompt" + operator yes -> output baseline.
+    #     - Source progressive + "prompt" + operator no  -> output progressive.
+    # Original/source artwork is NEVER overwritten; process_artwork_bytes produces
+    # a managed derivative.
     processed = Path(artwork_processed_dir) / f"{basename}.jpg" if artwork_processed_dir is not None else None
     try:
         if processed is not None and processed.is_file():
             data = processed.read_bytes()
         elif artwork_original_dir is not None:
             master = artwork_mod.find_artwork_master(group, artwork_original_dir)
-            data = artwork_mod.process_artwork_bytes(master) if master is not None else None
+            if master is None:
+                data = None
+            else:
+                raw = master.read_bytes()
+                source_is_progressive = (
+                    master.suffix.lower() in (".jpg", ".jpeg")
+                    and artwork_mod.is_jpeg_progressive_from_bytes(raw)
+                )
+                if not source_is_progressive:
+                    # Baseline / non-JPEG source -> output baseline. No prompt.
+                    data = artwork_mod.process_artwork_bytes(master, progressive=False)
+                else:
+                    # Progressive source. Decide output encoding by policy.
+                    if convert_progressive_jpeg == "always":
+                        data = artwork_mod.process_artwork_bytes(master, progressive=False)
+                    elif convert_progressive_jpeg == "prompt":
+                        operator_wants_baseline = False
+                        if progressive_prompt_callback is not None:
+                            try:
+                                operator_wants_baseline = progressive_prompt_callback(
+                                    basename, group.title or basename
+                                )
+                            except Exception:
+                                operator_wants_baseline = False
+                        data = artwork_mod.process_artwork_bytes(
+                            master, progressive=not operator_wants_baseline
+                        )
+                    else:
+                        # "never": keep progressive output as-is.
+                        data = artwork_mod.process_artwork_bytes(master, progressive=True)
         else:
             data = None
         if data is not None:
@@ -308,6 +355,10 @@ def export_all(
     nfo_dir: Optional[Path] = None,
     rtfm_dir: Optional[Path] = None,
     verify_only: bool = False,
+    # (GH-102) Progressive JPEG conversion policy.
+    convert_progressive_jpeg: str = "never",
+    # (GH-102) Per-image progressive-conversion prompt callback (see export_release).
+    progressive_prompt_callback: Optional[Callable[[str, str], bool]] = None,
     require_artwork: bool = False,
     # Internal: original/ path used to resolve source bytes.
     original_dir: Optional[Path] = None,
@@ -403,6 +454,8 @@ def export_all(
             nfo_dir=nfo_dir,
             rtfm_dir=rtfm_dir,
             verify_only=verify_only,
+            convert_progressive_jpeg=convert_progressive_jpeg,
+            progressive_prompt_callback=progressive_prompt_callback,
         )
         result.files_written.extend(written)
         result.files_unchanged.extend(unchanged)

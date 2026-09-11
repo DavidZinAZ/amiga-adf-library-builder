@@ -641,13 +641,28 @@ class MainWindow(QMainWindow):
             "Power-user controls. The defaults are safe for normal use — "
             "leave them alone unless you know what you are changing."
         )
-        advanced_layout = QVBoxLayout(advanced_box)
+        advanced_layout = QFormLayout(advanced_box)
         self._cb_advanced = QCheckBox("Remember these settings")
         self._cb_advanced.setToolTip(
             "Keep the choices in this group so they are restored the next "
             "time you start the app. Off by default."
         )
         advanced_layout.addWidget(self._cb_advanced)
+
+        # (GH-102) Progressive JPEG conversion policy.
+        self._combo_progressive_jpeg = QComboBox(self)
+        self._combo_progressive_jpeg.addItems([
+            "never",
+            "always",
+            "prompt",
+        ])
+        self._combo_progressive_jpeg.setToolTip(
+            "Progressive JPEG conversion policy for artwork import. "
+            "'never' keeps the source as-is (default); 'always' converts "
+            "progressive sources to baseline; 'prompt' asks per-image."
+        )
+        advanced_layout.addRow("Progressive JPEG:", self._combo_progressive_jpeg)
+
         layout.addWidget(advanced_box)
 
         # --- Local Asset Matching thresholds (GH-54) ---------------------------
@@ -1439,6 +1454,8 @@ class MainWindow(QMainWindow):
                 "auto_match_threshold": _parse_threshold(self._le_auto_match.text()),
                 "review_threshold": _parse_threshold(self._le_review.text()),
                 "near_tie_difference": _parse_threshold(self._le_near_tie.text()),
+                # (GH-102) Progressive JPEG conversion policy.
+                "convert_progressive_jpeg": self._combo_progressive_jpeg.currentText(),
             }
             geometry = self._current_persist_geometry()
             if geometry is not None:
@@ -1469,6 +1486,8 @@ class MainWindow(QMainWindow):
             launchbox_manual_roots=self._lb_manual_mappings(),
             run_mode="export" if self._mode_export.isChecked() else "build",
             provider_config_path=self._config_path or "",
+            # (GH-102) Progressive JPEG conversion policy.
+            convert_progressive_jpeg=self._combo_progressive_jpeg.currentText(),
         )
         return state
 
@@ -1526,6 +1545,10 @@ class MainWindow(QMainWindow):
         self._le_auto_match.setText(f"{int(s.auto_match_threshold * 100)}")
         self._le_review.setText(f"{int(s.review_threshold * 100)}")
         self._le_near_tie.setText(f"{int(s.near_tie_difference * 100)}")
+        # (GH-102) Progressive JPEG conversion policy.
+        self._combo_progressive_jpeg.setCurrentText(
+            getattr(s, "convert_progressive_jpeg", "never")
+        )
         self._lb_restore_mappings(s)
         apply_theme(s.theme or "system", themes_dir=self._paths.themes_dir)
         self._update_export_state_display()
@@ -1850,6 +1873,17 @@ class MainWindow(QMainWindow):
     def _on_run(self) -> None:
         try:
             state = self._state_from_widgets()
+            # (GH-102) Handle "prompt" for progressive JPEG conversion: ask the
+            # operator PER detected progressive source BEFORE the worker thread
+            # starts. Answers are recorded in a dict read by the prompt callback
+            # during export; the callback itself is thread-safe (read-only).
+            if state.convert_progressive_jpeg == "prompt":
+                answers = self._collect_progressive_answers(state)
+                state.progressive_prompt_callback = (
+                    lambda basename, title, _answers=answers: _answers.get(basename, False)
+                )
+            else:
+                state.progressive_prompt_callback = None
             # (GH-66) Remember the run's GuiState so the post-run review UI can
             # resolve the EXACT provider-config path the pipeline read
             # (GH-33 GUI mappings are merged into a managed file).
@@ -1880,6 +1914,46 @@ class MainWindow(QMainWindow):
             self._run_marker(f"Run could not be started: {exc}")
             QMessageBox.critical(self, "Cannot start", f"Could not start: {exc}")
             self._status_label.setText(f"Error: {exc}")
+
+    def _collect_progressive_answers(self, state: "GuiState") -> dict[str, bool]:
+        """Pre-scan original artwork for progressive JPEGs and prompt per-image.
+
+        Returns a dict mapping sanitized basename -> bool (True = convert to
+        baseline). Only actually-progressive JPEG sources trigger a prompt;
+        baseline sources are not prompted and default to False.
+        """
+        from pathlib import Path
+        from .. import artwork as artwork_mod
+
+        answers: dict[str, bool] = {}
+        original_dir = Path(state.original_dir.strip()) if state.original_dir.strip() else None
+        if original_dir is None or not original_dir.is_dir():
+            return answers
+        try:
+            for entry in sorted(original_dir.iterdir()):
+                if not entry.is_file() or entry.suffix.lower() not in (".jpg", ".jpeg"):
+                    continue
+                try:
+                    raw = entry.read_bytes()
+                except OSError:
+                    continue
+                if not artwork_mod.is_jpeg_progressive_from_bytes(raw):
+                    continue
+                # Ask the operator once per detected progressive source.
+                from PyQt6.QtWidgets import QMessageBox as _QMB
+                ans = _QMB.question(
+                    self,
+                    "Progressive JPEG detected",
+                    f"'{entry.name}' is a progressive JPEG. Convert it to baseline?\n\n"
+                    "Yes = convert to baseline  |  No = keep progressive",
+                    _QMB.StandardButton.Yes | _QMB.StandardButton.No,
+                    _QMB.StandardButton.No,
+                )
+                answers[entry.stem] = (ans == _QMB.StandardButton.Yes)
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).debug("progressive pre-scan failed (non-fatal): %s", exc)
+        return answers
 
     def _on_activity(self, line: str) -> None:
         """Worker-thread activity line -> live Diagnostics log (issue #21)."""

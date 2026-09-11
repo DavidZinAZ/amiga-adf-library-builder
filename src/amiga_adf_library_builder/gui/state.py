@@ -29,7 +29,7 @@ import os
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from ..paths import PathConfig, PathConfigError, resolve_config
 
@@ -70,6 +70,11 @@ class GuiState:
     # The pipeline's ``export=`` flag is driven by the chosen run mode, not a
     # raw GUI checkbox, but the GUI records the intent here.
     run_mode: str = "build"  # "build" | "export"
+
+    # --- (GH-102) Progressive JPEG conversion policy ---------------------------
+    convert_progressive_jpeg: str = "never"
+    # Per-image progressive-conversion prompt callback. None disables prompting.
+    progressive_prompt_callback: Optional[Callable[[str, str], bool]] = field(default=None)
 
     # --- provider config ------------------------------------------------------
     # Optional explicit provider-config TOML path (where [playmatch]/[hasheous]
@@ -269,6 +274,10 @@ def build_pipeline_kwargs(
         "playmatch_config_path": provider_cfg,
         "hasheous_config_path": provider_cfg,
         "retrokit_config_path": provider_cfg,
+        # (GH-102) Progressive JPEG conversion policy.
+        "convert_progressive_jpeg": str(getattr(state, "convert_progressive_jpeg", "never")),
+        # (GH-102) Per-image progressive-conversion prompt callback.
+        "progressive_prompt_callback": getattr(state, "progressive_prompt_callback", None),
     }
     if activity is not None:
         kwargs["activity"] = activity
