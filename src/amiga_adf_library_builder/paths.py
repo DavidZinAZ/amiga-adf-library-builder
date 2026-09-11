@@ -544,6 +544,22 @@ def _discover_config_file(explicit_config: Optional[str]) -> Optional[Path]:
     return None
 
 
+def discover_default_config_path() -> Optional[Path]:
+    """Return the highest-precedence existing config file path, or None.
+
+    Same precedence chain as :func:`_discover_config_file` with no explicit
+    override: ``AMIGA_ADF_CONFIG`` env var > XDG per-user config > system
+    config. Used by the GUI to discover a default provider-config file when
+    the operator has not explicitly selected one (e.g. the packaged Windows
+    GUI launched by double-clicking, where no ``--config``/provider-config
+    path is available).
+
+    Returns ``None`` when no config file is discoverable, so callers can
+    preserve the existing "no config => skip RTFM" semantics unchanged.
+    """
+    return _discover_config_file(None)
+
+
 def _env_explicit() -> dict:
     """Collect explicit dir values from environment variables (precedence 2)."""
     out: dict = {}
