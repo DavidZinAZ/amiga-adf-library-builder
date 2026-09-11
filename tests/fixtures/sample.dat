@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE datafile PUBLIC "-//Logiqx//DTD ROM Management Datafile//EN" "http://www.logiqx.com/Dats/datafile.dtd">
+<datafile>
+  <header>
+    <name>Sample Amiga TOSEC</name>
+    <description>Sample Amiga DAT for testing</description>
+    <version>2024</version>
+    <date>2024-01-01</date>
+    <author>Test</author>
+    <homepage>test</homepage>
+    <url>test</url>
+  </header>
+  <game name="Alien Breed (1991)(Team 17)(Disk 1 of 2)">
+    <description>Alien Breed (1991)(Team 17)(Disk 1 of 2)</description>
+    <rom name="Alien Breed (1991)(Team 17)(Disk 1 of 2).adf" size="901120" crc="a1b2c3d4" md5="e99a18c428cb38d5f260853678922e03" sha1="b1d5781111d84f7b3fe45a0852e59758cd7a87e5"/>
+  </game>
+  <game name="Alien Breed (1991)(Team 17)(Disk 2 of 2)">
+    <description>Alien Breed (1991)(Team 17)(Disk 2 of 2)</description>
+    <rom name="Alien Breed (1991)(Team 17)(Disk 2 of 2).adf" size="901120" crc="d4c3b2a1" md5="aabbccdd1234567890abcdef12345678" sha1="c2d6789122e95f8c4gf56b1953f6a069de8b98f6"/>
+  </game>
+  <game name="Lemmings (1991)(Psygnosis)">
+    <description>Lemmings (1991)(Psygnosis)</description>
+    <rom name="Lemmings (1991)(Psygnosis).adf" size="901120" crc="12345678" md5="11111111111111111111111111111111" sha1="d3e789233f0a69d57g67c2064a1b170ef9c0a9g7"/>
+  </game>
+  <game name="Shadow of the Beast (1989)(Psygnosis)(Disk 1 of 2)">
+    <description>Shadow of the Beast (1989)(Psygnosis)(Disk 1 of 2)</description>
+    <rom name="Shadow of the Beast (1989)(Psygnosis)(Disk 1 of 2).adf" size="901120" crc="87654321" md5="22222222222222222222222222222222" sha1="e4f890344g1b70e88h78d3175b2c281fg0d1b0h8"/>
+  </game>
+  <game name="Shadow of the Beast (1989)(Psygnosis)(Disk 2 of 2)">
+    <description>Shadow of the Beast (1989)(Psygnosis)(Disk 2 of 2)</description>
+    <rom name="Shadow of the Beast (1989)(Psygnosis)(Disk 2 of 2).adf" size="901120" crc="13579246" md5="33333333333333333333333333333333" sha1="f5g0a1455h2c81f99i89e4286c3d392gh1e2c1i9"/>
+  </game>
+</datafile>

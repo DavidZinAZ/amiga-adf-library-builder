@@ -56,6 +56,7 @@ from PySide6.QtWidgets import (
 
 from .. import activity_log
 from ..logging_utils import redact
+from ..metadata_source import MetadataSourceManager
 from ..local_media import (
     DEFAULT_MEDIA_ROOT_ASSET_TYPE,
     LAUNCHBOX_IMAGE_CATEGORIES,
@@ -321,6 +322,9 @@ class MainWindow(QMainWindow):
 
         self._paths = portable_paths or PortablePaths()
         self._paths.ensure_all()
+        self._metadata_manager = MetadataSourceManager(
+            self._paths.data_dir / "metadata_sources.db"
+        )
         self._settings_store = settings_store or SettingsStore(self._paths.settings_file())
         try:
             self._settings = self._settings_store.load()
@@ -431,6 +435,8 @@ class MainWindow(QMainWindow):
         self._preview_widget.state_changed.connect(self._on_preview_state_changed)
         tabs.addTab(self._preview_widget, "Preview & Curation")
         tabs.addTab(self._build_diagnostics_tab(), "Diagnostics")
+        # (GH-107) Metadata Source Manager tab.
+        tabs.addTab(self._build_metadata_sources_tab(), "Metadata Sources")
 
         # --- run/export settings (consolidated) ---
         run_box = QGroupBox("Run / Export Settings")
@@ -1140,6 +1146,176 @@ class MainWindow(QMainWindow):
         # (Issue #21) Follow Live: pinned to the newest line by default.
         self._follow_live = True
         return w
+
+    # --- (GH-107) Metadata Source Manager tab ---------------------------------
+    def _build_metadata_sources_tab(self) -> QWidget:
+        """Build the Metadata Sources tab (GH-107).
+
+        Provides a view of indexed DAT/folder sources with buttons to
+        add, remove, rescan, and reindex-changed. The raw DAT files are
+        never modified; the manager maintains a local SQLite index.
+        """
+        w = QWidget(self)
+        layout = QVBoxLayout(w)
+
+        # Toolbar: [Add DAT] [Add Folder] [Rescan] [Reindex Changed] [Remove] [stretch]
+        bar = QHBoxLayout()
+        self._ms_add_dat_btn = QPushButton("Add DAT")
+        self._ms_add_dat_btn.setToolTip("Add a DAT file (TOSEC-style or No-Intro XML) to the local index")
+        self._ms_add_folder_btn = QPushButton("Add Folder")
+        self._ms_add_folder_btn.setToolTip("Add a folder of DAT files to the local index")
+        self._ms_rescan_btn = QPushButton("Rescan")
+        self._ms_rescan_btn.setToolTip("Re-parse the selected source and rebuild its entries")
+        self._ms_reindex_changed_btn = QPushButton("Reindex Changed")
+        self._ms_reindex_changed_btn.setToolTip("Re-index sources whose content has changed since last scan")
+        self._ms_remove_btn = QPushButton("Remove")
+        self._ms_remove_btn.setToolTip("Remove the selected source from the index")
+        bar.addWidget(self._ms_add_dat_btn)
+        bar.addWidget(self._ms_add_folder_btn)
+        bar.addWidget(self._ms_rescan_btn)
+        bar.addWidget(self._ms_reindex_changed_btn)
+        bar.addWidget(self._ms_remove_btn)
+        bar.addStretch(1)
+        layout.addLayout(bar)
+
+        # Source table: Name | Type | Entries | Status | Enabled
+        self._ms_table = QTableWidget(self)
+        self._ms_table.setColumnCount(6)
+        self._ms_table.setHorizontalHeaderLabels(
+            ["Name", "Type", "Entries", "Status", "Enabled", "Path"]
+        )
+        self._ms_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._ms_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._ms_table.horizontalHeader().setStretchLastSection(True)
+        self._ms_table.setAlternatingRowColors(True)
+        layout.addWidget(self._ms_table)
+
+        # Wire button signals
+        self._ms_add_dat_btn.clicked.connect(self._on_ms_add_dat)
+        self._ms_add_folder_btn.clicked.connect(self._on_ms_add_folder)
+        self._ms_rescan_btn.clicked.connect(self._on_ms_rescan)
+        self._ms_reindex_changed_btn.clicked.connect(self._on_ms_reindex_changed)
+        self._ms_remove_btn.clicked.connect(self._on_ms_remove)
+
+        # Populate the table on build
+        self._refresh_ms_table()
+        return w
+
+    def _refresh_ms_table(self) -> None:
+        """Reload the Metadata Sources table from the manager."""
+        table = self._ms_table
+        table.setRowCount(0)
+        try:
+            sources = self._metadata_manager.list_sources()
+        except Exception as exc:
+            logger.debug("metadata sources list failed: %s", exc)
+            return
+        for src in sources:
+            row = table.rowCount()
+            table.insertRow(row)
+            table.setItem(row, 0, QTableWidgetItem(src.name))
+            table.setItem(row, 1, QTableWidgetItem(src.source_type))
+            table.setItem(row, 2, QTableWidgetItem(str(src.entry_count)))
+            table.setItem(row, 3, QTableWidgetItem(src.status))
+            enabled_item = QTableWidgetItem("Yes" if src.enabled else "No")
+            table.setItem(row, 4, enabled_item)
+            table.setItem(row, 5, QTableWidgetItem(src.path))
+        table.resizeColumnsToContents()
+
+    def _on_ms_add_dat(self) -> None:
+        """Handle Add DAT button: open file dialog, add to index, refresh."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Add DAT file", "", "DAT files (*.dat);;XML files (*.xml);;All files (*.*)"
+        )
+        if not path:
+            return
+        try:
+            source_id = self._metadata_manager.add_source(Path(path))
+            if source_id:
+                self._refresh_ms_table()
+                self._append_diag(f"Metadata Sources: added {Path(path).name}")
+            else:
+                QMessageBox.warning(self, "Add DAT", f"Failed to index {path}")
+        except Exception as exc:
+            logger.exception("add DAT failed")
+            QMessageBox.critical(self, "Add DAT", f"Error: {exc}")
+
+    def _on_ms_add_folder(self) -> None:
+        """Handle Add Folder button: open dir dialog, add to index, refresh."""
+        folder = QFileDialog.getExistingDirectory(self, "Add Folder of DAT files")
+        if not folder:
+            return
+        try:
+            source_id = self._metadata_manager.add_source(Path(folder), source_type="folder")
+            if source_id:
+                self._refresh_ms_table()
+                self._append_diag(f"Metadata Sources: added folder {Path(folder).name}")
+            else:
+                QMessageBox.warning(self, "Add Folder", f"Failed to index {folder}")
+        except Exception as exc:
+            logger.exception("add folder failed")
+            QMessageBox.critical(self, "Add Folder", f"Error: {exc}")
+
+    def _on_ms_rescan(self) -> None:
+        """Handle Rescan button: re-parse the selected source."""
+        row = self._ms_table.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "Rescan", "Select a source first.")
+            return
+        source_id = self._ms_table.item(row, 5).text()  # path column as fallback
+        # Use the source_id stored via item data if available
+        sid = self._ms_table.item(row, 0).data(Qt.UserRole)
+        if sid is None:
+            # Fallback: look up by path
+            path = self._ms_table.item(row, 5).text
+            sources = self._metadata_manager.list_sources()
+            sid = next((s.source_id for s in sources if s.path == path), source_id)
+        try:
+            if self._metadata_manager.rescan(sid):
+                self._refresh_ms_table()
+                self._append_diag(f"Metadata Sources: rescanned source {sid}")
+            else:
+                QMessageBox.warning(self, "Rescan", "Rescan failed.")
+        except Exception as exc:
+            logger.exception("rescan failed")
+            QMessageBox.critical(self, "Rescan", f"Error: {exc}")
+
+    def _on_ms_reindex_changed(self) -> None:
+        """Handle Reindex Changed button: re-index sources with changed content."""
+        try:
+            reindexed, skipped = self._metadata_manager.reindex_changed()
+            self._refresh_ms_table()
+            self._append_diag(
+                f"Metadata Sources: reindexed {reindexed} source(s), skipped {skipped}"
+            )
+        except Exception as exc:
+            logger.exception("reindex changed failed")
+            QMessageBox.critical(self, "Reindex Changed", f"Error: {exc}")
+
+    def _on_ms_remove(self) -> None:
+        """Handle Remove button: remove the selected source from the index."""
+        row = self._ms_table.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "Remove", "Select a source first.")
+            return
+        path = self._ms_table.item(row, 5).text
+        sources = self._metadata_manager.list_sources()
+        sid = next((s.source_id for s in sources if s.path == path), None)
+        if sid is None:
+            return
+        name = self._ms_table.item(row, 0).text()
+        confirm = QMessageBox.question(
+            self, "Remove", f"Remove source '{name}' from the index?"
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            if self._metadata_manager.remove_source(sid):
+                self._refresh_ms_table()
+                self._append_diag(f"Metadata Sources: removed {name}")
+        except Exception as exc:
+            logger.exception("remove failed")
+            QMessageBox.critical(self, "Remove", f"Error: {exc}")
 
     # --- (GH-80) Library Preview & Curation workspace ---------------------------
     # --- (Issue #21) Diagnostics log controls ---------------------------------
@@ -2177,6 +2353,12 @@ class MainWindow(QMainWindow):
         self._persist_defaults()
         if self._cancel_event is not None:
             self._cancel_event.set()
+        # (GH-107) Close the metadata manager's SQLite connection on exit.
+        if hasattr(self, "_metadata_manager") and self._metadata_manager is not None:
+            try:
+                self._metadata_manager.close()
+            except Exception as exc:  # pragma: no cover - defensive cleanup
+                logger.debug("metadata manager close failed: %s", exc)
         super().closeEvent(event)
 
 
