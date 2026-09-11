@@ -16,8 +16,6 @@ sys.path.insert(0, "/tmp/amiga-adf-gh106-dev/src")
 
 import pytest
 
-pytestmark = pytest.mark.skip(reason="GUI tests not supported in headless CI")
-
 from amiga_adf_library_builder.models import (
     CurationAction,
     StagedLibrary,
