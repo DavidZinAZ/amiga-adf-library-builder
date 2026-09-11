@@ -185,3 +185,113 @@ def test_gui_vs_cli_build_invocation_match(tmp_path: Path):
     assert gui_kwargs["playmatch_config_path"] == cli_kwargs["playmatch_config_path"]
     assert gui_kwargs["hasheous_config_path"] == cli_kwargs["hasheous_config_path"]
     assert gui_kwargs["cfg"].library_root == cli_kwargs["cfg"].library_root
+
+
+# ---------------------------------------------------------------------------
+# (GH-76) GUI RTFM-config discovery fallback tests.
+#
+# When the packaged Windows GUI is launched by double-clicking, the operator
+# has not selected a provider-config path, so ``state.provider_config_path``
+# is empty and ``config_path`` is ``None``. The fix in ``build_pipeline_kwargs``
+# makes the GUI fall back to the standard config-discovery chain so an enabled
+# ``[rtfm]`` config is actually used — producing the same RTFM output as the
+# CLI ``--config`` path.
+# ---------------------------------------------------------------------------
+
+
+def _write_rtfm_config(tmp_path: Path, library_root: str) -> Path:
+    """Write a minimal enabled-[rtfm] config TOML and return its path."""
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        f'library_root = "{library_root}"\n'
+        "\n"
+        "[rtfm]\n"
+        "enabled = true\n"
+        'template = "controls-first"\n'
+        "\n"
+        "[rtfm.local]\n"
+        'instructions = "{ins}"\n'.format(
+            library_root=library_root,
+            ins=str(tmp_path / "instructions"),
+        )
+    )
+    return cfg
+
+
+def test_gui_rtfm_config_discovery_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """GUI with no explicit provider_config_path still discovers a default
+    config file and forwards it as ``rtfm_config_path`` (GH-76 fix)."""
+    root = tmp_path / "lib"
+    root.mkdir()
+
+    # Place the config file where _discover_config_file (XDG path) will find it.
+    xdg_base = tmp_path / "xdg_config"
+    xdg_base.mkdir()
+    cfg_file = xdg_base / "amiga-adf-library-builder" / "config.toml"
+    cfg_file.parent.mkdir(parents=True)
+    cfg_file.write_text(f'library_root = "{root}"\n')
+
+    # Point XDG_CONFIG_HOME at our temp dir so discovery finds our config.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg_base))
+
+    # No provider_config_path, no explicit config_path: the packaged-Windows
+    # double-click scenario.
+    state = GuiState(library_root=str(root))
+    cfg = build_path_config_from_gui_state(state)
+    kwargs = build_pipeline_kwargs(state, cfg)
+
+    assert kwargs["rtfm_config_path"] is not None, (
+        "GH-76: GUI must discover a default config when none is explicitly set"
+    )
+    assert kwargs["rtfm_config_path"] == str(cfg_file.resolve())
+    # The provider config paths that use ``provider_cfg`` directly must match
+    # the discovered config (playmatch/hasheous/retrokit use ``provider_cfg``;
+    # local_media uses a separate resolver and is verified elsewhere).
+    assert kwargs["playmatch_config_path"] == kwargs["rtfm_config_path"]
+    assert kwargs["hasheous_config_path"] == kwargs["rtfm_config_path"]
+
+
+def test_gui_rtfm_config_no_config_stays_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """With no discoverable config file, ``rtfm_config_path`` stays ``None``
+    — existing skip semantics preserved (no spurious RTFM build)."""
+    root = tmp_path / "lib"
+    root.mkdir()
+
+    # Point XDG at an empty dir so discovery finds nothing; env unset too.
+    empty_xdg = tmp_path / "empty_xdg"
+    empty_xdg.mkdir()
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(empty_xdg))
+    monkeypatch.delenv("AMIGA_ADF_CONFIG", raising=False)
+
+    state = GuiState(library_root=str(root))
+    cfg = build_path_config_from_gui_state(state)
+    kwargs = build_pipeline_kwargs(state, cfg)
+
+    assert kwargs["rtfm_config_path"] is None
+    assert kwargs["playmatch_config_path"] is None
+    assert kwargs["hasheous_config_path"] is None
+
+
+def test_gui_rtfm_config_explicit_overrides_discovery(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """An explicit ``provider_config_path`` must take precedence over the
+    discovered default (GH-76: operator selection wins)."""
+    root = tmp_path / "lib"
+    root.mkdir()
+
+    explicit_cfg = tmp_path / "explicit.toml"
+    explicit_cfg.write_text(f'library_root = "{root}"\n')
+
+    # Also seed a discoverable config to prove discovery is NOT used when
+    # the operator has explicitly chosen one.
+    xdg_base = tmp_path / "xdg_config"
+    xdg_base.mkdir()
+    discovered_cfg = xdg_base / "amiga-adf-library-builder" / "config.toml"
+    discovered_cfg.parent.mkdir(parents=True)
+    discovered_cfg.write_text(f'library_root = "{root}"\n')
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg_base))
+
+    state = GuiState(library_root=str(root), provider_config_path=str(explicit_cfg))
+    cfg = build_path_config_from_gui_state(state)
+    kwargs = build_pipeline_kwargs(state, cfg)
+
+    assert kwargs["rtfm_config_path"] == str(explicit_cfg)

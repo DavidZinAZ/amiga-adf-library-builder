@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from ..paths import PathConfig, PathConfigError, resolve_config
+from ..paths import PathConfig, PathConfigError, discover_default_config_path, resolve_config
 
 
 @dataclass
@@ -250,6 +250,17 @@ def build_pipeline_kwargs(
     """
     from ..artwork import ARTWORK_MAX_W, ARTWORK_MAX_H
     provider_cfg = state.provider_config_path or config_path or None
+    if provider_cfg is None:
+        # (GH-76) Fallback: when the operator has not explicitly selected a
+        # provider-config path (e.g. the packaged Windows GUI launched by
+        # double-clicking with no ``--config``/provider-config path), attempt
+        # to discover a default config file via the standard precedence chain
+        # (``AMIGA_ADF_CONFIG`` env > XDG > system). If no config file is
+        # discoverable, ``provider_cfg`` stays ``None`` and the existing
+        # "no config => skip RTFM" semantics are preserved unchanged.
+        discovered = discover_default_config_path()
+        if discovered is not None:
+            provider_cfg = str(discovered)
     local_media_cfg = resolve_local_media_config_path(
         state, config_path=config_path, cache_dir=cache_dir
     )
