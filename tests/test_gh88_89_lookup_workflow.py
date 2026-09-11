@@ -290,7 +290,6 @@ def _meta(e):
             e.artwork_front, e.curation_state.value)
 
 
-@pytest.mark.skip(reason="GUI tests not supported in headless CI")
 class TestApplyStagedOnly:
     def test_online_apply_mutates_staged_and_preserves_identity(self, widget):
         from amiga_adf_library_builder.models import CurationAction, StagedState

@@ -1,0 +1,69 @@
+# GH-107 Implementation Plan
+
+**EPIC:** Metadata Source Manager, persistent hash curation, canonical naming and 1G1R export engine.
+
+**Repository:** https://github.com/DavidZinAZ/amiga-adf-library-builder
+
+**GH-107 status: OPEN** (EPIC — must stay open until all slices land).
+
+## Current origin/main SHA
+
+`05c77b79318ddd73f4011e3ee44d13f8cdb3d872` (pre-repair main; this document's
+Slice 1 closeout state refers to the post-repair merge recorded below).
+
+## Architecture Principles & Invariants
+
+- **Identity Layer:** Content hashes (SHA-256 primary, SHA1/MD5/CRC32 secondary) are immutable identifiers.
+- **Knowledge Layer:** DAT sources (TOSEC, No‑Intro, Fresh1G1R, custom) provide canonical metadata.
+- **Curation Layer:** User decisions (move, rename, grouping) outrank automated matches and persist across sessions.
+- **Export Layer:** TOSEC‑style naming and 1G1R export are policies, not destructive actions.
+- **Persistence:** All hash‑based identity and curation records are stored in a local SQLite index; the raw DAT files remain read‑only.
+- **Incremental Indexing:** Only changed DAT files are re‑indexed.
+- **Windows Qualification:** Slice 1 must be runnable on Windows GUI with the new metadata source manager UI.
+
+## Ordered Slices (proposed)
+
+| Slice | Description | Status |
+|------|-------------|--------|
+| **1** | **Metadata Source Manager + DAT indexing/storage foundation** — GUI tab "Metadata Sources" (Add DAT / Add Folder / Rescan / Reindex Changed / Remove), local SQLite index `metadata_source_entries`, source enable/disable controls, raw DAT read-only, synthetic `tests/fixtures/sample.dat` parser tests. | **DONE** (semantic PASS after provenance repair — see Slice 1 closeout below) |
+| **2** | Persistent hash‑based file identity & curation memory. | **PLANNED — not started** |
+| **3** | Canonical game/release data model & provenance. | PLANNED |
+| **4** | Unified manual lookup UI. | PLANNED |
+| **5** | Canonical naming / export policy layer. | PLANNED |
+| **6** | 1G1R selection & export engine. | PLANNED |
+
+## Slice 1 closeout (semantic, after repair t_9503c6de)
+
+Provenance chain (all verified, not commit-message claims):
+
+- Original DEV candidate: `45ac790d80e2c093c9a15b6420b1e2727c298aee` (tree `7c2d3b5f2bf031393619199fbc197111ed4e47e6`).
+- PR #111 (squash-merged as `8210bd6d550569a29138a60801ce7f27684fbd55`): head `7029798` = candidate + 3 blanket test-skip lines added by QA after the candidate — suppressing 26 real GH-88/89/93 regression tests. No CI lane runs pytest, so the skips protected nothing.
+- PR #112 (merged as `05c77b7`): empty content diff; a commit-message SHA reference only — not provenance.
+- Repair commit / **FINAL_APPLICATION_SHA**: `cc7c6adb57f089f52397e4a7b7ee309b66ae9617` (branch `repair/gh-107-slice1-provenance`, PR #113) — removes the blanket skips so the tree is byte-identical to the original candidate: `git diff 45ac790 cc7c6ad` is empty; both trees hash to `7c2d3b5f2bf031393619199fbc197111ed4e47e6`.
+- Merge into main (post-repair): see MERGE_SHA recorded in SLICE1-REPAIR.md; ancestry/tree-identity proof there.
+
+Verification evidence:
+
+- Local (Linux, PySide6 6.11.2, pytest 9.1.1, `QT_QPA_PLATFORM=offscreen`):
+  `tests/test_metadata_source.py` 23 passed; restored `test_gh88_89_lookup_workflow.py` 21 passed and `test_gh93_dev_r2_selection.py` 21 passed; GUI import + "Metadata Sources" tab construction verified headless; per-file full suite green except 4 failures reproduced byte-identically on pristine pre-repair main (pre-existing, unrelated to Slice 1).
+- Raw DAT read-only, SQLite persistence/reopen, add/rescan/reindex/enable-disable/remove are covered by the passing `test_metadata_source.py` suite.
+- Windows: `Build Windows GUI` and `QA Windows real execution` GitHub Actions workflows on the PR head — run IDs and step results recorded in `/archive01/dumbo/project-planner/amiga-adf-library-builder/GH-107/SLICE1-REPAIR.md`.
+
+## Slice 2 — exact next planned slice (NOT STARTED)
+
+Persistent hash-based file identity and curation memory:
+SHA-256/SHA-1/MD5/CRC32 file identity records persisted in the same SQLite store,
+surviving rescan/reopen, with curation decisions bound to content hashes.
+
+Do not start Slice 2 work until this plan's Slice 1 closeout above shows the
+semantic PASS merge on origin/main.
+
+## Governance notes
+
+- GH-107 remains OPEN after Slice 1.
+- The lesson from this repair: an APPLICATION_SHA is proven by ancestry or byte-for-byte
+  tree identity — never by a commit message; and QA may not weaken regression coverage
+  to force a green lane.
+
+---
+*This plan is authoritative; both the repository copy (`docs/plans/GH-107-IMPLEMENTATION-PLAN.md`) and the archive copy (`/archive01/dumbo/project-planner/amiga-adf-library-builder/GH-107/IMPLEMENTATION-PLAN.md`) must stay in sync.*
