@@ -641,7 +641,7 @@ class MainWindow(QMainWindow):
             "Power-user controls. The defaults are safe for normal use — "
             "leave them alone unless you know what you are changing."
         )
-        advanced_layout = QVBoxLayout(advanced_box)
+        advanced_layout = QFormLayout(advanced_box)
         self._cb_advanced = QCheckBox("Remember these settings")
         self._cb_advanced.setToolTip(
             "Keep the choices in this group so they are restored the next "
