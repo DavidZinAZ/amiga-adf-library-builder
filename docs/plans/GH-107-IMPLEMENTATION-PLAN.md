@@ -28,7 +28,7 @@ pre-repair main was `05c77b79318ddd73f4011e3ee44d13f8cdb3d872`).
 | **1** | **Metadata Source Manager + DAT indexing/storage foundation** — GUI tab "Metadata Sources" (Add DAT / Add Folder / Rescan / Reindex Changed / Remove), local SQLite index `metadata_source_entries`, source enable/disable controls, raw DAT read-only, synthetic `tests/fixtures/sample.dat` parser tests. | **DONE** (semantic PASS after provenance repair — see Slice 1 closeout below) |
 | **2** | Persistent hash‑based file identity & curation memory. | **DONE** (semantic PASS — see Slice 2 closeout below; APPLICATION_SHA `f0365799d0f551c30a9870150d0a27e7e35a2772`, merge `f204c2f...`) |
 | **3** | Canonical game/release data model & provenance. | **DONE** — PUBLISHED (see Slice 3 closeout below; APPLICATION_SHA `85fd0136733dd2a826e3f8f85e33cc61c48471f3`, merge `8e85a44...`) |
-| **4** | Unified manual lookup UI. | PLANNED |
+| **4** | Unified manual lookup UI. | **DONE** — PUBLISHED (see Slice 4 closeout below; APPLICATION_SHA `fd0ffa4006ee0b8332d075ff7aa2770fbf7ff786`, merge `bba2ba8...`) |
 | **5** | Canonical naming / export policy layer. | PLANNED |
 | **6** | 1G1R selection & export engine. | PLANNED |
 
@@ -77,7 +77,7 @@ Evidence block: APPLICATION_SHA `f0365799d0f551c30a9870150d0a27e7e35a2772`;
 QA verdict PASS (t_3e2bc459); PR #115 (head `6f429d8180c7b5fc29eb9aaf6149115ae8a5cdd6`,
 docs-only); merge/final main `f204c2f296552f6af8015be4dca4f31a1332bf7f`;
 ancestry `merge-base --is-ancestor f0365799... origin/main` exit 0 (verified live at closeout).
-Next planned slice: **Slice 4** (unified manual lookup UI) — NOT STARTED.
+Next planned slice: **Slice 5** (canonical naming / export policy layer) — NOT STARTED.
 
 ## Slice 3 — DONE (published 2026-09-12)
 
@@ -129,6 +129,48 @@ reported at DEV terminalization.
   (Build Windows standalone / PyInstaller, Real Windows GUI qualification).
 - No Slice 4 work started (no lookup UX, no source-browser redesign, no
   filename/export policy, no 1G1R).
+
+## Slice 4 — DONE (published 2026-09-12)
+
+Unified manual lookup / source browser workflow integrated into the real operator
+GUI path on top of the Slice 3 canonical model. DEV candidate t_8f06fc28; QA
+bound to the exact APPLICATION_SHA.
+
+- Modules: `src/amiga_adf_library_builder/manual_lookup.py` — Qt-free service:
+  browse canonical Game/Release/Disk/File records; collect source-specific
+  candidates with provenance (source/provider, record key/id, observed value,
+  confidence/authority); report the current canonical value together with the
+  reason it won under the Slice 3 precedence rules (read from the real canonical
+  model — precedence logic is not duplicated in UI code); detect unresolved
+  conflicts; persist an operator manual override as a curation claim at the
+  highest authority, editable and reversible, coexisting with provider claims
+  and surviving provider refresh/rescan; raw source media is never rewritten.
+- GUI: `src/amiga_adf_library_builder/gui/manual_lookup_panel.py` plus
+  `gui/main_window.py` wiring the panel into the real operator path as a tab;
+  the canonical DB follows the configured library root and refreshes after runs.
+- Repair included: `canonical.py` `_sort_time_desc` so the most recent
+  observation wins per the documented precedence total order.
+- Tests: `tests/test_manual_lookup.py`, `tests/test_gui_manual_lookup.py`.
+  Focused suites 40/40 green (together with `tests/test_canonical_model.py`);
+  per-file full suite 70/73 files green with the 3 failures reproduced
+  byte-equivalently on BASE (pre-existing); no new skips; no Slice 5 creep.
+- QA evidence (t_ec2f3c8a, verdict PASS): real end-to-end workflow probe 31/31
+  driven through the actual pipeline -> canonical.db -> real Qt panel —
+  override create/edit/revert, Slice-3-derived precedence explanation,
+  provider-refresh survival, revert without evidence loss, byte-identical source
+  media and raw DAT hashes.
+- Publication evidence block: APPLICATION_SHA `fd0ffa4006ee0b8332d075ff7aa2770fbf7ff786`
+  (identical to the QA-tested candidate; candidate parent == BASE
+  `48cb0ce77b9cbc15f513cb3873696634dcc609cb`); PR #120 (head
+  `fd0ffa4006ee0b8332d075ff7aa2770fbf7ff786`, no docs-only commit — PR head ==
+  QA SHA); merge/final main `bba2ba838daf992385e73332580e65a80be48770`;
+  ancestry `git merge-base --is-ancestor fd0ffa4... origin/main` exit 0
+  (verified live at closeout); required CI green including both Windows lanes
+  (Build Windows standalone / PyInstaller, Real Windows GUI qualification).
+- Non-blocking UX observation from QA: with disks present the disk combo
+  auto-selects, so release-level fields are not the active override target while
+  a disk is selected.
+- No Slice 5 work started (no canonical naming/export policy, no 1G1R).
 
 ## Governance notes
 
