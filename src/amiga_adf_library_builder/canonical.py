@@ -145,9 +145,20 @@ class Provenance:
 
 
 def _sort_time_desc(observed_at: str) -> str:
-    # ISO-8601 UTC strings sort lexicographically; pad empty to sort last
-    # within the descending observation-time comparison.
-    return _NEG_EPOCH if not observed_at else observed_at
+    """Invert an ISO-8601 UTC timestamp so later observations sort FIRST.
+
+    (GH-107 Slice 4 repair) The documented contract says the most recent
+    observation wins within a tier; the previous implementation returned the
+    raw string, which sorted ascending and made the OLDEST observation win.
+    ISO-8601 UTC strings are fixed-width and lexicographically ordered, so
+    per-character 9's-complement inversion is a total, order-preserving
+    (reversed) encoding without datetime parsing. Empty timestamps keep
+    sorting last within the descending comparison.
+    """
+    if not observed_at:
+        return _NEG_EPOCH
+    return "".join(chr(ord("9") - (ord(c) - ord("0"))) if c.isdigit() else c
+                   for c in observed_at)
 
 
 _NEG_EPOCH = "0000-00-00T00:00:00+00:00"

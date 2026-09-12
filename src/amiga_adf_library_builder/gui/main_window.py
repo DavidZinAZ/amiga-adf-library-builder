@@ -441,6 +441,8 @@ class MainWindow(QMainWindow):
         tabs.addTab(self._build_diagnostics_tab(), "Diagnostics")
         # (GH-107) Metadata Source Manager tab.
         tabs.addTab(self._build_metadata_sources_tab(), "Metadata Sources")
+        # (GH-107 Slice 4) Unified manual lookup / source browser tab.
+        tabs.addTab(self._build_manual_lookup_tab(), "Manual Lookup")
 
         # --- run/export settings (consolidated) ---
         run_box = QGroupBox("Run / Export Settings")
@@ -1152,6 +1154,47 @@ class MainWindow(QMainWindow):
         return w
 
     # --- (GH-107) Metadata Source Manager tab ---------------------------------
+    def _build_manual_lookup_tab(self) -> QWidget:
+        """Build the unified manual lookup / source browser tab (GH-107 Slice 4).
+
+        Thin Qt shell over ``manual_lookup`` + the Slice 3 canonical store:
+        entity picker (Game -> Release -> Disk), side-by-side provenance and
+        precedence view, manual override/revert, and a read-only DAT source
+        browser. Raw DAT files and source media are never modified.
+        """
+        from .manual_lookup_panel import ManualLookupPanel
+
+        panel = ManualLookupPanel(
+            self._manual_lookup_db_path(),
+            self._metadata_manager,
+            parent=self,
+        )
+        self._manual_lookup_panel = panel
+        return panel
+
+    def _manual_lookup_db_path(self) -> Path:
+        """Canonical DB path: <configured library_root>/curation/canonical.db.
+
+        Matches the path the pipeline writes (pipeline._persist_canonical_
+        library), so the panel browses the same store the run produces. Falls
+        back to the portable app data dir when no library root is configured.
+        """
+        library_root = self._le_library_root.text().strip() if \
+            hasattr(self, "_le_library_root") else ""
+        if library_root:
+            return Path(library_root) / "curation" / "canonical.db"
+        return self._paths.data_dir / "curation" / "canonical.db"
+
+    def _refresh_manual_lookup_panel(self) -> None:
+        """Reload the Manual Lookup panel after a run completes (best-effort)."""
+        panel = getattr(self, "_manual_lookup_panel", None)
+        if panel is not None:
+            try:
+                panel.set_canonical_db(self._manual_lookup_db_path())
+                panel.refresh()
+            except Exception:
+                logger.debug("Manual Lookup panel refresh failed", exc_info=True)
+
     def _build_metadata_sources_tab(self) -> QWidget:
         """Build the Metadata Sources tab (GH-107).
 
@@ -2229,6 +2272,9 @@ class MainWindow(QMainWindow):
                 if state_path and state_path.exists():
                     self._preview_widget.load_state_file(state_path)
                     self._append_diag(f"Loaded curation state: {state_path.name}")
+                    # (GH-107 Slice 4) The run may have created/updated the
+                    # canonical DB — reload the Manual Lookup panel.
+                    self._refresh_manual_lookup_panel()
             except Exception as exc:
                 # Preview population is best-effort; never break a completed run
                 logger.debug("Preview curation state load failed: %s", exc)
