@@ -10,6 +10,8 @@ from typing import Optional
 from pathlib import Path
 from enum import Enum
 
+from .file_identity import FileIdentityStore
+
 
 # Disk-number conventions we understand.
 DISK_DIGIT_RE = None  # populated lazily to avoid import cost at module load
@@ -603,7 +605,13 @@ class StagedLibrary:
 
         return src_entry, dst_entry
 
-    def carry_over(self, previous: "StagedLibrary") -> int:
+    def carry_over(
+        self,
+        previous: "StagedLibrary",
+        *,
+        identity_store: Optional[FileIdentityStore] = None,
+        original_dir: Optional[Path] = None,
+    ) -> int:
         """Restore prior curation decisions from a previous state library.
 
         (GH-99) Called by the state builder after a pipeline run, before the
@@ -630,7 +638,23 @@ class StagedLibrary:
         unrelated release, and previous entries that no longer exist simply
         do not apply (they are not re-created).
 
-        Returns the number of releases that had a matching previous entry.
+        (GH-107 Slice 2) After the release_key pass, a second content-hash
+        pass runs: for releases that had NO release_key match, the fresh
+        adf_files are hashed and the identity store is consulted for a
+        remembered curation decision. When the same content reappears under
+        a new filename/path (which yields a different release_key), the
+        operator's prior decision is reapplied so the work is not repeated.
+
+        Args:
+            previous: The previous staged library to carry decisions from.
+            identity_store: An optional ``FileIdentityStore`` instance for
+                content-hash-based curation memory. When ``None``, only the
+                release_key pass runs.
+            original_dir: Path to the original read-only corpus. Required
+                for the content-hash pass so adf_files can be hashed.
+
+        Returns the number of releases that had a matching previous entry
+        (by release_key or content hash).
         """
         carried = 0
         for release_key, entry in self.releases.items():
@@ -669,4 +693,82 @@ class StagedLibrary:
             entry.notes = prev.notes
             entry.actions = list(prev.actions)
             carried += 1
+
+        # (GH-107 Slice 2) Content-hash second pass: for releases that had
+        # NO release_key match, look up remembered curation decisions by
+        # hashing the adf_files and consulting the identity store. This lets
+        # same content under a new path/name keep the operator's prior
+        # decision.
+        if identity_store is not None and original_dir is not None:
+            carried += self._carry_over_by_content_hash(
+                previous, identity_store=identity_store, original_dir=original_dir
+            )
+
         return carried
+
+    def _carry_over_by_content_hash(
+        self,
+        previous: "StagedLibrary",
+        *,
+        identity_store: FileIdentityStore,
+        original_dir: Path,
+    ) -> int:
+        """Carry over curation decisions by content hash for unmatched releases.
+
+        For each release in this library that had NO release_key match in
+        ``previous``, hash its adf_files and consult ``identity_store`` for a
+        remembered curation decision. When found, the remembered curation
+        fields are applied to the release.
+
+        Returns the number of releases matched by content hash.
+        """
+        carried = 0
+        orig_dir = Path(original_dir)
+        for release_key, entry in self.releases.items():
+            # Skip releases already matched by release_key.
+            if previous.releases.get(release_key) is not None:
+                continue
+            remembered = self._find_remembered_by_content(
+                identity_store, entry.adf_files, orig_dir
+            )
+            if remembered is None:
+                continue
+            if remembered.curation_state:
+                try:
+                    entry.curation_state = StagedState(remembered.curation_state)
+                except ValueError:
+                    pass
+            if remembered.title:
+                entry.title = remembered.title
+            if remembered.folder:
+                entry.folder = remembered.folder
+            if remembered.notes:
+                entry.notes = remembered.notes
+            carried += 1
+        return carried
+
+    @staticmethod
+    def _find_remembered_by_content(
+        identity_store: FileIdentityStore,
+        adf_files: list[str],
+        original_dir: Path,
+    ) -> Optional[object]:
+        """Find a remembered curation decision for any of the given adf files.
+
+        Hashes each adf_file (relative to ``original_dir``) and consults
+        ``identity_store.decision_for(sha256)``. Returns the first remembered
+        decision found, or ``None``.
+        """
+        for fname in adf_files:
+            if not isinstance(fname, str):
+                continue
+            fpath = original_dir / fname
+            if not fpath.is_file():
+                continue
+            sha256 = identity_store.hash_file(fpath)
+            if sha256 is None:
+                continue
+            decision = identity_store.decision_for(sha256)
+            if decision is not None:
+                return decision
+        return None

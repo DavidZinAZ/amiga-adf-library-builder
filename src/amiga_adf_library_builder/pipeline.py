@@ -22,6 +22,7 @@ from .enrich import VERIFIED_ARTWORK_WIDTH, VERIFIED_ARTWORK_HEIGHT
 from .exporter_guard import export_gate_open
 from .logging_utils import redact
 from .models import ParsedRecord, ReleaseGroup, ScanRecord, StagedLibrary, StagedReleaseEntry, StagedState, StagedChange, CurationAction
+from .file_identity import FileIdentityStore
 from .parser import parse_filename
 from .naming import release_basename
 from .paths import PathConfig
@@ -606,6 +607,8 @@ def build_staged_library_from_result(
     *,
     library_root: Path,
     run_id: str,
+    identity_store: Optional[FileIdentityStore] = None,
+    original_dir: Optional[Path] = None,
 ) -> Optional[Path]:
     """Build a StagedLibrary from pipeline result and save as a state file.
 
@@ -716,7 +719,10 @@ def build_staged_library_from_result(
 
     # (GH-99, defect 3) Restore the operator's prior staged decisions on
     # top of the freshly built state (same release_key only).
-    library.carry_over(previous)
+    # (GH-107 Slice 2) Also try content-hash matching for same-content-under-new-path.
+    library.carry_over(
+        previous, identity_store=identity_store, original_dir=original_dir
+    )
 
     # Save under the managed curation dir (independent of output/ and original/).
     state_path = curation_dir / f"library_state_{run_id}.json"

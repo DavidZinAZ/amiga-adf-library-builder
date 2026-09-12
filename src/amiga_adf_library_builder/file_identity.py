@@ -169,6 +169,14 @@ class FileIdentityStore:
         return h.hexdigest()
 
     @staticmethod
+    def hash_file(path: Path) -> Optional[str]:
+        """Public wrapper: SHA-256 of a file, or None on read error."""
+        try:
+            return FileIdentityStore._sha256_file(path)
+        except (OSError, ValueError):
+            return None
+
+    @staticmethod
     def _now_iso() -> str:
         return datetime.now(timezone.utc).isoformat()
 
