@@ -294,6 +294,26 @@ class FileIdentityStore:
             last_seen=row["last_seen"] or "",
         )
 
+    def sha_for_filename(self, release_key: str, filename: str) -> Optional[str]:
+        """Return the SHA-256 previously observed for a staged ADF filename.
+
+        Read-only lookup over recorded path observations (Slice 2). The
+        ``release_key`` argument is accepted for API compatibility with the
+        staged-library migration path but is not required for resolution:
+        filenames map to content through path observations.
+        """
+        cur = self._conn.execute(
+            """
+            SELECT sha256 FROM path_observation
+            WHERE filename = ?
+            ORDER BY last_seen_at DESC
+            LIMIT 1
+            """,
+            (filename,),
+        )
+        row = cur.fetchone()
+        return row["sha256"] if row is not None else None
+
     def observations_for(self, sha256: str) -> list[PathObservation]:
         """Return all path observations for a content hash."""
         cur = self._conn.execute(

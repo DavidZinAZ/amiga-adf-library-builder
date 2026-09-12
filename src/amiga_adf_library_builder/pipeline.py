@@ -11,6 +11,7 @@ from __future__ import annotations
 import itertools
 import json
 import os
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
@@ -724,6 +725,22 @@ def build_staged_library_from_result(
         previous, identity_store=identity_store, original_dir=original_dir
     )
 
+    # (GH-107 Slice 3) Build/persist the canonical Game/Release/Disk model
+    # for this run at <library_root>/curation/canonical.db. The staged state
+    # file remains authoritative for curation; the canonical library records
+    # the same releases with per-field provenance. Operator curation claims
+    # (authority 'curation') recorded here survive later provider refreshes:
+    # claim rows are additive and higher-authority claims always win
+    # resolution.
+    try:
+        _persist_canonical_library(
+            library, curation_dir, identity_store=identity_store
+        )
+    except Exception:
+        # Canonical persistence is best-effort: the staged state file is the
+        # curation authority and must never fail to build because of it.
+        pass
+
     # Save under the managed curation dir (independent of output/ and original/).
     state_path = curation_dir / f"library_state_{run_id}.json"
     from .library_state import CurationStateManager, CurationStateMeta, CurationStateFile
@@ -742,6 +759,35 @@ def build_staged_library_from_result(
     tmp_path.replace(state_path)
 
     return state_path
+
+
+def _persist_canonical_library(
+    library, curation_dir: Path, *, identity_store=None
+) -> Optional[Path]:
+    """Persist the canonical Game/Release/Disk model for a staged library.
+
+    (GH-107 Slice 3) Production integration point: called from
+    ``build_staged_library_from_result`` on every staged-library build so
+    the canonical model always reflects the real application state.
+    Migration is additive and deterministic; failures never abort the
+    staged build (the staged state file remains the curation authority).
+    """
+    try:
+        from .canonical import (
+            CanonicalLibrary,
+            migrate_staged_library,
+        )
+    except ImportError:  # pragma: no cover - canonical model always present
+        return None
+    db_path = curation_dir / "canonical.db"
+    try:
+        with CanonicalLibrary(db_path) as canon:
+            migrate_staged_library(
+                library, canon, identity_store=identity_store
+            )
+    except (OSError, sqlite3.Error, ValueError, TypeError):
+        return None
+    return db_path
 
 
 def _find_previous_state_file(curation_dir: Path, run_id: str) -> Optional[Path]:
