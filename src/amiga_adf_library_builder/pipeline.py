@@ -77,6 +77,10 @@ def run_pipeline(
     rtfm_config_path: Optional[str] = None,
     playmatch_config_path: Optional[str] = None,
     hasheous_config_path: Optional[str] = None,
+    # (GH-107 Slice 6) 1G1R selection controls
+    one_per_game: bool = True,
+    operator_decisions_path: Optional[str] = None,
+    selection_manifest_path: Optional[str] = None,
     igdb_config_path: Optional[str] = None,
     screenscraper_config_path: Optional[str] = None,
     retroachievements_config_path: Optional[str] = None,
@@ -422,8 +426,32 @@ def run_pipeline(
     # Phase 5: Gotek export (gated). Runs only when requested AND the gate is
     # open. Writes exclusively to a run-owned staging dir; never the SD card.
     export_result = None
+    selection_result: Optional[object] = None
     if export:
         _act("Preparing the export…")
+        # (GH-107 Slice 6) 1G1R selection: pick one release per game
+        # before the export phase so only the selected releases are exported.
+        selection_result = None
+        try:
+            from .selection import select_one_per_game, load_operator_decisions
+            decisions = None
+            if operator_decisions_path:
+                decisions = load_operator_decisions(Path(operator_decisions_path))
+            if one_per_game:
+                selection_result = select_one_per_game(groups, canon=None, decisions=decisions)
+            else:
+                selection_result = None
+            if selection_result is not None:
+                groups = list(selection_result.selected)
+                _act(
+                    f"1G1R selection: {selection_result.provenance['selected_count']} "
+                    f"release(s) selected from {len(set(g.release_key.split('|')[0].lower() for g in groups + selection_result.rejected))} game(s)."
+                )
+            else:
+                _act("1G1R selection: skipped (--no-1g1r)")
+        except Exception:
+            # Selection failure must not break export — fall back to all groups.
+            selection_result = None
         export_result = exporter.export_all(
             groups,
             staging_dir=cfg.staging_dir,
@@ -601,6 +629,12 @@ def run_pipeline(
         # tab (run summary) and the per-run log.
         "provider_diagnostics": provider_diagnostics,
     }
+    if selection_result is not None:
+        result["selection"] = {
+            "selected_count": selection_result.provenance["selected_count"],
+            "rejected_count": selection_result.provenance["rejected_count"],
+            "decisions": selection_result.provenance["decisions"],
+        }
     if export_result is not None:
         result["export"] = {
             "releases_exported": export_result.releases_exported,

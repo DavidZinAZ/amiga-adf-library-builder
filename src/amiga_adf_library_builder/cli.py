@@ -168,6 +168,27 @@ def build_parser() -> argparse.ArgumentParser:
              "the identical staging tree.",
     )
     export_cmd.add_argument("--json", action="store_true", help="emit JSON result")
+    # (GH-107 Slice 6) 1G1R export controls
+    export_cmd.add_argument(
+        "--1g1r", action="store_true", default=True, dest="one_per_game",
+        help="select one release per game (1G1R) before export "
+             "(default: True; --no-1g1r disables)",
+    )
+    export_cmd.add_argument(
+        "--no-1g1r", action="store_false", dest="one_per_game",
+        help="disable 1G1R selection; export all releases",
+    )
+    export_cmd.add_argument(
+        "--operator-decisions", type=str, default=None,
+        metavar="PATH",
+        help="path to persisted operator decisions JSON "
+             "(curation/1g1r_decisions.json)",
+    )
+    export_cmd.add_argument(
+        "--selection-manifest", type=str, default=None,
+        metavar="PATH",
+        help="write selection manifest JSON to PATH",
+    )
 
     gate_cmd = commands.add_parser(
         "verify-export-gate",
@@ -554,6 +575,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 run_id=args.run_id,
                 verified_artwork_width=artwork_mod.ARTWORK_MAX_W,
                 verified_artwork_height=artwork_mod.ARTWORK_MAX_H,
+                one_per_game=bool(args.one_per_game),
+                operator_decisions_path=getattr(args, "operator_decisions", None),
+                selection_manifest_path=getattr(args, "selection_manifest", None),
                 local_media_config_path=getattr(args, "config", None),
                 rtfm_config_path=getattr(args, "config", None),
                 playmatch_config_path=getattr(args, "playmatch_config", None) or getattr(args, "config", None),

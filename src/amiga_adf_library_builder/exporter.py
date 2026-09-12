@@ -504,6 +504,43 @@ def export_all(
     return result
 
 
+def write_export_manifest(
+    result: ExportResult,
+    selection_result: Optional[object],
+    path: Path,
+) -> None:
+    """Write a combined export+selection manifest for provenance.
+
+    Machine-readable JSON consumed by the GUI preview and audit trails.
+    """
+    import json as _json
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": 1,
+        "run_id": result.run_id,
+        "staging_root": str(result.staging_root),
+        "releases_exported": result.releases_exported,
+        "folders_written": result.folders_written,
+        "files_written": result.files_written,
+        "conflicts": result.conflicts,
+        "skipped_quarantined": result.skipped_quarantined,
+        "errors": result.errors,
+        "export_gate_open": result.export_gate_open,
+        "export_gate_reason": result.export_gate_reason,
+    }
+    if selection_result is not None:
+        payload["selection"] = {
+            "selected_count": selection_result.provenance["selected_count"],
+            "rejected_count": selection_result.provenance["rejected_count"],
+            "decisions": selection_result.provenance["decisions"],
+        }
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(_json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+
+
 def _ext_root(group: ReleaseGroup) -> str:
     ext = (group.ext or "adf").lower()
     return "ADF" if ext == "adf" else "DSK"

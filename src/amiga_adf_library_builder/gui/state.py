@@ -17,12 +17,14 @@ The authoritative mapping (from ``cli.py``):
     --require-artwork        -> require_artwork
     --verify-only            -> verify_only
     --export-gate-acknowledged -> upstream_task_closed
+    --1g1r / --no-1g1r      -> one_per_game
+    --operator-decisions     -> operator_decisions_path
+    --selection-manifest     -> selection_manifest_path
 
 The CLI additionally passes ``--config`` as the provider-config file (which is
 also where ``[playmatch]`` / ``[hasheous]`` live); the GUI passes the same file
 path, or an explicit provider config path, to ``run_pipeline``.
 """
-
 from __future__ import annotations
 
 import os
@@ -53,7 +55,7 @@ class GuiState:
     quarantine_dir: str = ""
     cache_dir: str = ""
 
-    # --- run-mode toggles -----------------------------------------------------
+    # --- run-mode toggles ----------------------------------------------------
     online: bool = False
     refresh_metadata: bool = False
     require_artwork: bool = False
@@ -66,23 +68,23 @@ class GuiState:
     include_artwork: bool = True
     include_manuals_rtfm: bool = True
 
-    # --- build vs export -------------------------------------------------------
+    # --- build vs export -----------------------------------------------------
     # The pipeline's ``export=`` flag is driven by the chosen run mode, not a
     # raw GUI checkbox, but the GUI records the intent here.
     run_mode: str = "build"  # "build" | "export"
 
-    # --- (GH-102) Progressive JPEG conversion policy ---------------------------
+    # --- (GH-102) Progressive JPEG conversion policy -------------------------
     convert_progressive_jpeg: str = "never"
     # Per-image progressive-conversion prompt callback. None disables prompting.
     progressive_prompt_callback: Optional[Callable[[str, str], bool]] = field(default=None)
 
-    # --- provider config ------------------------------------------------------
+    # --- provider config -----------------------------------------------------
     # Optional explicit provider-config TOML path (where [playmatch]/[hasheous]
     # live). When empty, the GUI's own config file is used (same as ``--config``
     # in the CLI). Secrets are NOT here.
     provider_config_path: str = ""
 
-    # --- (GH-33) LaunchBox local folder mappings -------------------------------
+    # --- (GH-33) LaunchBox local folder mappings -----------------------------
     # GUI-only LOCAL mappings (no network): image/media roots with an explicit
     # LaunchBox asset type, plus manual-document roots (PDF/TXT). Each media
     # root is {"path": str, "asset_type": str}. Empty = no GUI mappings, which
@@ -90,6 +92,11 @@ class GuiState:
     # (CLI<->GUI equivalence preserved).
     launchbox_media_roots: list[dict] = field(default_factory=list)
     launchbox_manual_roots: list[str] = field(default_factory=list)
+
+    # --- (GH-107 Slice 6) 1G1R selection controls -----------------------------
+    one_per_game: bool = True
+    operator_decisions_path: str = ""
+    selection_manifest_path: str = ""
 
 
 def build_path_config_from_gui_state(
@@ -121,7 +128,7 @@ def build_path_config_from_gui_state(
     return cfg
 
 
-# --- (GH-33) LaunchBox GUI mappings -> provider config -------------------------
+# --- (GH-33) LaunchBox GUI mappings -> provider config ---------------------
 
 
 def _launchbox_mappings(state: GuiState) -> tuple[list[dict], list[str]]:
@@ -227,6 +234,9 @@ def build_pipeline_kwargs(
       * export_gate_acknowledged -> upstream_task_closed
       * verify_only            -> verify_only            (export only)
       * export=                -> (state.run_mode == "export")
+      * one_per_game           -> one_per_game
+      * operator_decisions_path -> operator_decisions_path
+      * selection_manifest_path -> selection_manifest_path
       * provider config paths  -> playmatch/hasheous/rtfm/local_media config paths
 
     Provider config paths: the GUI passes the same file the CLI would
@@ -275,6 +285,10 @@ def build_pipeline_kwargs(
         "include_manuals_rtfm": bool(state.include_manuals_rtfm),
         "export": (state.run_mode == "export"),
         "verify_only": bool(state.verify_only),
+        # (GH-107 Slice 6) 1G1R selection controls
+        "one_per_game": bool(state.one_per_game),
+        "operator_decisions_path": state.operator_decisions_path or None,
+        "selection_manifest_path": state.selection_manifest_path or None,
         # CLI-equivalent verified artwork dimensions for the exporter gate.
         "verified_artwork_width": ARTWORK_MAX_W,
         "verified_artwork_height": ARTWORK_MAX_H,
