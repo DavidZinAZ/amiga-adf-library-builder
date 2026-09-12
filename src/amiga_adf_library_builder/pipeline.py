@@ -442,6 +442,7 @@ def run_pipeline(
             convert_progressive_jpeg=convert_progressive_jpeg,
             # (GH-102) Forward per-image progressive-conversion prompt callback.
             progressive_prompt_callback=progressive_prompt_callback,
+            library_root=library_root,
         )
         _act(
             f"Export finished: {export_result.releases_exported} release(s), "

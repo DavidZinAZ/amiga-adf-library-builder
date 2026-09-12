@@ -346,9 +346,22 @@ class TestLoadCanonicalLibrary:
 
 class TestExporterCanonicalWiring:
     def test_get_canonical_basename_returns_proposed(self, tmp_path):
-        db = tmp_path / "canonical.db"
+        db = tmp_path / "library" / "curation" / "canonical.db"
+        db.parent.mkdir(parents=True, exist_ok=True)
         canon = _setup_canon(db)
         rid = canon.releases_for_game("test-game")[0]
+        from amiga_adf_library_builder.canonical import Provenance, SourceAuthority
+        canon.claim_field(
+            "release",
+            rid,
+            "release_key",
+            "test-game-Platinum-Edition-USA-EN-Acme",
+            Provenance(
+                source="operator",
+                authority=SourceAuthority.CURATION,
+                observed_at="2026-09-12T00:00:00+00:00",
+            ),
+        )
         canon.close()
 
         from amiga_adf_library_builder.canonical_naming import export_name_for_release_group
@@ -374,9 +387,14 @@ class TestExporterCanonicalWiring:
             is_complete=True,
         )
         staging = tmp_path / "staging" / "run1"
-        basename, prov = _get_canonical_basename(grp, staging)
+        basename, prov = _get_canonical_basename(grp, staging, library_root=tmp_path / "library")
         assert basename
-        assert "Platinum" in prov or "fallback" in prov
+        assert "Platinum" in prov
+        assert "fallback" not in prov
+        # Explicit: canonical basename must differ from release_basename fallback
+        # for this fixture, so the fallback branch can never satisfy this test.
+        from amiga_adf_library_builder.naming import release_basename
+        assert basename != release_basename(grp)
 
     def test_get_canonical_basename_fallback(self, tmp_path):
         from amiga_adf_library_builder.exporter import _get_canonical_basename
@@ -394,6 +412,82 @@ class TestExporterCanonicalWiring:
             has_main_disk=True, is_complete=True,
         )
         staging = tmp_path / "staging" / "run1"
-        basename, prov = _get_canonical_basename(grp, staging)
+        # No library_root => falls back without inspecting staging layout.
+        basename, prov = _get_canonical_basename(grp, staging, library_root=None)
         assert basename
         assert "fallback" in prov
+
+
+class TestExporterCanonicalIntegrationProductionLayout:
+    """Real default-production-layout integration:
+
+    library_root/work/staging/<run>  +  library_root/curation/canonical.db
+
+    Proves that when canonical DB is present, export_release writes the
+    canonical basename to disk (not release_basename fallback).
+    """
+
+    def test_exported_folder_matches_canonical_basename(self, tmp_path):
+        library_root = tmp_path / "library"
+        curation_dir = library_root / "curation"
+        curation_dir.mkdir(parents=True)
+        db_path = curation_dir / "canonical.db"
+        canon = _setup_canon(db_path)
+        rid = canon.releases_for_game("test-game")[0]
+        from amiga_adf_library_builder.canonical import Provenance, SourceAuthority
+        canon.claim_field(
+            "release",
+            rid,
+            "release_key",
+            "test-game-Platinum-Edition-USA-EN-Acme",
+            Provenance(
+                source="operator",
+                authority=SourceAuthority.CURATION,
+                observed_at="2026-09-12T00:00:00+00:00",
+            ),
+        )
+        canon.close()
+
+        from amiga_adf_library_builder.canonical_naming import export_name_for_release_group
+        from amiga_adf_library_builder.exporter import export_release, _get_canonical_basename
+        from amiga_adf_library_builder.models import ParsedRecord
+
+        rec = parse_filename("Test_Game_-_Disk_1.adf")
+        rec.title = "Test Game"
+        rec.disk_number = 1
+        grp = ReleaseGroup(
+            release_key="test-game-Platinum-Edition-USA-EN-Acme",
+            title="Test Game",
+            edition="Platinum Edition",
+            group="SKR",
+            chipset="AGA",
+            language="EN",
+            version="v2.0",
+            alt_marker="a",
+            ext="adf",
+            records=[rec],
+            disks=[rec],
+            specials=[],
+            has_main_disk=True,
+            is_complete=True,
+        )
+
+        # Compute canonical basename using the REAL library root.
+        staging_root = library_root / "work" / "staging" / "run1"
+        basename, prov = _get_canonical_basename(grp, staging_root, library_root=library_root)
+        assert "Platinum" in prov
+        assert "fallback" not in prov
+
+        # Export through the real path. export_release gets basename override.
+        written, unchanged, conflicts = export_release(
+            grp,
+            staging_root,
+            basename=basename,
+        )
+
+        # The folder on disk must use the canonical basename.
+        adf_dir = staging_root / "ADF" / basename
+        assert adf_dir.exists(), f"expected {adf_dir} to exist; written={written}"
+        # And it must NOT be the release_basename fallback.
+        from amiga_adf_library_builder.naming import release_basename
+        assert basename != release_basename(grp)

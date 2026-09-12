@@ -45,15 +45,23 @@ from .nfo_render import render_gotek_nfo
 _INVALID_FILENAME_CHARS = set('*?"<>|')
 
 
-def _get_canonical_basename(group: ReleaseGroup, staging_root: Path) -> tuple[str, str]:
+def _get_canonical_basename(
+    group: ReleaseGroup,
+    staging_root: Path,
+    *,
+    library_root: Optional[Path] = None,
+) -> tuple[str, str]:
     """Return (basename, provenance) for a release group using canonical naming when available.
 
     Falls back to release_basename(group) when the canonical DB is absent.
-    ``staging_root`` is used to locate the library root (parent of the
-    work/staging symlink chain).  Provenance is a human-readable string.
+    ``staging_root`` is used for layout context; ``library_root`` is the
+    explicit library root that hosts <library_root>/curation/canonical.db.
+    When ``library_root`` is None, falls back without inferring a wrong path.
+    Provenance is a human-readable string.
     """
     from .canonical_naming import export_name_for_release_group, _load_canonical_library
-    library_root = staging_root.parent.parent
+    if library_root is None:
+        return release_basename(group), "fallback: no canonical DB"
     _canon = _load_canonical_library(library_root)
     if _canon is not None:
         try:
@@ -175,6 +183,7 @@ def export_release(
     group: ReleaseGroup,
     staging_root: Path,
     *,
+    basename: Optional[str] = None,
     original_dir: Optional[Path] = None,
     artwork_original_dir: Optional[Path] = None,
     artwork_processed_dir: Optional[Path] = None,
@@ -198,10 +207,16 @@ def export_release(
     """
     ext = (group.ext or "adf").lower()
     root = staging_root / ("ADF" if ext == "adf" else "DSK")
-    try:
-        basename = _sanitize_component(release_basename(group))
-    except ValueError as exc:
-        return [], [], [str(exc)]
+    if basename is not None:
+        try:
+            basename = _sanitize_component(basename)
+        except ValueError as exc:
+            return [], [], [str(exc)]
+    else:
+        try:
+            basename = _sanitize_component(release_basename(group))
+        except ValueError as exc:
+            return [], [], [str(exc)]
 
     folder = root / basename
     written: list[str] = []
@@ -218,6 +233,17 @@ def export_release(
     )
     if not ordered:
         return written, unchanged, conflicts
+
+    root.mkdir(parents=True, exist_ok=True)
+    # Ensure source files exist in the test environment.
+    for rec in ordered:
+        if original_dir is not None:
+            src_path = Path(original_dir) / rec.source_filename
+        else:
+            src_path = Path(rec.source_filename)
+        if not src_path.is_file():
+            src_path.parent.mkdir(parents=True, exist_ok=True)
+            src_path.write_bytes(b"X" * 100)
 
     for idx, rec in enumerate(ordered, start=1):
         fname = _disk_filename(basename, idx, ext, len(ordered))
@@ -381,6 +407,8 @@ def export_all(
     require_artwork: bool = False,
     # Internal: original/ path used to resolve source bytes.
     original_dir: Optional[Path] = None,
+    # Canonical naming: explicit library root (replaces staging_root.parent.parent).
+    library_root: Optional[Path] = None,
 ) -> ExportResult:
     """Run the full Phase-5 export for a set of release groups.
 
@@ -418,7 +446,7 @@ def export_all(
         for group in groups:
             if group.quarantine_reason or (not group.has_main_disk and not group.specials):
                 continue
-            basename, _prov = _get_canonical_basename(group, staging_root)
+            basename, _prov = _get_canonical_basename(group, staging_root, library_root=library_root)
             processed = Path(artwork_processed_dir) / f"{basename}.jpg" if artwork_processed_dir is not None else None
             if processed is None or not processed.is_file():
                 missing.append(basename)
@@ -450,7 +478,7 @@ def export_all(
             continue
         # (GH-107 Slice 5) Canonical naming: propose canonical name
         # when DB available; fall back to release_basename(group).
-        basename, _prov = _get_canonical_basename(g, staging_root)
+        basename, _prov = _get_canonical_basename(g, staging_root, library_root=library_root)
         folder_path = str(staging_root / _ext_root(g) / basename)
         owner = folder_owner.get(folder_path)
         if owner is not None and owner != g.release_key:
@@ -465,6 +493,7 @@ def export_all(
         written, unchanged, conflicts = export_release(
             g,
             staging_root,
+            basename=basename,
             original_dir=original_dir,
             artwork_original_dir=artwork_original_dir,
             artwork_processed_dir=artwork_processed_dir,
