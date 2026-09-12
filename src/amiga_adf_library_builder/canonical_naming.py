@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import os
 import re
+import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -489,3 +490,24 @@ def _slugify_title(title: str) -> str:
 def _sanitize_component(value: str) -> str:
     """Re-use the exporter's FAT32 sanitizer (same contract)."""
     return _base_sanitize(value)
+
+
+def _load_canonical_library(library_root: Path) -> Optional["CanonicalLibrary"]:
+    """Open the canonical.db for this library, or return None.
+
+    The DB lives at <library_root>/curation/canonical.db (the same
+    path pipeline.py uses in _persist_canonical_library).  Returns
+    None when the DB does not exist yet or cannot be opened — callers
+    fall back to release_basename(group).
+    """
+    try:
+        from .canonical import CanonicalLibrary
+    except ImportError:  # pragma: no cover
+        return None
+    db_path = library_root / "curation" / "canonical.db"
+    if not db_path.is_file():
+        return None
+    try:
+        return CanonicalLibrary(db_path)
+    except (OSError, sqlite3.Error):
+        return None

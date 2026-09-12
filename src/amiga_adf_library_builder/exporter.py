@@ -45,6 +45,25 @@ from .nfo_render import render_gotek_nfo
 _INVALID_FILENAME_CHARS = set('*?"<>|')
 
 
+def _get_canonical_basename(group: ReleaseGroup, staging_root: Path) -> tuple[str, str]:
+    """Return (basename, provenance) for a release group using canonical naming when available.
+
+    Falls back to release_basename(group) when the canonical DB is absent.
+    ``staging_root`` is used to locate the library root (parent of the
+    work/staging symlink chain).  Provenance is a human-readable string.
+    """
+    from .canonical_naming import export_name_for_release_group, _load_canonical_library
+    library_root = staging_root.parent.parent
+    _canon = _load_canonical_library(library_root)
+    if _canon is not None:
+        try:
+            _cn = export_name_for_release_group(_canon, group)
+            return _cn.basename, _cn.provenance_text
+        finally:
+            _canon.close()
+    return release_basename(group), "fallback: no canonical DB"
+
+
 @dataclass
 class ExportResult:
     run_id: str
@@ -399,7 +418,7 @@ def export_all(
         for group in groups:
             if group.quarantine_reason or (not group.has_main_disk and not group.specials):
                 continue
-            basename = release_basename(group)
+            basename, _prov = _get_canonical_basename(group, staging_root)
             processed = Path(artwork_processed_dir) / f"{basename}.jpg" if artwork_processed_dir is not None else None
             if processed is None or not processed.is_file():
                 missing.append(basename)
@@ -429,11 +448,9 @@ def export_all(
         if not g.has_main_disk and not g.specials:
             result.skipped_quarantined.append(g.release_key)
             continue
-        try:
-            basename = _sanitize_component(release_basename(g))
-        except ValueError as exc:
-            result.conflicts.append(str(exc))
-            continue
+        # (GH-107 Slice 5) Canonical naming: propose canonical name
+        # when DB available; fall back to release_basename(group).
+        basename, _prov = _get_canonical_basename(g, staging_root)
         folder_path = str(staging_root / _ext_root(g) / basename)
         owner = folder_owner.get(folder_path)
         if owner is not None and owner != g.release_key:

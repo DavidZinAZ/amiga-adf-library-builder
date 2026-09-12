@@ -26,6 +26,10 @@ from .models import ParsedRecord, ReleaseGroup, ScanRecord, StagedLibrary, Stage
 from .file_identity import FileIdentityStore
 from .parser import parse_filename
 from .naming import release_basename
+from .canonical_naming import (
+    export_name_for_release_group,
+    _load_canonical_library,
+)
 from .paths import PathConfig
 
 # Monotonic, process-global counter that guarantees a unique run identifier even
@@ -475,6 +479,20 @@ def run_pipeline(
                 "ok": True,
                 "error": None,
             })
+        # (GH-107 Slice 5) Canonical naming: propose the canonical export
+        # name when the canonical DB is available; fall back to
+        # release_basename(group) when no canonical match exists.
+        _canon = _load_canonical_library(library_root)
+        if _canon is not None:
+            try:
+                _cn = export_name_for_release_group(_canon, g)
+                _folder = _cn.basename
+                _canon_prov = _cn.provenance_text
+            finally:
+                _canon.close()
+        else:
+            _folder = release_basename(g)
+            _canon_prov = "fallback: no canonical DB"
         per_group.append(
             {
                 "release_key": g.release_key,
@@ -502,7 +520,14 @@ def run_pipeline(
                 "source_files": [rec.source_filename for rec in (g.disks + g.specials)],
                 # (GH-86) Planned export folder basename (release_basename is the
                 # single canonical naming source; honours operator folder override).
-                "folder": release_basename(g),
+                # (GH-107 Slice 5) "folder" uses the canonical proposed name when
+                # the canonical DB is available, else falls back to release_basename.
+                "folder": _folder,
+                # (GH-107 Slice 5) Provenance for the proposed folder name.
+                "canonical_proposed_name": {
+                    "basename": _folder,
+                    "provenance": _canon_prov,
+                },
             }
         )
 
