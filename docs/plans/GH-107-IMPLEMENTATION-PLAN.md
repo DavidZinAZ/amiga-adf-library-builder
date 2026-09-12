@@ -26,8 +26,8 @@ pre-repair main was `05c77b79318ddd73f4011e3ee44d13f8cdb3d872`).
 | Slice | Description | Status |
 |------|-------------|--------|
 | **1** | **Metadata Source Manager + DAT indexing/storage foundation** — GUI tab "Metadata Sources" (Add DAT / Add Folder / Rescan / Reindex Changed / Remove), local SQLite index `metadata_source_entries`, source enable/disable controls, raw DAT read-only, synthetic `tests/fixtures/sample.dat` parser tests. | **DONE** (semantic PASS after provenance repair — see Slice 1 closeout below) |
-| **2** | Persistent hash‑based file identity & curation memory. | **PLANNED — not started** |
-| **3** | Canonical game/release data model & provenance. | PLANNED |
+| **2** | Persistent hash‑based file identity & curation memory. | **DONE** (semantic PASS — see Slice 2 closeout below; APPLICATION_SHA `f0365799d0f551c30a9870150d0a27e7e35a2772`, merge `f204c2f...`) |
+| **3** | Canonical game/release data model & provenance. | **ACTIVE** (implemented-awaiting-QA — see Slice 3 closeout below) |
 | **4** | Unified manual lookup UI. | PLANNED |
 | **5** | Canonical naming / export policy layer. | PLANNED |
 | **6** | 1G1R selection & export engine. | PLANNED |
@@ -78,6 +78,50 @@ QA verdict PASS (t_3e2bc459); PR #115 (head `6f429d8180c7b5fc29eb9aaf6149115ae8a
 docs-only); merge/final main `f204c2f296552f6af8015be4dca4f31a1332bf7f`;
 ancestry `merge-base --is-ancestor f0365799... origin/main` exit 0 (verified live at closeout).
 Next planned slice: **Slice 3** (canonical release/provenance semantics) — NOT STARTED.
+
+## Slice 3 — ACTIVE (implemented-awaiting-QA, 2026-09-11)
+
+Canonical Game / Release / Disk(/File) domain model with per-field provenance,
+conflict preservation, deterministic precedence, migration, and production
+integration. DEV candidate t_d8615948; QA bound to the exact APPLICATION_SHA
+reported at DEV terminalization.
+
+- Module: `src/amiga_adf_library_builder/canonical.py` —
+  `Game` (slug-anchored abstract title identity), `Release` (deterministic
+  `release_id = game_id + descriptor hash` for edition/region/language/
+  publisher), `Disk` (content-anchored `disk_id = sha256:...`, multi-disk
+  ordering, optional Slice 2 `FileIdentityStore` linkage), `Provenance` /
+  `CanonicalField` (conflicting claims preserved, never overwritten),
+  `CanonicalLibrary` (SQLite `canonical.db`, PRAGMA user_version v1
+  deterministic migration), `migrate_staged_library()` (backwards-compatible
+  import of existing staged state; staged JSON untouched).
+- Documented precedence rule (module docstring, binding): curation (operator
+  staged decisions) > curation_memory (hash-bound operator memory, Slice 2)
+  > DAT knowledge sources (ranked by authority_rank, then confidence, then
+  most recent observation; total stable tiebreak by source/record/url/value)
+  > parser/filename derivations. Manual curation claims can never be
+  outranked by later automated refreshes because the authority tier dominates
+  the comparison.
+- Production integration: `build_staged_library_from_result()` now persists
+  the canonical model to `<library_root>/curation/canonical.db` on every
+  staged build/rescan (best-effort; staged state file remains the curation
+  authority). QA can reach the model by running a staged build and opening
+  `curation/canonical.db`.
+- Tests: `tests/test_canonical_model.py` (20 tests) — multi-release/multi-disk,
+  conflict preservation, precedence, manual override vs. provider refresh
+  (model and pipeline path), migration incl. idempotency and no-identity-store
+  graceful degradation, real integration through
+  `build_staged_library_from_result` (canonical.db created, survives rescan,
+  failure isolation).
+- Per-file suite evidence (QT_QPA_PLATFORM=offscreen): all
+  `tests/test_*.py` files green except 3 failures byte-identical on pristine
+  BASE (`test_gui_window_geometry`, `test_gui_wording_plain_language`,
+  `test_qa_issue15_equiv`) — pre-existing, unrelated to Slice 3. Single-process
+  full-suite runs abort in PySide6 offscreen (reproduced byte-equivalently on
+  BASE; environmental). Focused suites green: canonical 20, file_identity 24,
+  metadata_source 23, gh80 29, gh93 17+21, gh88_89 21, pipeline 9.
+- No Slice 4 work started (no lookup UX, no source-browser redesign, no
+  filename/export policy, no 1G1R).
 
 ## Governance notes
 
