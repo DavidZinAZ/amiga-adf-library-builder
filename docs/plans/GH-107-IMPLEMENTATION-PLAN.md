@@ -52,7 +52,7 @@ Verification evidence:
 - Raw DAT read-only, SQLite persistence/reopen, add/rescan/reindex/enable-disable/remove are covered by the passing `test_metadata_source.py` suite.
 - Windows (PR #113 head `f30384446e6e9ebb4769892e0999603a72bef97d`): `Build Windows GUI` run 34647172197 SUCCESS (all steps incl. onedir+onefile build and GUI smoke test); `QA Windows real execution` run 34647172196 SUCCESS (all steps; downloaded `report.json` shows every real-Windows step `ok: true` — clean launch, portable layout under a path with spaces, settings persistence, theme switch, logs, no-crash failure path). Full evidence in `/archive01/dumbo/project-planner/amiga-adf-library-builder/GH-107/SLICE1-REPAIR.md`.
 
-## Slice 2 — PUBLISHED (2026-09-11)
+## Slice 2 — DONE (2026-09-11)
 
 - Branch: `dev/gh-107-slice2-549da21` (BASE `549da214327ec1d51eb929e65aba17219a7c8a92`).
 - QA PASS for APPLICATION_SHA `f0365799d0f551c30a9870150d0a27e7e35a2772`
@@ -71,6 +71,13 @@ surviving rescan/reopen, with curation decisions bound to content hashes.
 
 Do not start Slice 2 work until this plan's Slice 1 closeout above shows the
 semantic PASS merge on origin/main.
+
+Status: **DONE** — terminal closeout PASS (Hannibal, t_0ea7adb5, 2026-09-11).
+Evidence block: APPLICATION_SHA `f0365799d0f551c30a9870150d0a27e7e35a2772`;
+QA verdict PASS (t_3e2bc459); PR #115 (head `6f429d8180c7b5fc29eb9aaf6149115ae8a5cdd6`,
+docs-only); merge/final main `f204c2f296552f6af8015be4dca4f31a1332bf7f`;
+ancestry `merge-base --is-ancestor f0365799... origin/main` exit 0 (verified live at closeout).
+Next planned slice: **Slice 3** (canonical release/provenance semantics) — NOT STARTED.
 
 ## Governance notes
 
