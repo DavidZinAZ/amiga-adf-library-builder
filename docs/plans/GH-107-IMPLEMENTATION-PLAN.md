@@ -27,7 +27,7 @@ pre-repair main was `05c77b79318ddd73f4011e3ee44d13f8cdb3d872`).
 |------|-------------|--------|
 | **1** | **Metadata Source Manager + DAT indexing/storage foundation** — GUI tab "Metadata Sources" (Add DAT / Add Folder / Rescan / Reindex Changed / Remove), local SQLite index `metadata_source_entries`, source enable/disable controls, raw DAT read-only, synthetic `tests/fixtures/sample.dat` parser tests. | **DONE** (semantic PASS after provenance repair — see Slice 1 closeout below) |
 | **2** | Persistent hash‑based file identity & curation memory. | **DONE** (semantic PASS — see Slice 2 closeout below; APPLICATION_SHA `f0365799d0f551c30a9870150d0a27e7e35a2772`, merge `f204c2f...`) |
-| **3** | Canonical game/release data model & provenance. | **ACTIVE** (implemented-awaiting-QA — see Slice 3 closeout below) |
+| **3** | Canonical game/release data model & provenance. | **DONE** — PUBLISHED (see Slice 3 closeout below; APPLICATION_SHA `85fd0136733dd2a826e3f8f85e33cc61c48471f3`, merge `8e85a44...`) |
 | **4** | Unified manual lookup UI. | PLANNED |
 | **5** | Canonical naming / export policy layer. | PLANNED |
 | **6** | 1G1R selection & export engine. | PLANNED |
@@ -77,9 +77,9 @@ Evidence block: APPLICATION_SHA `f0365799d0f551c30a9870150d0a27e7e35a2772`;
 QA verdict PASS (t_3e2bc459); PR #115 (head `6f429d8180c7b5fc29eb9aaf6149115ae8a5cdd6`,
 docs-only); merge/final main `f204c2f296552f6af8015be4dca4f31a1332bf7f`;
 ancestry `merge-base --is-ancestor f0365799... origin/main` exit 0 (verified live at closeout).
-Next planned slice: **Slice 3** (canonical release/provenance semantics) — NOT STARTED.
+Next planned slice: **Slice 4** (unified manual lookup UI) — NOT STARTED.
 
-## Slice 3 — ACTIVE (implemented-awaiting-QA, 2026-09-11)
+## Slice 3 — DONE (published 2026-09-12)
 
 Canonical Game / Release / Disk(/File) domain model with per-field provenance,
 conflict preservation, deterministic precedence, migration, and production
@@ -120,6 +120,13 @@ reported at DEV terminalization.
   full-suite runs abort in PySide6 offscreen (reproduced byte-equivalently on
   BASE; environmental). Focused suites green: canonical 20, file_identity 24,
   metadata_source 23, gh80 29, gh93 17+21, gh88_89 21, pipeline 9.
+- Publication evidence block: APPLICATION_SHA `85fd0136733dd2a826e3f8f85e33cc61c48471f3`
+  (identical to QA-tested candidate; QA verdict PASS t_d14601b9); PR #117
+  (head `85fd0136733dd2a826e3f8f85e33cc61c48471f3`, no docs-only commit —
+  PR head == QA SHA); merge/final main `8e85a44ddadb0b3538eb9d5bf61935c223aea9c8`;
+  ancestry `merge-base --is-ancestor 85fd013... origin/main` exit 0 (verified
+  live at closeout); required CI green including both Windows lanes
+  (Build Windows standalone / PyInstaller, Real Windows GUI qualification).
 - No Slice 4 work started (no lookup UX, no source-browser redesign, no
   filename/export policy, no 1G1R).
 
