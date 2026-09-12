@@ -52,7 +52,18 @@ Verification evidence:
 - Raw DAT read-only, SQLite persistence/reopen, add/rescan/reindex/enable-disable/remove are covered by the passing `test_metadata_source.py` suite.
 - Windows (PR #113 head `f30384446e6e9ebb4769892e0999603a72bef97d`): `Build Windows GUI` run 34647172197 SUCCESS (all steps incl. onedir+onefile build and GUI smoke test); `QA Windows real execution` run 34647172196 SUCCESS (all steps; downloaded `report.json` shows every real-Windows step `ok: true` — clean launch, portable layout under a path with spaces, settings persistence, theme switch, logs, no-crash failure path). Full evidence in `/archive01/dumbo/project-planner/amiga-adf-library-builder/GH-107/SLICE1-REPAIR.md`.
 
-## Slice 2 — exact next planned slice (NOT STARTED)
+## Slice 2 — PUBLISHED (2026-09-11)
+
+- Branch: `dev/gh-107-slice2-549da21` (BASE `549da214327ec1d51eb929e65aba17219a7c8a92`).
+- QA PASS for APPLICATION_SHA `f0365799d0f551c30a9870150d0a27e7e35a2772`
+  (QA task t_3e2bc459: store probes 17/17, real-flow integration 11/11,
+  focused suites 144/144 green; only pre-existing BASE-reproduced failures;
+  Windows packaged qualification deferred to publication CI Windows lanes).
+- FileIdentityStore wired into rescan/carry_over: GUI instantiates
+  FileIdentityStore(data_dir/identity.db) and threads it with original_dir through
+  build_staged_library_from_result into StagedLibrary.carry_over's content-hash
+  second pass; release_key-only fallback preserved (GH-99 behavior).
+
 
 Persistent hash-based file identity and curation memory:
 SHA-256/SHA-1/MD5/CRC32 file identity records persisted in the same SQLite store,

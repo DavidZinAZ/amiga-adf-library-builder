@@ -3,11 +3,15 @@
 Builds isolated temporary layouts with synthetic fixtures only. No maintainer
 collection, host path, or external corpus is required.
 """
+import hashlib
+import json
+import tempfile
 from pathlib import Path
 
 import pytest
 
 from amiga_adf_library_builder.exporter_guard import export_gate_open
+from amiga_adf_library_builder.file_identity import FileIdentityStore
 from amiga_adf_library_builder.paths import PathConfig, resolve_config
 from amiga_adf_library_builder.pipeline import run_pipeline, build_staged_library_from_result
 
@@ -270,3 +274,185 @@ def test_build_staged_library_writes_to_curation_not_output(tmp_path: Path) -> N
     assert len(entry.adf_files) == 4
     assert entry.folder == "Gh86 Space Tactics"
     assert entry.curation_state.value == "pending"
+
+
+def _sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _make_adf(original_dir: Path, name: str, data: bytes) -> Path:
+    """Create a synthetic ADF file in the original directory."""
+    p = original_dir / name
+    p.write_bytes(data)
+    return p
+
+
+def test_carry_over_by_content_hash_matches_renamed_adf(tmp_path: Path) -> None:
+    """(GH-107 Slice 2) Same content under a new filename carries curation over.
+
+    When identical content reappears at a new path (which yields a different
+    release_key), the content-hash pass must still find the prior curation
+    decision and apply it. Previously only release_key matching existed, which
+    orphaned curation work when the same ADF was re-added under a different name.
+    """
+    # --- Build a "previous" run that produced an entry for release_key X -------
+    original_dir = tmp_path / "original"
+    library_root = tmp_path / "lib"
+    original_dir.mkdir()
+
+    prior_data = b"QUEST-III-CONTENT-V1-SAME"
+    _make_adf(original_dir, "Quest III (Disk 1 of 2).adf", prior_data)
+
+    prev_result = {
+        "run_id": "run-prior",
+        "groups": 1,
+        "per_group": [
+            {
+                "release_key": "Quest_III_OCS_A",
+                "title": "Quest III",
+                "artwork_missing": False,
+                "notes": ["prior note"],
+                "quarantine_reason": None,
+                "source_files": ["Quest III (Disk 1 of 2).adf"],
+                "folder": "Quest III",
+            }
+        ],
+    }
+
+    # Run the prior build WITHOUT identity_store — just to create the file.
+    prev_path = build_staged_library_from_result(
+        prev_result, library_root=library_root, run_id="run-prior"
+    )
+    assert prev_path is not None
+
+    # Manually set curation state in the persisted file to simulate operator work.
+    from amiga_adf_library_builder.library_state import CurationStateManager
+    from amiga_adf_library_builder.models import StagedState
+    prev_mgr = CurationStateManager(prev_path)
+    prev_lib = prev_mgr.load()
+    prev_entry = prev_lib.releases["Quest_III_OCS_A"]
+    prev_entry.curation_state = StagedState.ACCEPTED
+    prev_entry.title = "Quest III (Renamed)"
+    prev_entry.notes = "Operator confirmed this curation"
+    prev_mgr.save(prev_lib)
+
+    # --- Build an identity store and remember the decision by content hash ----
+    identity_db = tmp_path / "data" / "identity.db"
+    store = FileIdentityStore(identity_db)
+    sha256 = _sha256_bytes(prior_data)
+    store.remember_decision(
+        sha256,
+        release_key="Quest_III_OCS_A",
+        curation_state="accepted",
+        title="Quest III (Renamed)",
+        notes="Operator confirmed this curation",
+    )
+
+    # --- Build a "current" run where SAME content appears under a DIFFERENT name -
+    new_result = {
+        "run_id": "run-current",
+        "groups": 1,
+        "per_group": [
+            {
+                "release_key": "Quest_III_OCS_B",
+                "title": "Quest III",
+                "artwork_missing": False,
+                "notes": [],
+                "quarantine_reason": None,
+                "source_files": ["Quest III (Disk 1 of 2) (2).adf"],
+                "folder": "Quest III",
+            }
+        ],
+    }
+
+    # Same content, new filename -> new release_key.
+    _make_adf(original_dir, "Quest III (Disk 1 of 2) (2).adf", prior_data)
+
+    # Run the current build WITH identity_store + original_dir.
+    cur_path = build_staged_library_from_result(
+        new_result,
+        library_root=library_root,
+        run_id="run-current",
+        identity_store=store,
+        original_dir=original_dir,
+    )
+    assert cur_path is not None
+
+    # Load and verify: release_key did NOT match, but content-hash should have.
+    cur_mgr = CurationStateManager(cur_path)
+    cur_lib = cur_mgr.load()
+    cur_entry = cur_lib.releases["Quest_III_OCS_B"]
+
+    # The operator's prior curation must be reapplied via content-hash matching.
+    assert cur_entry.curation_state.value == "accepted"
+    assert cur_entry.title == "Quest III (Renamed)"
+    assert cur_entry.notes == "Operator confirmed this curation"
+
+
+def test_carry_over_without_identity_store_falls_back_to_release_key(
+    tmp_path: Path,
+) -> None:
+    """(GH-107 Slice 2) When identity_store is None, release_key pass still works.
+
+    Backward-compatibility: no identity_store param means only release_key
+    matching runs. This preserves the original GH-99 behavior.
+    """
+    original_dir = tmp_path / "original"
+    library_root = tmp_path / "lib"
+    original_dir.mkdir()
+
+    data = b"SAME-CONTENT-DIFFERENT-KEY"
+    _make_adf(original_dir, "Title (Disk 1).adf", data)
+
+    # Prior run: release_key = Title_A
+    prev_result = {
+        "run_id": "prev-fallback",
+        "groups": 1,
+        "per_group": [
+            {
+                "release_key": "Title_A",
+                "title": "Title",
+                "artwork_missing": False,
+                "notes": ["prior"],
+                "quarantine_reason": None,
+                "source_files": ["Title (Disk 1).adf"],
+                "folder": "Title",
+            }
+        ],
+    }
+    prev_path = build_staged_library_from_result(
+        prev_result, library_root=library_root, run_id="prev-fallback"
+    )
+    assert prev_path is not None
+
+    from amiga_adf_library_builder.library_state import CurationStateManager
+    from amiga_adf_library_builder.models import StagedState
+    prev_mgr = CurationStateManager(prev_path)
+    prev_lib = prev_mgr.load()
+    prev_lib.releases["Title_A"].curation_state = StagedState.ACCEPTED
+    prev_mgr.save(prev_lib)
+
+    # Current run: SAME release_key (Title_A) — should match by release_key pass.
+    cur_result = {
+        "run_id": "cur-fallback",
+        "groups": 1,
+        "per_group": [
+            {
+                "release_key": "Title_A",
+                "title": "Title",
+                "artwork_missing": False,
+                "notes": [],
+                "quarantine_reason": None,
+                "source_files": ["Title (Disk 1).adf"],
+                "folder": "Title",
+            }
+        ],
+    }
+    cur_path = build_staged_library_from_result(
+        cur_result, library_root=library_root, run_id="cur-fallback"
+    )
+    assert cur_path is not None
+
+    cur_mgr = CurationStateManager(cur_path)
+    cur_lib = cur_mgr.load()
+    assert cur_lib.releases["Title_A"].curation_state.value == "accepted"

@@ -57,6 +57,7 @@ from PySide6.QtWidgets import (
 from .. import activity_log
 from ..logging_utils import redact
 from ..metadata_source import MetadataSourceManager
+from ..file_identity import FileIdentityStore
 from ..local_media import (
     DEFAULT_MEDIA_ROOT_ASSET_TYPE,
     LAUNCHBOX_IMAGE_CATEGORIES,
@@ -324,6 +325,9 @@ class MainWindow(QMainWindow):
         self._paths.ensure_all()
         self._metadata_manager = MetadataSourceManager(
             self._paths.data_dir / "metadata_sources.db"
+        )
+        self._identity_store = FileIdentityStore(
+            self._paths.data_dir / "identity.db"
         )
         self._settings_store = settings_store or SettingsStore(self._paths.settings_file())
         try:
@@ -2219,6 +2223,8 @@ class MainWindow(QMainWindow):
                     result,
                     library_root=cfg.library_root,
                     run_id=result.get("run_id", "unknown"),
+                    identity_store=self._identity_store,
+                    original_dir=cfg.original_dir,
                 )
                 if state_path and state_path.exists():
                     self._preview_widget.load_state_file(state_path)
