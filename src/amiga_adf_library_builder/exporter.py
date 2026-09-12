@@ -235,15 +235,6 @@ def export_release(
         return written, unchanged, conflicts
 
     root.mkdir(parents=True, exist_ok=True)
-    # Ensure source files exist in the test environment.
-    for rec in ordered:
-        if original_dir is not None:
-            src_path = Path(original_dir) / rec.source_filename
-        else:
-            src_path = Path(rec.source_filename)
-        if not src_path.is_file():
-            src_path.parent.mkdir(parents=True, exist_ok=True)
-            src_path.write_bytes(b"X" * 100)
 
     for idx, rec in enumerate(ordered, start=1):
         fname = _disk_filename(basename, idx, ext, len(ordered))

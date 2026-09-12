@@ -472,6 +472,13 @@ class TestExporterCanonicalIntegrationProductionLayout:
             is_complete=True,
         )
 
+        # Supply a REAL source file in a tmp original_dir so the export
+        # genuinely succeeds on real bytes (no fabricated source).
+        original_dir = tmp_path / "original"
+        original_dir.mkdir()
+        source_bytes = b"REAL-ADF-DATA-" + b"\x00" * 86
+        (original_dir / "Test_Game_-_Disk_1.adf").write_bytes(source_bytes)
+
         # Compute canonical basename using the REAL library root.
         staging_root = library_root / "work" / "staging" / "run1"
         basename, prov = _get_canonical_basename(grp, staging_root, library_root=library_root)
@@ -483,6 +490,7 @@ class TestExporterCanonicalIntegrationProductionLayout:
             grp,
             staging_root,
             basename=basename,
+            original_dir=original_dir,
         )
 
         # The folder on disk must use the canonical basename.
@@ -491,3 +499,81 @@ class TestExporterCanonicalIntegrationProductionLayout:
         # And it must NOT be the release_basename fallback.
         from amiga_adf_library_builder.naming import release_basename
         assert basename != release_basename(grp)
+
+        # The exact expected exported file must exist and match fixture bytes.
+        expected_file = adf_dir / f"{basename}.adf"
+        assert expected_file.is_file(), f"expected {expected_file} to exist"
+        assert expected_file.read_bytes() == source_bytes, "exported bytes must match source"
+
+        # Provenance assertions retained from the original test.
+        assert "Platinum" in prov
+        assert "fallback" not in prov
+
+
+# ---------------------------------------------------------------------------
+# Regression: missing source must NOT fabricate files anywhere
+# ---------------------------------------------------------------------------
+
+
+def test_missing_source_no_fabrication(tmp_path, monkeypatch):
+    """A missing source file must NOT create any file in original_dir, CWD,
+    or the export target, and must return a 'source missing for ...' conflict.
+    """
+    from amiga_adf_library_builder.exporter import export_release
+    from amiga_adf_library_builder.models import ParsedRecord, ReleaseGroup
+    from amiga_adf_library_builder.parser import parse_filename
+
+    original_dir = tmp_path / "original"
+    original_dir.mkdir()
+    staging_root = tmp_path / "staging" / "run1"
+
+    rec = parse_filename("Test_Game_-_Disk_1.adf")
+    rec.title = "Test Game"
+    rec.disk_number = 1
+    grp = ReleaseGroup(
+        release_key="test-game-Platinum-Edition-USA-EN-Acme",
+        title="Test Game",
+        edition="Platinum Edition",
+        group="SKR",
+        chipset="AGA",
+        language="EN",
+        version="v2.0",
+        alt_marker="a",
+        ext="adf",
+        records=[rec],
+        disks=[rec],
+        specials=[],
+        has_main_disk=True,
+        is_complete=True,
+    )
+
+    # Run export with a clean CWD to prove no CWD pollution.
+    clean_cwd = tmp_path / "clean_cwd"
+    clean_cwd.mkdir()
+    monkeypatch.chdir(clean_cwd)
+
+    written, unchanged, conflicts = export_release(
+        grp,
+        staging_root,
+        original_dir=original_dir,
+    )
+
+    # (a) no file created in original_dir
+    assert not any(p.is_file() for p in original_dir.rglob("*")), (
+        f"original_dir should have no files; found: {list(original_dir.rglob('*'))}"
+    )
+
+    # (b) no file created in the process CWD
+    assert not any(p.is_file() for p in clean_cwd.rglob("*")), (
+        f"CWD should have no files; found: {list(clean_cwd.rglob('*'))}"
+    )
+
+    # (c) no .adf exported for that record
+    adf_dir = staging_root / "ADF"
+    exported_adfs = list(adf_dir.rglob("*.adf")) if adf_dir.exists() else []
+    assert not exported_adfs, f"no .adf should be exported; found: {exported_adfs}"
+
+    # (d) conflicts carries the exact missing-source entry
+    assert any("source missing for Test_Game_-_Disk_1.adf" in c for c in conflicts), (
+        f"expected 'source missing for ...' in conflicts; got {conflicts}"
+    )
