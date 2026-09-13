@@ -440,7 +440,7 @@ class TestF4FreshRegionLanguageCanonical:
 
         lib = CanonicalLibrary(tmp_path / "canonical.db")
         en = self._staged_entry("game||||en|", "Game", ["a.adf"], region="USA", language="EN")
-        de = self._staged_entry("game||||de|", "Game", ["b.adf"], region="DE", language="DE")
+        de = self._staged_entry("game||||de|", "Game", ["b.adf"], region="DE", language="EN")
         stats = migrate_staged_library(StagedLibrary(releases={"game||||en|": en, "game||||de|": de}), lib)
         assert stats["releases"] == 2
         # Real scored consequence: region produces different scores.
@@ -450,7 +450,7 @@ class TestF4FreshRegionLanguageCanonical:
         ), canon=lib)
         de_score, _ = rank_group(de_group := ReleaseGroup(
             release_key="game||||de|", title="Game", edition=None, group=None,
-            chipset=None, records=[], disks=[], specials=[], region="DE", language="DE",
+            chipset=None, records=[], disks=[], specials=[], region="DE", language="EN",
         ), canon=lib)
         assert en_score != de_score, f"region must change score: en={en_score} de={de_score}"
         # Winner must be the USA entry (higher region rank).
