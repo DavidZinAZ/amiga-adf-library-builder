@@ -2416,6 +2416,15 @@ class PreviewWidget(QWidget):
         # undo payload) on the model side.
         self._state.current_library.move_adfs(src_key, dst_key, list(selected))
 
+        # After the move, source may be GHOSTed (empty). If our selected
+        # key now points at a GHOST release, update to destination so the
+        # detail pane and row mapping stay consistent with the visible table.
+        if (
+            self._state.selected_release_key == src_key
+            and self._state.current_library.releases[src_key].curation_state == StagedState.GHOST
+        ):
+            self._state.selected_release_key = dst_key
+
         # Record the source's logged MOVE entry for undo exactly once. The
         # model already appended it (with the full payload); do NOT append a
         # duplicate entry — that was the duplicate-logging defect.
@@ -2575,6 +2584,15 @@ class PreviewWidget(QWidget):
         # (NEEDS_REVIEW), and records the decision-log entries (one MERGE per
         # side, with the full undo payload) on the model side.
         self._state.current_library.merge_release(src_key, dst_key)
+
+        # After the merge, source is always GHOSTed. If our selected
+        # key now points at a GHOST release, update to destination so
+        # the detail pane and row mapping stay consistent with the visible table.
+        if (
+            self._state.selected_release_key == src_key
+            and self._state.current_library.releases[src_key].curation_state == StagedState.GHOST
+        ):
+            self._state.selected_release_key = dst_key
 
         # Record the source's logged MERGE entry for undo exactly once. The
         # model already appended it (with the full payload); do NOT append a
