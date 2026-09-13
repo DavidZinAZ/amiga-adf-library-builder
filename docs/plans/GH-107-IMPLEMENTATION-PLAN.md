@@ -30,7 +30,7 @@ pre-repair main was `05c77b79318ddd73f4011e3ee44d13f8cdb3d872`).
 | **3** | Canonical game/release data model & provenance. | **DONE** — PUBLISHED (see Slice 3 closeout below; APPLICATION_SHA `85fd0136733dd2a826e3f8f85e33cc61c48471f3`, merge `8e85a44...`) |
 | **4** | Unified manual lookup UI. | **DONE** — PUBLISHED (see Slice 4 closeout below; APPLICATION_SHA `fd0ffa4006ee0b8332d075ff7aa2770fbf7ff786`, merge `bba2ba8...`) |
 | **5** | Canonical naming / export policy layer. | **DONE** — PUBLISHED (APPLICATION_SHA `a06483c1800f033bd94c5a9eafebe3a5f818f44e`, publication head `50202ed759aec68547cf7accf772166f0c971682`, merge `e3c708b...`) |
-| **6** | 1G1R selection & export engine. | IMPLEMENTED — AWAITING QA |
+| **6** | 1G1R selection & export engine. | **DONE** — PUBLISHED (APPLICATION_SHA `8f16b9189744de8d70f1bec0b80858063ae7c51e`, publication head `e29f286ac070b4c72a35e62a238a16a5a8a324af`, merge `41d8bca...`) |
 
 ## Slice 1 closeout (semantic, after repair t_9503c6de)
 
@@ -77,7 +77,7 @@ Evidence block: APPLICATION_SHA `f0365799d0f551c30a9870150d0a27e7e35a2772`;
 QA verdict PASS (t_3e2bc459); PR #115 (head `6f429d8180c7b5fc29eb9aaf6149115ae8a5cdd6`,
 docs-only); merge/final main `f204c2f296552f6af8015be4dca4f31a1332bf7f`;
 ancestry `merge-base --is-ancestor f0365799... origin/main` exit 0 (verified live at closeout).
-Next planned slice: **Slice 5** (canonical naming / export policy layer) — **DONE** — PUBLISHED (APPLICATION_SHA `a06483c1800f033bd94c5a9eafebe3a5f818f44e`, publication head `50202ed759aec68547cf7accf772166f0c971682`, merge/final main `e3c708b053005aa6df4c7493c82f7a2a3bf65a06`).
+Next planned slice: **Slice 6** (1G1R selection & export engine) — **DONE** — PUBLISHED (APPLICATION_SHA `8f16b9189744de8d70f1bec0b80858063ae7c51e`, publication head `e29f286ac070b4c72a35e62a238a16a5a8a324af`, merge/final main `41d8bcaec900308d6f724ba1682fb74642dad9da`).
 
 ## Slice 3 — DONE (published 2026-09-12)
 
