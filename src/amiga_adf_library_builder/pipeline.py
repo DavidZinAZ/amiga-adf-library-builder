@@ -439,7 +439,11 @@ def run_pipeline(
                 decisions = load_operator_decisions(Path(operator_decisions_path))
             if one_per_game:
                 # Load canonical library once for region/language/version scoring.
+                # If no canonical.db exists yet (fresh CLI export), create one
+                # from the current staged result so region/language rank effectively.
                 _canon = _load_canonical_library(library_root)
+                if _canon is None:
+                    _canon = _ensure_canonical_library(library_root, groups)
                 selection_result = select_one_per_game(
                     groups, approvals=approvals, canon=_canon, decisions=decisions
                 )
@@ -462,12 +466,30 @@ def run_pipeline(
                 try:
                     write_selection_manifest(selection_result, Path(selection_manifest_path))
                     _act(f"Selection manifest written to {selection_manifest_path}")
-                except Exception as exc:
-                    _act(f"Selection manifest write failed: {exc}")
+                except Exception as mexc:
+                    _act(f"Selection manifest write failed: {mexc}")
         except Exception as exc:
-            # Selection failure: fail safe — do NOT silently export all releases.
+            # Selection failure: fail safe — do NOT export all releases.
             selection_result = None
             _act(f"1G1R selection failed: {exc}; export blocked — no releases selected.")
+            from .selection import SelectionResult
+            result = {
+                "run_id": run_id,
+                "selection_failed": True,
+                "selection_error": str(exc),
+                "export_gate_open": False,
+                "export_gate_reason": "selection failed; export blocked",
+            }
+            if selection_manifest_path:
+                try:
+                    from .selection import write_selection_manifest as _wsm
+                    _wsm(
+                        SelectionResult(selected=[], rejected=[], selection_manifest=[], provenance={"selected_count": 0, "rejected_count": 0, "decisions": [], "selection_error": str(exc)}),
+                        Path(selection_manifest_path),
+                    )
+                except Exception:
+                    pass
+            return result
         export_result = exporter.export_all(
             groups,
             staging_dir=cfg.staging_dir,
@@ -893,3 +915,57 @@ def _find_previous_state_file(curation_dir: Path, run_id: str) -> Optional[Path]
         return None
     candidates.sort(key=lambda item: item[0])
     return candidates[-1][1]
+
+
+def _ensure_canonical_library(
+    library_root: Path,
+    groups: list[ReleaseGroup],
+) -> Optional["CanonicalLibrary"]:
+    """Create a canonical.db from current groups when none exists yet.
+
+    Fresh CLI exports never create canonical.db (only the GUI staged-library
+    path does), leaving region/language scoring neutral (20.0). This helper
+    builds a minimal canonical model from the pipeline's current groups so
+    region/language become effective in the normal production export path
+    without inventing a second canonical store.
+
+    Returns the opened CanonicalLibrary, or None on failure.
+    """
+    try:
+        from .canonical import CanonicalLibrary, migrate_staged_library
+        from .models import StagedLibrary, StagedReleaseEntry, StagedState, StagedChange, CurationAction
+    except ImportError:
+        return None
+    curation_dir = library_root / "curation"
+    curation_dir.mkdir(parents=True, exist_ok=True)
+    db_path = curation_dir / "canonical.db"
+    if db_path.is_file():
+        try:
+            return CanonicalLibrary(db_path)
+        except (OSError, sqlite3.Error):
+            return None
+    library = StagedLibrary()
+    for g in groups:
+        entry = StagedReleaseEntry(
+            release_key=g.release_key,
+            title=g.title,
+            edition=g.edition,
+            group=g.group,
+            chipset=None,
+            language=g.language,
+            version=g.version,
+            alt_marker=None,
+            ext="adf",
+            adf_files=[r.source_filename for r in g.records],
+            folder=None,
+            match_confidence=None,
+            confidence=0.0,
+            curation_state=StagedState.PENDING,
+        )
+        library.releases[g.release_key] = entry
+    try:
+        with CanonicalLibrary(db_path) as canon:
+            migrate_staged_library(library, canon)
+        return CanonicalLibrary(db_path)
+    except (OSError, sqlite3.Error, ValueError, TypeError):
+        return None

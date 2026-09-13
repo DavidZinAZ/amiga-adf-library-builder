@@ -55,6 +55,10 @@ SETTINGS_KEYS = (
     # Values: "always" (convert progressive -> baseline), "never" (keep as-is, default),
     #         "prompt" (ask per-image for each progressive source).
     "convert_progressive_jpeg",
+    # (GH-107 Slice 6) 1G1R selection controls.
+    "one_per_game",
+    "operator_decisions_path",
+    "selection_manifest_path",
 )
 
 
@@ -139,11 +143,15 @@ class Settings:
     review_threshold: float = 0.70
     # Near-tie difference: if top two candidates within this -> force Needs Review (default 0.03 = 3%)
     near_tie_difference: float = 0.03
-    # (GH-102) Progressive JPEG conversion policy during artwork import.
+    # (GH-102) Progressive JPEG conversion policy.
     # Values: "always" (convert progressive -> baseline), "never" (keep as-is, default),
     #         "prompt" (ask per-run for progressive sources).
     # Default "never" preserves existing behavior (no conversion, no prompt).
     convert_progressive_jpeg: str = "never"
+    # (GH-107 Slice 6) 1G1R selection controls (non-sensitive).
+    one_per_game: bool = True
+    operator_decisions_path: str = ""
+    selection_manifest_path: str = ""
     presets: dict[str, "Preset"] = field(default_factory=dict)
 
     def as_dict(self) -> dict:
@@ -176,6 +184,10 @@ class Settings:
             "review_threshold": self.review_threshold,
             "near_tie_difference": self.near_tie_difference,
             "convert_progressive_jpeg": self.convert_progressive_jpeg,
+            # (GH-107 Slice 6) 1G1R selection controls.
+            "one_per_game": self.one_per_game,
+            "operator_decisions_path": self.operator_decisions_path,
+            "selection_manifest_path": self.selection_manifest_path,
         }
         if self.presets:
             out["presets"] = {name: p.as_dict() for name, p in self.presets.items()}
@@ -249,8 +261,12 @@ class Preset:
     auto_match_threshold: float = 0.90
     review_threshold: float = 0.70
     near_tie_difference: float = 0.03
-    # (GH-102) Progressive JPEG conversion policy.
+        # (GH-102) Progressive JPEG conversion policy.
     convert_progressive_jpeg: str = "never"
+    # (GH-107 Slice 6) 1G1R selection controls.
+    one_per_game: bool = True
+    operator_decisions_path: str = ""
+    selection_manifest_path: str = ""
 
     def as_dict(self) -> dict:
         return {
@@ -278,6 +294,10 @@ class Preset:
             "review_threshold": self.review_threshold,
             "near_tie_difference": self.near_tie_difference,
             "convert_progressive_jpeg": self.convert_progressive_jpeg,
+            # (GH-107 Slice 6) 1G1R selection controls.
+            "one_per_game": self.one_per_game,
+            "operator_decisions_path": self.operator_decisions_path,
+            "selection_manifest_path": self.selection_manifest_path,
         }
 
     @classmethod
@@ -308,6 +328,10 @@ class Preset:
             review_threshold=float(data.get("review_threshold", 0.70)),
             near_tie_difference=float(data.get("near_tie_difference", 0.03)),
             convert_progressive_jpeg=str(data.get("convert_progressive_jpeg", "never")),
+            # (GH-107 Slice 6) 1G1R selection controls.
+            one_per_game=bool(data.get("one_per_game", True)),
+            operator_decisions_path=str(data.get("operator_decisions_path", "")),
+            selection_manifest_path=str(data.get("selection_manifest_path", "")),
         )
 
 

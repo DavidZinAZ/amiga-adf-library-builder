@@ -220,23 +220,31 @@ def _operator_override(
     group: ReleaseGroup,
     approvals: dict,
 ) -> Optional[ApprovalRecord]:
-    """Return the matching active approval record for this group, or None."""
+    """Return the matching active approval record for this group, or None.
+
+    Exact release-key match takes precedence. The base-key form is
+    intentionally NOT used as a fallback here: an approval for one
+    specific release must NOT broaden to every variant of the game
+    (the load_approvals index already holds the full key when the
+    writer indexed the record). A title-key fallback is tried only
+    when the exact key is absent.
+    """
     if not approvals:
         return None
     key = group.release_key
-    base_key = key.split("|")[0].lower()
-    # Also try title-based slug for approval lookup.
     title_key = ""
     try:
         from .canonical_naming import _slugify_title
         title_key = _slugify_title(group.title) if group.title else ""
     except Exception:
         title_key = ""
-    rec = approvals.get(key) or approvals.get(base_key) or approvals.get(title_key)
-    if rec is None:
-        return None
-    if isinstance(rec, ApprovalRecord):
-        return rec
+    # Exact key first, then title slug. No base-key fallback: that
+    # would broaden one exact approval to every game variant.
+    for candidate in (key, title_key):
+        if candidate:
+            rec = approvals.get(candidate)
+            if rec is not None:
+                return rec if isinstance(rec, ApprovalRecord) else None
     return None
 
 
