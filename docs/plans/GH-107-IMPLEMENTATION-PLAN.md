@@ -4,7 +4,7 @@
 
 **Repository:** https://github.com/DavidZinAZ/amiga-adf-library-builder
 
-**GH-107 status: OPEN** (EPIC — must stay open until all slices land).
+**GH-107 status: CLOSED** (all six slices landed; epic final acceptance PASS; closedAt `2026-09-13T06:21:13Z`).
 
 ## Current origin/main SHA
 
