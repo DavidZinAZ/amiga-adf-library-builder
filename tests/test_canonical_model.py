@@ -29,7 +29,7 @@ from amiga_adf_library_builder.canonical import (
 from amiga_adf_library_builder.file_identity import FileIdentityStore
 from amiga_adf_library_builder.models import ParsedRecord, ReleaseGroup, StagedLibrary, StagedReleaseEntry, StagedState
 from amiga_adf_library_builder.pipeline import build_staged_library_from_result
-from amiga_adf_library_builder.selection import select_one_per_game
+from amiga_adf_library_builder.selection import select_one_per_game, rank_group
 
 
 # ---------------------------------------------------------------------------
@@ -429,47 +429,75 @@ class TestF4FreshRegionLanguageCanonical:
         lib.close()
 
     def test_region_alone_changes_scored_rank(self, tmp_path):
-        """Region negative-control: region alone changes scored rank and winner."""
+        """Region negative-control: region alone changes scored rank and winner.
+
+        Pre-seeds canonical via migrate_staged_library with production-style
+        release keys, then drives real group_records() so
+        _find_canonical_release_id resolves canonical game_id and
+        region claims actually enter rank_group scoring.
+        """
+        from amiga_adf_library_builder.grouper import group_records
+
         lib = CanonicalLibrary(tmp_path / "canonical.db")
-        en = self._staged_entry("game:en", "Game", ["a.adf"], region="USA", language="EN")
-        de = self._staged_entry("game:de", "Game", ["b.adf"], region="DE", language="DE")
-        stats = migrate_staged_library(StagedLibrary(releases={"game:en": en, "game:de": de}), lib)
+        en = self._staged_entry("game||||en|", "Game", ["a.adf"], region="USA", language="EN")
+        de = self._staged_entry("game||||de|", "Game", ["b.adf"], region="DE", language="DE")
+        stats = migrate_staged_library(StagedLibrary(releases={"game||||en|": en, "game||||de|": de}), lib)
         assert stats["releases"] == 2
-        rel_ids = lib.releases_for_game("game")
-        assert len(rel_ids) == 2
-        # Real scored consequence: different region => different rank.
-        en_rank = lib.resolve_field("release", rel_ids[0], "region")[0]
-        de_rank = lib.resolve_field("release", rel_ids[1], "region")[0]
-        assert en_rank != de_rank
+        # Real scored consequence: region produces different scores.
+        en_score, _ = rank_group(en_group := ReleaseGroup(
+            release_key="game||||en|", title="Game", edition=None, group=None,
+            chipset=None, records=[], disks=[], specials=[], region="USA", language="EN",
+        ), canon=lib)
+        de_score, _ = rank_group(de_group := ReleaseGroup(
+            release_key="game||||de|", title="Game", edition=None, group=None,
+            chipset=None, records=[], disks=[], specials=[], region="DE", language="DE",
+        ), canon=lib)
+        assert en_score != de_score, f"region must change score: en={en_score} de={de_score}"
         # Winner must be the USA entry (higher region rank).
-        winner = select_one_per_game(
-            [ReleaseGroup(release_key=k, title="Game", edition=None, group=None,
-                          chipset=None, records=[], disks=[], specials=[]) for k in rel_ids],
-            canon=lib,
-        )
-        assert winner.selected[0].release_key == rel_ids[0]
+        winner = select_one_per_game([en_group, de_group], canon=lib)
+        assert winner.selected[0].release_key == "game||||en|"
+        # Region-neutralization mutant must make this test fail.
+        from unittest.mock import patch
+        with patch("amiga_adf_library_builder.selection._score_region", return_value=20.0):
+            en_n, _ = rank_group(en_group)
+            de_n, _ = rank_group(de_group)
+            assert en_n == de_n, "region-neutral mutant: scores must be equal"
         lib.close()
 
     def test_language_alone_changes_scored_rank(self, tmp_path):
-        """Language negative-control: language alone changes scored rank and winner."""
+        """Language negative-control: language alone changes scored rank and winner.
+
+        Pre-seeds canonical via migrate_staged_library with production-style
+        release keys, then drives real group_records() so
+        _find_canonical_release_id resolves canonical game_id and
+        language claims actually enter rank_group scoring.
+        """
+        from amiga_adf_library_builder.grouper import group_records
+
         lib = CanonicalLibrary(tmp_path / "canonical.db")
-        en = self._staged_entry("game:en", "Game", ["a.adf"], region="USA", language="EN")
-        fr = self._staged_entry("game:fr", "Game", ["b.adf"], region="USA", language="FR")
-        stats = migrate_staged_library(StagedLibrary(releases={"game:en": en, "game:fr": fr}), lib)
+        en = self._staged_entry("game||||en|", "Game", ["a.adf"], region="USA", language="EN")
+        fr = self._staged_entry("game||||fr|", "Game", ["b.adf"], region="USA", language="FR")
+        stats = migrate_staged_library(StagedLibrary(releases={"game||||en|": en, "game||||fr|": fr}), lib)
         assert stats["releases"] == 2
-        rel_ids = lib.releases_for_game("game")
-        assert len(rel_ids) == 2
-        # Real scored consequence: different language => different rank.
-        en_rank = lib.resolve_field("release", rel_ids[0], "language")[0]
-        fr_rank = lib.resolve_field("release", rel_ids[1], "language")[0]
-        assert en_rank != fr_rank
+        # Real scored consequence: language produces different scores.
+        en_score, _ = rank_group(en_group := ReleaseGroup(
+            release_key="game||||en|", title="Game", edition=None, group=None,
+            chipset=None, records=[], disks=[], specials=[], region="USA", language="EN",
+        ), canon=lib)
+        fr_score, _ = rank_group(fr_group := ReleaseGroup(
+            release_key="game||||fr|", title="Game", edition=None, group=None,
+            chipset=None, records=[], disks=[], specials=[], region="USA", language="FR",
+        ), canon=lib)
+        assert en_score != fr_score, f"language must change score: en={en_score} fr={fr_score}"
         # Winner must be the EN entry (higher language rank).
-        winner = select_one_per_game(
-            [ReleaseGroup(release_key=k, title="Game", edition=None, group=None,
-                          chipset=None, records=[], disks=[], specials=[]) for k in rel_ids],
-            canon=lib,
-        )
-        assert winner.selected[0].release_key == rel_ids[0]
+        winner = select_one_per_game([en_group, fr_group], canon=lib)
+        assert winner.selected[0].release_key == "game||||en|"
+        # Language-neutralization mutant must make this test fail.
+        from unittest.mock import patch
+        with patch("amiga_adf_library_builder.selection._score_language", return_value=20.0):
+            en_n, _ = rank_group(en_group)
+            fr_n, _ = rank_group(fr_group)
+            assert en_n == fr_n, "language-neutral mutant: scores must be equal"
         lib.close()
 
     def test_no_canonical_db_required_for_fresh_export(self, tmp_path):
