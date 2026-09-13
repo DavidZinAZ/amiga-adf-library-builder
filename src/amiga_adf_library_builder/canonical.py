@@ -626,8 +626,8 @@ def migrate_staged_library(staged, library: CanonicalLibrary,
                     sha_by_file[fname] = sha
 
         edition = getattr(entry, "edition", None)
-        region = None
-        language = None
+        region = getattr(entry, "region", None)
+        language = getattr(entry, "language", None)
         publisher = None
 
         release_id = make_release_id(game_id, edition or "", region or "",
@@ -666,6 +666,14 @@ def migrate_staged_library(staged, library: CanonicalLibrary,
         if state is not None:
             rf = release.fields.setdefault("curation_state", CanonicalField())
             rf.claim(operator, getattr(state, "value", str(state)))
+            stats["curation_claims"] += 1
+        if getattr(entry, "region", None):
+            rf = release.fields.setdefault("region", CanonicalField())
+            rf.claim(operator, entry.region)
+            stats["curation_claims"] += 1
+        if getattr(entry, "language", None):
+            rf = release.fields.setdefault("language", CanonicalField())
+            rf.claim(operator, entry.language)
             stats["curation_claims"] += 1
 
         for n, fname in enumerate(sorted(sha_by_file), start=1):

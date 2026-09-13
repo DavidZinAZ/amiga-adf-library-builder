@@ -51,6 +51,7 @@ def group_records(records: Iterable[ParsedRecord]) -> list[ReleaseGroup]:
             group=first.group,
             chipset=first.chipset,
             language=first.language,
+            region=first.region,
             version=first.version,
             alt_marker=first.alt_marker,
             ext=first.ext,

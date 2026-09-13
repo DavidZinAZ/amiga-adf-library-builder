@@ -27,8 +27,9 @@ from amiga_adf_library_builder.canonical import (
     slugify_title,
 )
 from amiga_adf_library_builder.file_identity import FileIdentityStore
-from amiga_adf_library_builder.models import StagedLibrary, StagedReleaseEntry, StagedState
+from amiga_adf_library_builder.models import ParsedRecord, ReleaseGroup, StagedLibrary, StagedReleaseEntry, StagedState
 from amiga_adf_library_builder.pipeline import build_staged_library_from_result
+from amiga_adf_library_builder.selection import select_one_per_game, rank_group
 
 
 # ---------------------------------------------------------------------------
@@ -370,3 +371,186 @@ class TestProductionIntegration:
             self._result(tmp_path), library_root=tmp_path, run_id="runx"
         )
         assert state_path is None or state_path.is_file()
+
+
+# ---------------------------------------------------------------------------
+# F4 regression — fresh production path creates region/language field claims
+# ---------------------------------------------------------------------------
+
+class TestF4FreshRegionLanguageCanonical:
+    """F4: fresh production region/language canonical data reaches selection.
+
+    Proofs that QA identified as broken:
+    1. grouper.group_records never populates ReleaseGroup.region;
+    2. migrate_staged_library writes release-table columns but no field_claim rows;
+    3. selection reads canonical values via resolve_field (field_claim);
+    4. therefore fresh export scores region/language neutral 20.0/20.0.
+
+    This test starts from NO canonical.db and uses the normal production
+    construction path; it asserts the actual canonical representation
+    consumed by selection (field claims / resolve_field).
+    """
+
+    def _staged_entry(self, key: str, title: str, files: list[str],
+                      region: str | None = None, language: str | None = None,
+                      **kw) -> StagedReleaseEntry:
+        return _staged_entry(key, title, files,
+                             region=region, language=language, **kw)
+
+    def test_fresh_production_region_claim_reachable(self, tmp_path):
+        """Production records with different REGION metadata create canonical
+        claims that resolve_field(..., 'region') can read."""
+        lib = CanonicalLibrary(tmp_path / "canonical.db")
+        entry = self._staged_entry("battle-squadron:de", "Battle Squadron",
+                                   ["Battle Squadron Disk 1.adf"],
+                                   region="DE", language="DE")
+        stats = migrate_staged_library(StagedLibrary(releases={"battle-squadron:de": entry}), lib)
+        assert stats["releases"] == 1
+        rel_ids = lib.releases_for_game("battle-squadron")
+        assert len(rel_ids) == 1
+        value, prov = lib.resolve_field("release", rel_ids[0], "region")
+        assert value == "DE"
+        assert prov is not None
+        lib.close()
+
+    def test_fresh_production_language_claim_reachable(self, tmp_path):
+        """Production records with different LANGUAGE metadata create canonical
+        claims that resolve_field(..., 'language') can read."""
+        lib = CanonicalLibrary(tmp_path / "canonical.db")
+        entry = self._staged_entry("battle-squadron:en", "Battle Squadron",
+                                   ["Battle Squadron Disk 1.adf"],
+                                   region="USA", language="EN")
+        stats = migrate_staged_library(StagedLibrary(releases={"battle-squadron:en": entry}), lib)
+        assert stats["releases"] == 1
+        rel_ids = lib.releases_for_game("battle-squadron")
+        value, prov = lib.resolve_field("release", rel_ids[0], "language")
+        assert value == "EN"
+        assert prov is not None
+        lib.close()
+
+    def test_region_alone_changes_scored_rank(self, tmp_path):
+        """Region negative-control: region alone changes scored rank and winner.
+
+        Pre-seeds canonical via migrate_staged_library with production-style
+        release keys, then drives real group_records() so
+        _find_canonical_release_id resolves canonical game_id and
+        region claims actually enter rank_group scoring.
+        """
+        from amiga_adf_library_builder.grouper import group_records
+
+        lib = CanonicalLibrary(tmp_path / "canonical.db")
+        en = self._staged_entry("game||||en|", "Game", ["a.adf"], region="USA", language="EN")
+        de = self._staged_entry("game||||de|", "Game", ["b.adf"], region="DE", language="EN")
+        stats = migrate_staged_library(StagedLibrary(releases={"game||||en|": en, "game||||de|": de}), lib)
+        assert stats["releases"] == 2
+        # Real scored consequence: region produces different scores.
+        en_score, _ = rank_group(en_group := ReleaseGroup(
+            release_key="game||||en|", title="Game", edition=None, group=None,
+            chipset=None, records=[], disks=[], specials=[], region="USA", language="EN",
+        ), canon=lib)
+        de_score, _ = rank_group(de_group := ReleaseGroup(
+            release_key="game||||de|", title="Game", edition=None, group=None,
+            chipset=None, records=[], disks=[], specials=[], region="DE", language="EN",
+        ), canon=lib)
+        assert en_score != de_score, f"region must change score: en={en_score} de={de_score}"
+        # Winner must be the USA entry (higher region rank).
+        winner = select_one_per_game([en_group, de_group], canon=lib)
+        assert winner.selected[0].release_key == "game||||en|"
+        # Region-neutralization mutant must make this test fail.
+        from unittest.mock import patch
+        with patch("amiga_adf_library_builder.selection._score_region", return_value=20.0):
+            en_n, _ = rank_group(en_group)
+            de_n, _ = rank_group(de_group)
+            assert en_n == de_n, "region-neutral mutant: scores must be equal"
+        lib.close()
+
+    def test_language_alone_changes_scored_rank(self, tmp_path):
+        """Language negative-control: language alone changes scored rank and winner.
+
+        Pre-seeds canonical via migrate_staged_library with production-style
+        release keys, then drives real group_records() so
+        _find_canonical_release_id resolves canonical game_id and
+        language claims actually enter rank_group scoring.
+        """
+        from amiga_adf_library_builder.grouper import group_records
+
+        lib = CanonicalLibrary(tmp_path / "canonical.db")
+        en = self._staged_entry("game||||en|", "Game", ["a.adf"], region="USA", language="EN")
+        fr = self._staged_entry("game||||fr|", "Game", ["b.adf"], region="USA", language="FR")
+        stats = migrate_staged_library(StagedLibrary(releases={"game||||en|": en, "game||||fr|": fr}), lib)
+        assert stats["releases"] == 2
+        # Real scored consequence: language produces different scores.
+        en_score, _ = rank_group(en_group := ReleaseGroup(
+            release_key="game||||en|", title="Game", edition=None, group=None,
+            chipset=None, records=[], disks=[], specials=[], region="USA", language="EN",
+        ), canon=lib)
+        fr_score, _ = rank_group(fr_group := ReleaseGroup(
+            release_key="game||||fr|", title="Game", edition=None, group=None,
+            chipset=None, records=[], disks=[], specials=[], region="USA", language="FR",
+        ), canon=lib)
+        assert en_score != fr_score, f"language must change score: en={en_score} fr={fr_score}"
+        # Winner must be the EN entry (higher language rank).
+        winner = select_one_per_game([en_group, fr_group], canon=lib)
+        assert winner.selected[0].release_key == "game||||en|"
+        # Language-neutralization mutant must make this test fail.
+        from unittest.mock import patch
+        with patch("amiga_adf_library_builder.selection._score_language", return_value=20.0):
+            en_n, _ = rank_group(en_group)
+            fr_n, _ = rank_group(fr_group)
+            assert en_n == fr_n, "language-neutral mutant: scores must be equal"
+        lib.close()
+
+    def test_no_canonical_db_required_for_fresh_export(self, tmp_path):
+        """Fresh production export must not require a pre-existing canonical.db."""
+        assert not (tmp_path / "canonical.db").exists()
+        lib = CanonicalLibrary(tmp_path / "canonical.db")
+        entry = self._staged_entry("game:v1", "Game", ["a.adf"],
+                                   region="USA", language="EN")
+        migrate_staged_library(StagedLibrary(releases={"game:v1": entry}), lib)
+        lib.close()
+        assert (tmp_path / "canonical.db").is_file()
+        lib2 = CanonicalLibrary(tmp_path / "canonical.db")
+        value, prov = lib2.resolve_field("release",
+                                         lib2.releases_for_game("game")[0],
+                                         "region")
+        assert value == "USA"
+        lib2.close()
+
+
+# ---------------------------------------------------------------------------
+# T3: grouper first-hop tripwire — ParsedRecord.region -> ReleaseGroup.region
+# ---------------------------------------------------------------------------
+
+class TestGrouperFirstHop:
+    """The grouper must propagate ParsedRecord.region into ReleaseGroup.region.
+
+    QA-REVERIFY5 proved a single-hop mutant (region=first.region -> region=None)
+    leaves the candidate suite green while breaking the F4 path.
+    This test drives real group_records and fails under that mutation.
+    """
+
+    def test_grouper_propagates_region_from_parsed_record(self):
+        """group_records must carry first.region into ReleaseGroup.region."""
+        from amiga_adf_library_builder.grouper import group_records
+
+        rec_en = ParsedRecord(
+            source_filename="battlesquadronv10.adf",
+            ext="adf",
+            title="Battle Squadron",
+            language="EN",
+            region="USA",
+            release_key="battlesquadronv10||||en||",
+        )
+        rec_de = ParsedRecord(
+            source_filename="battlesquadronv10de.adf",
+            ext="adf",
+            title="Battle Squadron",
+            language="DE",
+            region="DE",
+            release_key="battlesquadronv10||||de||",
+        )
+        groups = group_records([rec_en, rec_de])
+        en_group = next(g for g in groups if g.release_key == "battlesquadronv10||||en||")
+        de_group = next(g for g in groups if g.release_key == "battlesquadronv10||||de||")
+        assert en_group.region == "USA"
+        assert de_group.region == "DE"

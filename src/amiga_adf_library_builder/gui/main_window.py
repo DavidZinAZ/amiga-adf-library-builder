@@ -497,6 +497,32 @@ class MainWindow(QMainWindow):
             "instead of exporting with missing covers."
         )
         req_layout.addWidget(self._cb_artwork)
+        # (GH-107 Slice 6) 1G1R selection controls.
+        self._cb_one_per_game = QCheckBox("1G1R: one release per game (Gotek export)")
+        self._cb_one_per_game.setChecked(True)
+        self._cb_one_per_game.setToolTip(
+            "Select exactly one release per game for Gotek export. "
+            "Uncheck to export all grouped releases."
+        )
+        req_layout.addWidget(self._cb_one_per_game)
+        self._le_operator_decisions = QLineEdit(self)
+        self._le_operator_decisions.setPlaceholderText(
+            "Path to operator decisions JSON (optional)…"
+        )
+        self._le_operator_decisions.setToolTip(
+            "Path to a 1G1R operator-decisions JSON file. "
+            "Overrides ranking for the listed game/release keys."
+        )
+        req_layout.addWidget(self._le_operator_decisions)
+        self._le_selection_manifest = QLineEdit(self)
+        self._le_selection_manifest.setPlaceholderText(
+            "Path for selection manifest JSON (optional)…"
+        )
+        self._le_selection_manifest.setToolTip(
+            "Write a selection manifest JSON with per-release scores and "
+            "provenance when export runs."
+        )
+        req_layout.addWidget(self._le_selection_manifest)
         run_layout.addWidget(req_box)
 
         # Destination preview when export mode is selected
@@ -1679,6 +1705,10 @@ class MainWindow(QMainWindow):
                 "near_tie_difference": _parse_threshold(self._le_near_tie.text()),
                 # (GH-102) Progressive JPEG conversion policy.
                 "convert_progressive_jpeg": self._combo_progressive_jpeg.currentText(),
+                # (GH-107 Slice 6) 1G1R selection controls.
+                "one_per_game": self._cb_one_per_game.isChecked(),
+                "operator_decisions_path": self._le_operator_decisions.text().strip(),
+                "selection_manifest_path": self._le_selection_manifest.text().strip(),
             }
             geometry = self._current_persist_geometry()
             if geometry is not None:
@@ -1711,6 +1741,10 @@ class MainWindow(QMainWindow):
             provider_config_path=self._config_path or "",
             # (GH-102) Progressive JPEG conversion policy.
             convert_progressive_jpeg=self._combo_progressive_jpeg.currentText(),
+            # (GH-107 Slice 6) 1G1R selection controls.
+            one_per_game=self._cb_one_per_game.isChecked(),
+            operator_decisions_path=self._le_operator_decisions.text().strip(),
+            selection_manifest_path=self._le_selection_manifest.text().strip(),
         )
         return state
 
@@ -1772,6 +1806,10 @@ class MainWindow(QMainWindow):
         self._combo_progressive_jpeg.setCurrentText(
             getattr(s, "convert_progressive_jpeg", "never")
         )
+        # (GH-107 Slice 6) 1G1R selection controls.
+        self._cb_one_per_game.setChecked(getattr(s, "one_per_game", True))
+        self._le_operator_decisions.setText(getattr(s, "operator_decisions_path", ""))
+        self._le_selection_manifest.setText(getattr(s, "selection_manifest_path", ""))
         self._lb_restore_mappings(s)
         apply_theme(s.theme or "system", themes_dir=self._paths.themes_dir)
         self._update_export_state_display()
