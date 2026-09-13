@@ -30,7 +30,7 @@ pre-repair main was `05c77b79318ddd73f4011e3ee44d13f8cdb3d872`).
 | **3** | Canonical game/release data model & provenance. | **DONE** — PUBLISHED (see Slice 3 closeout below; APPLICATION_SHA `85fd0136733dd2a826e3f8f85e33cc61c48471f3`, merge `8e85a44...`) |
 | **4** | Unified manual lookup UI. | **DONE** — PUBLISHED (see Slice 4 closeout below; APPLICATION_SHA `fd0ffa4006ee0b8332d075ff7aa2770fbf7ff786`, merge `bba2ba8...`) |
 | **5** | Canonical naming / export policy layer. | **DONE** — PUBLISHED (APPLICATION_SHA `a06483c1800f033bd94c5a9eafebe3a5f818f44e`, publication head `50202ed759aec68547cf7accf772166f0c971682`, merge `e3c708b...`) |
-| **6** | 1G1R selection & export engine. | PLANNED |
+| **6** | 1G1R selection & export engine. | IMPLEMENTED — AWAITING QA |
 
 ## Slice 1 closeout (semantic, after repair t_9503c6de)
 
