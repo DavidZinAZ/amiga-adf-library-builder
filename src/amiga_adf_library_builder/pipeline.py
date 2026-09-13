@@ -433,12 +433,21 @@ def run_pipeline(
         # before the export phase so only the selected releases are exported.
         selection_result = None
         try:
-            from .selection import select_one_per_game, load_operator_decisions
+            from .selection import select_one_per_game, load_operator_decisions, write_selection_manifest
             decisions = None
             if operator_decisions_path:
                 decisions = load_operator_decisions(Path(operator_decisions_path))
             if one_per_game:
-                selection_result = select_one_per_game(groups, canon=None, decisions=decisions)
+                # Load canonical library once for region/language/version scoring.
+                _canon = _load_canonical_library(library_root)
+                selection_result = select_one_per_game(
+                    groups, approvals=approvals, canon=_canon, decisions=decisions
+                )
+                if _canon is not None:
+                    try:
+                        _canon.close()
+                    except Exception:
+                        pass
             else:
                 selection_result = None
             if selection_result is not None:
@@ -449,9 +458,16 @@ def run_pipeline(
                 )
             else:
                 _act("1G1R selection: skipped (--no-1g1r)")
-        except Exception:
-            # Selection failure must not break export — fall back to all groups.
+            if selection_result is not None and selection_manifest_path:
+                try:
+                    write_selection_manifest(selection_result, Path(selection_manifest_path))
+                    _act(f"Selection manifest written to {selection_manifest_path}")
+                except Exception as exc:
+                    _act(f"Selection manifest write failed: {exc}")
+        except Exception as exc:
+            # Selection failure: fail safe — do NOT silently export all releases.
             selection_result = None
+            _act(f"1G1R selection failed: {exc}; export blocked — no releases selected.")
         export_result = exporter.export_all(
             groups,
             staging_dir=cfg.staging_dir,

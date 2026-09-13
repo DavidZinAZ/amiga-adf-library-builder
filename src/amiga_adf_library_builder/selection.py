@@ -301,6 +301,7 @@ def select_one_per_game(
 
     for game_id, game_groups in sorted(games.items()):
         # Apply persisted operator decision first, if still valid.
+        decision_applied = False
         if game_id in dec:
             forced_key = dec[game_id].lower()
             for g in game_groups:
@@ -340,7 +341,10 @@ def select_one_per_game(
                                 rank_score=0.0,
                                 override_source="operator",
                             ))
-                    continue  # next game
+                    decision_applied = True
+                    break  # stop searching game_groups
+        if decision_applied:
+            continue  # next game — skip ranking; persisted decision handled above
 
         # Compute scores for all candidates.
         candidates: list[tuple[ReleaseGroup, float, str, Optional[ApprovalRecord]]] = []
@@ -504,5 +508,18 @@ def persist_operator_decisions(
 
 
 def load_operator_decisions(library_root: Path) -> Optional[dict]:
-    """Load previously persisted operator decisions, or None."""
-    return load_selection_manifest(operator_decision_key(library_root))
+    """Load previously persisted operator decisions, or None.
+
+    Accepts either a library root (canonical form, resolves to
+    <library_root>/curation/1g1r_decisions.json) or a direct path to a
+    decisions JSON file. Returns None for missing/unreadable input
+    rather than crashing.
+    """
+    p = Path(library_root)
+    if p.suffix in (".json",):
+        # Direct file path: validate it exists before loading.
+        if p.is_file():
+            return load_selection_manifest(p)
+        return None
+    # Library root form.
+    return load_selection_manifest(operator_decision_key(p))
