@@ -86,6 +86,7 @@ class ParsedRecord:
     publisher: Optional[str] = None
     chipset: Optional[str] = None  # e.g. 'AGA/M3'
     language: Optional[str] = None
+    region: Optional[str] = None
     version: Optional[str] = None
     group: Optional[str] = None  # release/crack group, e.g. 'SKR'
     trainer: bool = False
@@ -161,10 +162,11 @@ class ReleaseGroup:
     edition: Optional[str]
     group: Optional[str]
     chipset: Optional[str]
-    language: Optional[str]
-    version: Optional[str]
-    alt_marker: Optional[str]
-    ext: str
+    language: Optional[str] = None
+    region: Optional[str] = None
+    version: Optional[str] = None
+    alt_marker: Optional[str] = None
+    ext: str = "adf"
     records: list = field(default_factory=list)  # list[ParsedRecord]
     disks: list = field(default_factory=list)  # ordered list[ParsedRecord] (non-special)
     specials: list = field(default_factory=list)  # list[ParsedRecord] (special disks)
@@ -266,10 +268,11 @@ class StagedReleaseEntry:
     edition: Optional[str]
     group: Optional[str]
     chipset: Optional[str]
-    language: Optional[str]
-    version: Optional[str]
-    alt_marker: Optional[str]
-    ext: str
+    language: Optional[str] = None
+    region: Optional[str] = None
+    version: Optional[str] = None
+    alt_marker: Optional[str] = None
+    ext: str = "adf"
 
     # ADF files in this release
     adf_files: list[str] = field(default_factory=list)

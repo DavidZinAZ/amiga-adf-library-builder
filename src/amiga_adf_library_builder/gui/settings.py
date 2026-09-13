@@ -228,6 +228,10 @@ class Settings:
         s.review_threshold = float(gui.get("review_threshold", 0.70))
         s.near_tie_difference = float(gui.get("near_tie_difference", 0.03))
         s.convert_progressive_jpeg = str(gui.get("convert_progressive_jpeg", "never"))
+        # (GH-107 Slice 6) 1G1R selection controls — restore load path.
+        s.one_per_game = bool(gui.get("one_per_game", True))
+        s.operator_decisions_path = str(gui.get("operator_decisions_path", ""))
+        s.selection_manifest_path = str(gui.get("selection_manifest_path", ""))
         raw_presets = gui.get("presets")
         if isinstance(raw_presets, dict):
             for name, val in raw_presets.items():

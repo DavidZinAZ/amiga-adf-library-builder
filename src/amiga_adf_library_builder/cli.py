@@ -303,23 +303,27 @@ def _emit(
         print(json.dumps(result, indent=2))
     else:
         print(f"run-id: {result['run_id']}")
-        print(f"files scanned   : {result['files_scanned']}")
-        print(f"records parsed  : {result['records_parsed']}")
-        print(f"groups          : {result['groups']}")
-        print(f"catalog +scan   : {result['catalog_new_scan']}")
-        print(f"catalog +parse  : {result['catalog_new_parse']}")
-        print(f"nfo written     : {len(result['nfo_written'])}")
-        print(f"artwork resized : {len(result['artwork_resized'])}")
+        print(f"files scanned   : {result.get('files_scanned', 'N/A')}")
+        print(f"records parsed  : {result.get('records_parsed', 'N/A')}")
+        print(f"groups          : {result.get('groups', 'N/A')}")
+        print(f"catalog +scan   : {result.get('catalog_new_scan', 'N/A')}")
+        print(f"catalog +parse  : {result.get('catalog_new_parse', 'N/A')}")
+        print(f"nfo written     : {len(result.get('nfo_written', []))}")
+        print(f"artwork resized : {len(result.get('artwork_resized', []))}")
         print(f"artwork missing : {len(result.get('artwork_missing', []))}")
-        print(f"review routed   : {len(result['review_routed'])}")
-        print(f"unknown routed  : {len(result['unknown_routed'])}")
-        print(f"export gate     : {'OPEN' if result['export_gate_open'] else 'BLOCKED'}")
-        print(f"  reason        : {result['export_gate_reason']}")
+        print(f"review routed   : {len(result.get('review_routed', []))}")
+        print(f"unknown routed  : {len(result.get('unknown_routed', []))}")
+        print(f"export gate     : {'OPEN' if result.get('export_gate_open') else 'BLOCKED'}")
+        print(f"  reason        : {result.get('export_gate_reason', '')}")
         print(
-            f"original preserved: {'YES' if result['original_preserved'] else 'NO ' + str(result['original_problems'])}"
+            f"original preserved: {'YES' if result.get('original_preserved') else 'NO ' + str(result.get('original_problems', []))}"
         )
     export_result = result.get("export")
     rc = 4 if (export_result and (export_result.get("errors") or export_result.get("conflicts"))) else 0
+
+    if result.get("selection_failed"):
+        print(f"selection       : FAILED — {result.get('selection_error', 'unknown')}", file=sys.stderr)
+        rc = 1
 
     # structured logging: persist a per-run diagnostic log under logs_dir. This must never
     # break a run, so failures are swallowed (warning on stderr) by write_run_log.

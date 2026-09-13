@@ -626,8 +626,8 @@ def migrate_staged_library(staged, library: CanonicalLibrary,
                     sha_by_file[fname] = sha
 
         edition = getattr(entry, "edition", None)
-        region = None
-        language = None
+        region = getattr(entry, "region", None)
+        language = getattr(entry, "language", None)
         publisher = None
 
         release_id = make_release_id(game_id, edition or "", region or "",

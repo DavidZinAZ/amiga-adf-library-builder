@@ -953,6 +953,7 @@ def _ensure_canonical_library(
             group=g.group,
             chipset=None,
             language=g.language,
+            region=g.region if hasattr(g, "region") else None,
             version=g.version,
             alt_marker=None,
             ext="adf",
