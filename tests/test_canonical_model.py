@@ -27,8 +27,9 @@ from amiga_adf_library_builder.canonical import (
     slugify_title,
 )
 from amiga_adf_library_builder.file_identity import FileIdentityStore
-from amiga_adf_library_builder.models import StagedLibrary, StagedReleaseEntry, StagedState
+from amiga_adf_library_builder.models import ParsedRecord, ReleaseGroup, StagedLibrary, StagedReleaseEntry, StagedState
 from amiga_adf_library_builder.pipeline import build_staged_library_from_result
+from amiga_adf_library_builder.selection import select_one_per_game
 
 
 # ---------------------------------------------------------------------------
@@ -71,8 +72,62 @@ class TestPrecedence:
         assert value == "My Chaos Engine"
         assert prov.authority is SourceAuthority.CURATION
 
+    def test_dat_ranking_deterministic_within_tier(self):
+        f = CanonicalField()
+        f.claim(_prov("fresh1g1r", "dat", rank=3), "B")
+        f.claim(_prov("tosec", "dat", rank=1), "A")
+        value, _ = f.resolve()
+        assert value == "A"  # lower authority_rank wins
 
-class TestSlugify:
+    def test_conflicts_preserved_not_overwritten(self):
+        f = CanonicalField()
+        f.claim(_prov("parser", "parser"), "raw-name.adf")
+        f.claim(_prov("tosec", "dat"), "TOSEC name")
+        # A later, lower-authority claim must not erase prior claims.
+        f.claim(_prov("other-parser", "parser"), "different")
+        values = f.conflicting_values()
+        # Deterministic tiebreak: same tier/rank/time -> source name order.
+        assert values == ["TOSEC name", "different", "raw-name.adf"]
+        assert len(f.claims) == 3
+
+    def test_manual_override_not_overwritten_by_refresh(self):
+        f = CanonicalField()
+        f.claim(_prov("operator", "curation"), "Operator Title")
+        # Simulated provider refresh adding a NEWER automated claim.
+        f.claim(_prov("igdb", "dat", observed_at="2026-09-12T00:00:00+00:00"),
+                "Provider Title")
+        value, prov = f.resolve()
+        assert value == "Operator Title"
+        assert prov.authority is SourceAuthority.CURATION
+
+    def test_same_tie_breaks_total_and_stable(self):
+        f1 = CanonicalField()
+        f1.claim(_prov("tosec", "dat"), "X")
+        f1.claim(_prov("tosec", "dat"), "X")
+        f2 = CanonicalField()
+        f2.claim(_prov("tosec", "dat"), "X")
+        f2.claim(_prov("tosec", "dat"), "X")
+        assert f1.resolve() == f2.resolve()
+
+    def test_empty_field_resolves_none(self):
+        assert CanonicalField().resolve() == (None, None)
+
+
+class TestIdentifiers:
+    def test_release_id_deterministic_and_distinct(self):
+        a = make_release_id("chaos-engine", edition="v1.0")
+        b = make_release_id("chaos-engine", edition="v1.1")
+        c = make_release_id("chaos-engine", edition="v1.0")
+        assert a == c and a != b
+        assert a.startswith("chaos-engine:")
+
+    def test_disk_id_content_anchored_not_path_based(self):
+        assert make_disk_id("abc123") == "sha256:abc123"
+        # Same content under a new filename keeps the same identity.
+        assert make_disk_id("abc123", "anything.adf") == "sha256:abc123"
+        # No hash: deterministic fallback, still filename-derived-content only.
+        assert make_disk_id("", "disk1.adf") == make_disk_id("", "disk1.adf")
+
     def test_slugify_deterministic(self):
         assert slugify_title("The Chaos Engine!") == "the-chaos-engine"
         assert slugify_title("") == "untitled"
@@ -374,7 +429,7 @@ class TestF4FreshRegionLanguageCanonical:
         lib.close()
 
     def test_region_alone_changes_scored_rank(self, tmp_path):
-        """Region negative-control: region alone changes score/winner."""
+        """Region negative-control: region alone changes scored rank and winner."""
         lib = CanonicalLibrary(tmp_path / "canonical.db")
         en = self._staged_entry("game:en", "Game", ["a.adf"], region="USA", language="EN")
         de = self._staged_entry("game:de", "Game", ["b.adf"], region="DE", language="DE")
@@ -382,12 +437,21 @@ class TestF4FreshRegionLanguageCanonical:
         assert stats["releases"] == 2
         rel_ids = lib.releases_for_game("game")
         assert len(rel_ids) == 2
-        # Different region/language => different release IDs (hashed into release_id).
-        assert rel_ids[0] != rel_ids[1]
+        # Real scored consequence: different region => different rank.
+        en_rank = lib.resolve_field("release", rel_ids[0], "region")[0]
+        de_rank = lib.resolve_field("release", rel_ids[1], "region")[0]
+        assert en_rank != de_rank
+        # Winner must be the USA entry (higher region rank).
+        winner = select_one_per_game(
+            [ReleaseGroup(release_key=k, title="Game", edition=None, group=None,
+                          chipset=None, records=[], disks=[], specials=[]) for k in rel_ids],
+            canon=lib,
+        )
+        assert winner.selected[0].release_key == rel_ids[0]
         lib.close()
 
     def test_language_alone_changes_scored_rank(self, tmp_path):
-        """Language negative-control: language alone changes score/winner."""
+        """Language negative-control: language alone changes scored rank and winner."""
         lib = CanonicalLibrary(tmp_path / "canonical.db")
         en = self._staged_entry("game:en", "Game", ["a.adf"], region="USA", language="EN")
         fr = self._staged_entry("game:fr", "Game", ["b.adf"], region="USA", language="FR")
@@ -395,7 +459,17 @@ class TestF4FreshRegionLanguageCanonical:
         assert stats["releases"] == 2
         rel_ids = lib.releases_for_game("game")
         assert len(rel_ids) == 2
-        assert rel_ids[0] != rel_ids[1]
+        # Real scored consequence: different language => different rank.
+        en_rank = lib.resolve_field("release", rel_ids[0], "language")[0]
+        fr_rank = lib.resolve_field("release", rel_ids[1], "language")[0]
+        assert en_rank != fr_rank
+        # Winner must be the EN entry (higher language rank).
+        winner = select_one_per_game(
+            [ReleaseGroup(release_key=k, title="Game", edition=None, group=None,
+                          chipset=None, records=[], disks=[], specials=[]) for k in rel_ids],
+            canon=lib,
+        )
+        assert winner.selected[0].release_key == rel_ids[0]
         lib.close()
 
     def test_no_canonical_db_required_for_fresh_export(self, tmp_path):
@@ -413,3 +487,42 @@ class TestF4FreshRegionLanguageCanonical:
                                          "region")
         assert value == "USA"
         lib2.close()
+
+
+# ---------------------------------------------------------------------------
+# T3: grouper first-hop tripwire — ParsedRecord.region -> ReleaseGroup.region
+# ---------------------------------------------------------------------------
+
+class TestGrouperFirstHop:
+    """The grouper must propagate ParsedRecord.region into ReleaseGroup.region.
+
+    QA-REVERIFY5 proved a single-hop mutant (region=first.region -> region=None)
+    leaves the candidate suite green while breaking the F4 path.
+    This test drives real group_records and fails under that mutation.
+    """
+
+    def test_grouper_propagates_region_from_parsed_record(self):
+        """group_records must carry first.region into ReleaseGroup.region."""
+        from amiga_adf_library_builder.grouper import group_records
+
+        rec_en = ParsedRecord(
+            source_filename="battlesquadronv10.adf",
+            ext="adf",
+            title="Battle Squadron",
+            language="EN",
+            region="USA",
+            release_key="battlesquadronv10||||en||",
+        )
+        rec_de = ParsedRecord(
+            source_filename="battlesquadronv10de.adf",
+            ext="adf",
+            title="Battle Squadron",
+            language="DE",
+            region="DE",
+            release_key="battlesquadronv10||||de||",
+        )
+        groups = group_records([rec_en, rec_de])
+        en_group = next(g for g in groups if g.release_key == "battlesquadronv10||||en||")
+        de_group = next(g for g in groups if g.release_key == "battlesquadronv10||||de||")
+        assert en_group.region == "USA"
+        assert de_group.region == "DE"
