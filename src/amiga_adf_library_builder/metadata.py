@@ -245,6 +245,31 @@ def _text_get(url: str, *, timeout: float = 20.0,
         return data.decode(charset, errors="replace"), str(final_url)
 
 
+@dataclass
+class LemonAmigaConfig:
+    """Configuration for the Lemon Amiga metadata provider.
+
+    Disabled by default; opt-in via the ``[lemonamiga]`` TOML table.
+    Mirrors the pattern used by other optional providers.
+    """
+
+    enabled: bool = False
+    timeout_seconds: float = 20.0
+    max_response_bytes: int = 3_000_000
+    cache_ttl: float = 86400.0  # 24 hours
+
+    @classmethod
+    def from_dict(cls, data: Optional[dict]) -> "LemonAmigaConfig":
+        if not data:
+            return cls()
+        return cls(
+            enabled=bool(data.get("enabled", False)),
+            timeout_seconds=float(data.get("timeout_seconds", 20.0)),
+            max_response_bytes=int(data.get("max_response_bytes", 3_000_000)),
+            cache_ttl=float(data.get("cache_ttl", 86400.0)),
+        )
+
+
 def _norm(value: str) -> str:
     return re.sub(r"[^a-z0-9]", "", value.lower())
 
@@ -912,6 +937,283 @@ class _HallOfLightDetailParser(HTMLParser):
                 self.platforms = [p.strip() for p in data.split(",") if p.strip()]
 
 
+def lemonamiga_lookup(title: str, *, timeout: float = 20.0,
+                         opener: Optional[Callable[..., Any]] = None,
+                         config: Optional[LemonAmigaConfig] = None
+                         ) -> Optional[MetadataRecord]:
+    """Search Lemon Amiga (lemonamiga.com) for a game and return a MetadataRecord.
+
+    Uses a slug-based game page fetch, then parses the detail page for
+    metadata. The provider is unkeyed (no API key required), disabled by
+    default, and participates in the standard relevance validation pipeline.
+
+    Every HTTP call goes through the injected ``opener`` for testability.
+    The real urllib opener is used when ``opener`` is None.
+
+    When ``config`` is provided, its ``enabled`` flag is checked first;
+    if ``False``, returns ``None`` immediately.
+    """
+    cfg = config or LemonAmigaConfig()
+    if not cfg.enabled:
+        return None
+
+    # Step 1: Construct a slug from the title and try the game page directly
+    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+    game_url = f"https://www.lemonamiga.com/game/{slug}"
+
+    try:
+        game_html, final_url = _text_get(
+            game_url, timeout=timeout, opener=opener
+        )
+    except Exception:
+        return None
+
+    # Parse the game detail page
+    parser = _LemonAmigaGameParser()
+    parser.feed(game_html)
+
+    if not parser.canonical_title:
+        return None
+
+    candidate_norm = _norm(parser.canonical_title)
+    target_norm = _norm(title)
+    ratio = SequenceMatcher(None, target_norm, candidate_norm).ratio()
+    if ratio < 0.30:
+        return None
+
+    # Build MetadataRecord from parsed data
+    record = MetadataRecord(
+        canonical_title=parser.canonical_title,
+        description=parser.description,
+        year=parser.year,
+        developer=parser.developer,
+        publisher=parser.publisher,
+        genres=parser.genres,
+        platforms=parser.platforms,
+        source_url=final_url,
+        provider="lemon-amiga",
+        provider_id=str(parser.game_id) if parser.game_id else "",
+        retrieved_at=utc_now(),
+        confidence=ratio,
+        query=title,
+    )
+
+    # Skip games without Amiga platform
+    amiga_present = any("amiga" in (p or "").lower() for p in record.platforms)
+    if not amiga_present:
+        return None
+
+    # Discover artwork from the game page (metadata-only: only if
+    # the operator has opted into artwork via config)
+    try:
+        art_found = discover_artwork_from_page(
+            final_url, title, timeout=timeout, opener=opener
+        )
+        if art_found:
+            record.artwork_url, record.artwork_provider = art_found
+            record.artwork_source_url = final_url
+    except Exception:
+        pass
+
+    return record
+
+
+class _LemonAmigaSearchParser(HTMLParser):
+    """Parse Lemon Amiga search/list results for game links."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.game_links: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
+        a = {k.lower(): (v or "") for k, v in attrs}
+        if tag.lower() == "a" and a.get("href"):
+            href = a["href"]
+            # Match game detail URLs: /games/details.php?id=<n>
+            if "/games/details.php" in href:
+                params = urllib.parse.parse_qs(urllib.parse.urlparse(href).query)
+                game_id = params.get("id", [""])[0]
+                if game_id:
+                    self.game_links.append(href)
+
+
+class _LemonAmigaGameParser(HTMLParser):
+    """Parse Lemon Amiga game detail page for metadata fields.
+
+    Lemon Amiga uses HTML tables with <tr><th>label</th><td>value</td></tr>
+    structure. This parser tracks the current field label from <th> elements
+    and captures the value from the following <td> element.
+    """
+
+    FIELD_MAP = {
+        "released": "year",
+        "year": "year",
+        "publisher": "publisher",
+        "editor": "publisher",
+        "coder": "developer",
+        "programmer": "developer",
+        "graphics": "developer",
+        "artist": "developer",
+        "musician": "developer",
+        "genre": "genres",
+        "category": "genres",
+        "sub-genre": "genres",
+        "sub_genre": "genres",
+        "tags": "genres",
+        "hardware": "platforms",
+        "system": "platforms",
+        "platform": "platforms",
+        "players": "platforms",
+        "player": "platforms",
+        "language": "platforms",
+        "license": "platforms",
+        "disks": "platforms",
+        "disk": "platforms",
+    }
+
+    HARDWARE_TO_PLATFORM = {
+        "ocs": "Amiga OCS",
+        "ecs": "Amiga ECS",
+        "aga": "Amiga AGA",
+        "cd32": "Amiga CD32",
+        "cdtv": "Amiga CDTV",
+    }
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.canonical_title: str = ""
+        self.description: str = ""
+        self.year: str = ""
+        self.developer: str = ""
+        self.publisher: str = ""
+        self.genres: list[str] = []
+        self.platforms: list[str] = []
+        self.game_id: str = ""
+        self._th_text: str = ""
+        self._td_text: str = ""
+        self._in_td: bool = False
+        self._in_th: bool = False
+        self._in_description: bool = False
+        self._description_parts: list[str] = []
+        self._table_section: str = ""
+        self._in_title_tag: bool = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
+        a = {k.lower(): (v or "") for k, v in attrs}
+        tag_lower = tag.lower()
+
+        if tag_lower == "title":
+            self._in_title_tag = True
+        elif tag_lower == "h1" and not self.canonical_title:
+            self._in_td = False
+            self._in_th = False
+        elif tag_lower == "th":
+            self._in_th = True
+            self._th_text = ""
+        elif tag_lower == "td":
+            self._in_th = False
+            self._in_td = True
+            self._td_text = ""
+        elif tag_lower == "table":
+            tbl_id = a.get("id", "").lower()
+            tbl_class = a.get("class", "").lower()
+            if "credit" in tbl_class or "credit" in tbl_id:
+                self._table_section = "credits"
+            elif "info" in tbl_class or "info" in tbl_id or "detail" in tbl_class or "detail" in tbl_id:
+                self._table_section = "info"
+            elif "categor" in tbl_class or "categor" in tbl_id:
+                self._table_section = "categorization"
+            elif "relation" in tbl_class or "relation" in tbl_id:
+                self._table_section = "relationships"
+            elif "review" in tbl_class or "review" in tbl_id:
+                self._table_section = "reviews"
+        elif tag_lower == "div":
+            cls = a.get("class", "").lower()
+            if "description" in cls:
+                self._in_description = True
+                self._description_parts = []
+
+    def handle_endtag(self, tag: str) -> None:
+        tag_lower = tag.lower()
+        if tag_lower == "title":
+            self._in_title_tag = False
+        elif tag_lower == "td":
+            self._in_td = False
+            self._process_field(self._th_text.strip().lower(), self._td_text.strip())
+            self._th_text = ""
+            self._td_text = ""
+        elif tag_lower == "th":
+            self._in_th = False
+        elif tag_lower == "h1":
+            pass  # title captured in handle_data
+        elif tag_lower == "div":
+            self._in_description = False
+        elif tag_lower == "table":
+            self._table_section = ""
+
+    def handle_data(self, data: str) -> None:
+        data = data.strip()
+        if not data:
+            return
+
+        if self._in_title_tag:
+            return
+        if self._in_td:
+            self._td_text += data + " "
+        elif self._in_th:
+            self._th_text += data + " "
+        elif not self.canonical_title:
+            self.canonical_title = data
+
+    def _process_field(self, field: str, value: str) -> None:
+        if not value:
+            return
+        if field in ("released", "year"):
+            match = re.search(r"(19|20)\d{2}", value)
+            if match:
+                self.year = match.group(0)
+        elif field in ("publisher", "editor"):
+            self.publisher = value
+        elif field in ("coder", "programmer"):
+            self.developer = value
+        elif field in ("graphics", "artist", "musician"):
+            if not self.developer:
+                self.developer = value
+        elif field in ("genre", "category", "sub-genre", "sub_genre", "tags"):
+            new_genres = [g.strip() for g in value.split(",") if g.strip()]
+            for g in new_genres:
+                if g not in self.genres:
+                    self.genres.append(g)
+        elif field in ("hardware", "system", "platform", "players", "player", "language", "license", "disks", "disk"):
+            new_platforms = []
+            for p in value.split(","):
+                p = p.strip()
+                if not p:
+                    continue
+                # Map common Amiga hardware names to platform identifiers
+                lower_p = p.lower()
+                mapped = False
+                for hw_key, platform_val in self.HARDWARE_TO_PLATFORM.items():
+                    if hw_key in lower_p:
+                        if platform_val not in new_platforms:
+                            new_platforms.append(platform_val)
+                        mapped = True
+                if not mapped:
+                    if p not in new_platforms:
+                        new_platforms.append(p)
+            for p in new_platforms:
+                if p not in self.platforms:
+                    self.platforms.append(p)
+
+    def handle_entityref(self, name: str) -> None:
+        if self._in_td:
+            self._td_text += f"&{name};"
+
+    def handle_charref(self, name: str) -> None:
+        if self._in_td:
+            self._td_text += f"&#{name};"
+
+
 def _discover_curated_artwork(record: MetadataRecord, title: str, *, timeout: float,
                               opener: Optional[Callable[..., Any]]) -> None:
     pages = list(dict.fromkeys(record.artwork_page_urls))
@@ -937,17 +1239,21 @@ def lookup_metadata(title: str, *, cache_dir: Path, curated_dir: Path,
                     group: Any = None,
                     opener: Optional[Callable[..., Any]] = None,
                     mobygames_enabled: bool = False,
-                    mobygames_api_key_env: str = "MOBYGAMES_API_KEY"
+                    mobygames_api_key_env: str = "MOBYGAMES_API_KEY",
+                    lemonamiga_enabled: bool = False
                     ) -> tuple[Optional[MetadataRecord], str, list[dict]]:
     """Resolve metadata for ``title`` using the shared precedence chain.
 
     Precedence (deterministic, highest first): curated -> cache -> keyed online
-    providers (RAWG, then MobyGames) -> Wikipedia (unkeyed fallback). A keyed
-    provider is only attempted when BOTH its config flag is enabled AND its API
-    key is present in the environment; otherwise it is a no-op and the chain
-    simply proceeds to the next provider. MobyGames is DISABLED BY DEFAULT
+    providers (RAWG, then MobyGames) -> Hall of Light -> Lemon Amiga ->
+    Wikipedia (unkeyed fallback). A keyed provider is only attempted when
+    BOTH its config flag is enabled AND its API key is present in the
+    environment; otherwise it is a no-op and the chain simply proceeds to
+    the next provider. MobyGames is DISABLED BY DEFAULT
     (``mobygames_enabled=False``), so the base app is unchanged unless an
-    operator opts in via the ``[mobygames]`` config table.
+    operator opts in via the ``[mobygames]`` config table. Lemon Amiga is
+    similarly disabled by default (``lemonamiga_enabled=False``) and
+    opt-in via the ``[lemonamiga]`` config table.
     """
     curated = load_curated(curated_dir, title)
     if curated:
@@ -1015,6 +1321,10 @@ def lookup_metadata(title: str, *, cache_dir: Path, curated_dir: Path,
     if accepted is None:
         _try_provider("hall-of-light",
                       lambda: hall_of_light_lookup(title, timeout=timeout, opener=opener))
+    if accepted is None:
+        _try_provider("lemon-amiga",
+                      lambda: lemonamiga_lookup(title, timeout=timeout, opener=opener,
+                                                config=LemonAmigaConfig(enabled=lemonamiga_enabled)))
     if accepted is None:
         _try_provider("wikipedia",
                       lambda: wikipedia_lookup(title, timeout=timeout, opener=opener))
