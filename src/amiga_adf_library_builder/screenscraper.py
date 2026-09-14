@@ -671,7 +671,7 @@ def _fetch_xml(
     guard_url(url, resolve=resolve)
     req = urllib.request.Request(
         url,
-        headers={"User-Agent": "AmigaADFLibraryBuilder/1.0"},
+        headers={"User-Agent": f"AmigaADFLibraryBuilder/{__import__('amiga_adf_library_builder._version', fromlist=['__version__']).__version__}"},
     )
     _opener = opener or urllib.request.urlopen
     try:
@@ -705,7 +705,7 @@ def _fetch_binary(
     guard_url(url, resolve=resolve)
     req = urllib.request.Request(
         url,
-        headers={"User-Agent": "AmigaADFLibraryBuilder/1.0"},
+        headers={"User-Agent": f"AmigaADFLibraryBuilder/{__import__('amiga_adf_library_builder._version', fromlist=['__version__']).__version__}"},
     )
     _opener = opener or urllib.request.urlopen
     try:

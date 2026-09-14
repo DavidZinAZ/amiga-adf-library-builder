@@ -351,7 +351,7 @@ def _download_artwork(record: MetadataRecord, dest_dir: Path, title: str,
     # Guard against fetching non-public address space. _download_artwork always
     # performs a real network request, so resolve DNS here.
     guard_url(record.artwork_url, resolve=True)
-    request = urllib.request.Request(record.artwork_url, headers={"User-Agent": "AmigaADFLibraryBuilder/0.2.1", "Accept": "image/*"})
+    request = urllib.request.Request(record.artwork_url, headers={"User-Agent": f"AmigaADFLibraryBuilder/{__import__('amiga_adf_library_builder._version', fromlist=['__version__']).__version__}", "Accept": "image/*"})
     with urllib.request.urlopen(request, timeout=timeout) as response:
         content_type = response.headers.get_content_type()
         data = response.read(max_bytes + 1)

@@ -1590,10 +1590,11 @@ class MainWindow(QMainWindow):
         )
 
     def _show_about(self) -> None:
+        from .. import __version__
         QMessageBox.about(
             self,
             "About",
-            f"Amiga ADF Library Builder — GUI\nVersion {gui_version}\n"
+            f"Amiga ADF Library Builder — GUI\nVersion {__version__}\n"
             "A graphical front end for building Amiga ADF libraries for the "
             "Gotek. It runs the same processing as the command-line tool, so "
             "results match.",
