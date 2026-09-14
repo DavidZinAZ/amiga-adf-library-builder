@@ -125,6 +125,7 @@ def providers_for_mode(mode: str) -> list[str]:
         "rawg",
         "mobygames",
         "hall-of-light",
+        "lemon-amiga",
         "wikipedia",
     ]
 
