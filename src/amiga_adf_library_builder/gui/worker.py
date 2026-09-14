@@ -68,6 +68,11 @@ class PipelineWorker(QObject):
     def request_cancel(self) -> None:
         self._cancel.set()
 
+    def wait_for_finished(self, timeout_ms: int) -> bool:
+        if self._thread is None:
+            return True
+        return self._thread.wait(timeout_ms)
+
     def is_cancelled(self) -> bool:
         return self._cancel.is_set()
 

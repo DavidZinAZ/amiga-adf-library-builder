@@ -10,6 +10,7 @@ from enum import Enum
 from datetime import datetime, timezone
 import hashlib
 import json
+import threading
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -570,6 +571,7 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                  screenscraper_provider=None,
                  retroachievements_provider=None,
                  include_artwork: bool = True,
+                 cancel_event: Optional[threading.Event] = None,
                  activity: Optional[Callable[[str], None]] = None) -> EnrichResult:
     metadata_cache_dir = Path(metadata_cache_dir or (Path(nfo_dir).parent / "metadata-cache"))
     curated_metadata_dir = Path(curated_metadata_dir or (Path(nfo_dir).parent / "metadata-curated"))
@@ -1320,6 +1322,7 @@ def enrich_all(groups: list[ReleaseGroup], *, nfo_dir: Path, scans: list[ScanRec
                screenscraper_provider=None,
                retroachievements_provider=None,
                include_artwork: bool = True,
+               cancel_event: Optional[threading.Event] = None,
                activity: Optional[Callable[[str], None]] = None) -> list[EnrichResult]:
     scan_map = {s.filename: s for s in scans}
     metadata_cache_dir = Path(metadata_cache_dir or (Path(nfo_dir).parent / "metadata-cache"))
@@ -1327,6 +1330,13 @@ def enrich_all(groups: list[ReleaseGroup], *, nfo_dir: Path, scans: list[ScanRec
     total = len(groups)
     results: list[EnrichResult] = []
     for idx, group in enumerate(groups, start=1):
+        if cancel_event is not None and cancel_event.is_set():
+            if activity is not None:
+                try:
+                    activity("Cancelled by operator — stopping enrichment.")
+                except Exception:
+                    pass
+            break
         if activity is not None:
             try:
                 activity(
@@ -1348,5 +1358,6 @@ def enrich_all(groups: list[ReleaseGroup], *, nfo_dir: Path, scans: list[ScanRec
                      screenscraper_provider=screenscraper_provider,
                      retroachievements_provider=retroachievements_provider,
                      include_artwork=include_artwork,
+                     cancel_event=cancel_event,
                      activity=activity))
     return results
