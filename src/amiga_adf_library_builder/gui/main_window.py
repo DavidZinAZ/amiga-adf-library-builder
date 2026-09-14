@@ -1347,11 +1347,29 @@ class MainWindow(QMainWindow):
             sources = self._metadata_manager.list_sources()
             sid = next((s.source_id for s in sources if s.path == path), source_id)
         try:
-            if self._metadata_manager.rescan(sid):
+            result = self._metadata_manager.rescan(sid)
+            if result:
                 self._refresh_ms_table()
                 self._append_diag(f"Metadata Sources: rescanned source {sid}")
+                errors = getattr(self._metadata_manager, "_last_scan_errors", [])
+                if errors:
+                    for err in errors:
+                        self._append_diag(
+                            f"Metadata Sources: {err.get('file', 'unknown')} — "
+                            f"{err.get('reason', 'unknown error')}"
+                        )
             else:
-                QMessageBox.warning(self, "Rescan", "Rescan failed.")
+                errors = getattr(self._metadata_manager, "_last_scan_errors", [])
+                if errors:
+                    self._append_diag(
+                        f"Metadata Sources: rescan failed for {sid}; "
+                        f"last-known-good data preserved. "
+                        f"Errors: {', '.join(e.get('file', 'unknown') for e in errors)}"
+                    )
+                QMessageBox.warning(
+                    self, "Rescan",
+                    "Rescan failed. Last-known-good data preserved.",
+                )
         except Exception as exc:
             logger.exception("rescan failed")
             QMessageBox.critical(self, "Rescan", f"Error: {exc}")
