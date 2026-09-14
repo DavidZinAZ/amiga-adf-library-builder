@@ -202,6 +202,7 @@ class MetadataSourceManager:
         self._conn = sqlite3.connect(str(self.db_path))
         self._conn.row_factory = sqlite3.Row
         self._create_tables()
+        self._last_scan_errors: list[dict] = []
 
     def _create_tables(self) -> None:
         """Create the schema if it does not exist."""
@@ -308,7 +309,7 @@ class MetadataSourceManager:
         if source_type == "dat":
             entries = parse_dat(path)
         else:
-            entries = self._scan_folder(path)
+            entries, _ = self._scan_folder(path)
         # Insert source + entries atomically
         try:
             cur = self._conn.cursor()
@@ -353,15 +354,29 @@ class MetadataSourceManager:
             self._conn.rollback()
             return None
 
-    def _scan_folder(self, folder: Path) -> list[SourceEntry]:
-        """Scan a folder for DAT files recursively."""
+    def _scan_folder(self, folder: Path) -> tuple[list[SourceEntry], list[dict]]:
+        """Scan a folder for DAT files recursively.
+
+        Returns (entries, errors) where entries is the list of parsed
+        SourceEntry objects and errors is a list of dicts with 'file' and
+        'reason' keys for files that failed to parse.
+        """
         entries: list[SourceEntry] = []
+        errors: list[dict] = []
         if not folder.is_dir():
-            return entries
+            return entries, errors
         for dat_file in folder.rglob("*.dat"):
-            parsed = parse_dat(dat_file)
-            entries.extend(parsed)
-        return entries
+            try:
+                parsed = parse_dat(dat_file)
+                if not parsed:
+                    errors.append({
+                        "file": str(dat_file),
+                        "reason": "Parse returned empty (malformed or unknown format)",
+                    })
+                entries.extend(parsed)
+            except Exception as exc:
+                errors.append({"file": str(dat_file), "reason": str(exc)})
+        return entries, errors
 
     def remove_source(self, source_id: str) -> bool:
         """Remove a source and all its entries. Returns True on success."""
@@ -394,20 +409,40 @@ class MetadataSourceManager:
             return False
 
     def rescan(self, source_id: str) -> bool:
-        """Re-parse a DAT source and rebuild its entries."""
+        """Re-parse a DAT source and rebuild its entries.
+
+        Preserves last-known-good entries if the new parse returns empty
+        when the source previously had entries. Returns True on success,
+        False on failure (preserving prior data).
+        """
         row = self.get_source(source_id)
         if row is None:
+            self._last_scan_errors = []
             return False
         path = Path(row.path)
         if not path.exists():
             logger.warning("Source path missing on rescan: %s", path)
+            self._last_scan_errors = []
             return False
         source_type = row.source_type
+        old_entry_count = row.entry_count
+        # Parse new entries
         if source_type == "dat":
             entries = parse_dat(path)
+            errors = []
         else:
-            entries = self._scan_folder(path)
+            entries, errors = self._scan_folder(path)
         sha = self._sha256_file(path) if source_type == "dat" else None
+        # Last-known-good preservation: if we had entries before and now
+        # have none, treat as failure and preserve old data
+        if old_entry_count > 0 and len(entries) == 0:
+            logger.warning(
+                "Rescan of %s returned 0 entries but source previously had "
+                "%d; preserving last-known-good data. Errors: %s",
+                path, old_entry_count, errors,
+            )
+            self._last_scan_errors = errors
+            return False
         try:
             cur = self._conn.cursor()
             cur.execute(
@@ -438,9 +473,16 @@ class MetadataSourceManager:
                     ),
                 )
             self._conn.commit()
+            self._last_scan_errors = errors
+            if errors:
+                logger.warning(
+                    "Rescan of %s completed with %d file error(s): %s",
+                    path, len(errors), errors,
+                )
             return True
         except sqlite3.Error:
             self._conn.rollback()
+            self._last_scan_errors = []
             return False
 
     def reindex_changed(self) -> tuple[int, int]:

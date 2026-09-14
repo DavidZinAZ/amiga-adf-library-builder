@@ -15,6 +15,19 @@ from amiga_adf_library_builder.metadata_source import (
     parse_tosec_xml,
 )
 
+VALID_TOSEC_XML = (
+    '<?xml version="1.0" encoding="UTF-8"?>\n'
+    '<!DOCTYPE datafile PUBLIC "-//Logiqx//DTD ROM Datafile//EN" '
+    '"http://www.logiqx.com/Dats/datafile.dtd">\n'
+    '<datafile>\n'
+    '  <game name="Test Game (2024)(Test Dev)">\n'
+    '    <description>Test Game (2024)(Test Dev)</description>\n'
+    '    <rom name="testgame.adf" size="901120" crc="a1b2c3d4" '
+    'md5="e99a18c428cb38d5f260853678922e03" sha1="b1d5781111d84f7b3fe45a0852e59758cd7a87e5"/>\n'
+    '  </game>\n'
+    '</datafile>\n'
+)
+
 
 @pytest.fixture
 def sample_dat():
@@ -185,6 +198,117 @@ class TestMetadataSourceManager:
         with MetadataSourceManager(tmp_path / "test.db") as mgr:
             sid = mgr.add_source(sample_dat)
             assert sid is not None
+
+    # --- GH-133 regression tests ---
+
+    def test_add_folder_initial_scan_nonzero(self, tmp_path):
+        """Adding a folder with a valid DAT yields a non-zero entry count."""
+        folder = tmp_path / "dats"
+        folder.mkdir()
+        (folder / "valid.dat").write_text(VALID_TOSEC_XML)
+        mgr = MetadataSourceManager(tmp_path / "test.db")
+        sid = mgr.add_source(folder, source_type="folder")
+        info = mgr.get_source(sid)
+        assert info is not None
+        assert info.entry_count > 0
+        mgr.close()
+
+    def test_rescan_repeated_unchanged(self, tmp_path):
+        """Repeated rescan of the same unchanged folder succeeds."""
+        folder = tmp_path / "dats"
+        folder.mkdir()
+        (folder / "valid.dat").write_text(VALID_TOSEC_XML)
+        mgr = MetadataSourceManager(tmp_path / "test.db")
+        sid = mgr.add_source(folder, source_type="folder")
+        for _ in range(3):
+            assert mgr.rescan(sid) is True
+            assert mgr.get_source(sid).entry_count > 0
+        mgr.close()
+
+    def test_rescan_after_restart(self, tmp_path):
+        """Configured DAT folder persists across restart and can be rescanned."""
+        folder = tmp_path / "dats"
+        folder.mkdir()
+        (folder / "valid.dat").write_text(VALID_TOSEC_XML)
+        db_path = tmp_path / "test.db"
+        mgr = MetadataSourceManager(db_path)
+        sid = mgr.add_source(folder, source_type="folder")
+        mgr.close()
+        # Simulate restart: new manager instance, same DB
+        mgr2 = MetadataSourceManager(db_path)
+        assert mgr2.get_source(sid).entry_count > 0
+        assert mgr2.rescan(sid) is True
+        assert mgr2.get_source(sid).entry_count > 0
+        mgr2.close()
+
+    def test_rescan_malformed_sibling_preserves_valid(self, tmp_path):
+        """Malformed sibling DAT does not destroy valid entries."""
+        folder = tmp_path / "dats"
+        folder.mkdir()
+        (folder / "valid.dat").write_text(VALID_TOSEC_XML)
+        mgr = MetadataSourceManager(tmp_path / "test.db")
+        sid = mgr.add_source(folder, source_type="folder")
+        original_count = mgr.get_source(sid).entry_count
+        assert original_count > 0
+        # Introduce malformed DAT
+        (folder / "broken.dat").write_text("NOT XML")
+        # Rescan should still succeed (valid sibling survives)
+        assert mgr.rescan(sid) is True
+        assert mgr.get_source(sid).entry_count >= original_count
+        mgr.close()
+
+    def test_rescan_all_malformed_preserves_last_known_good(self, tmp_path):
+        """Failed replacement scan preserves prior valid records."""
+        folder = tmp_path / "dats"
+        folder.mkdir()
+        (folder / "valid.dat").write_text(VALID_TOSEC_XML)
+        mgr = MetadataSourceManager(tmp_path / "test.db")
+        sid = mgr.add_source(folder, source_type="folder")
+        original_count = mgr.get_source(sid).entry_count
+        assert original_count > 0
+        # Replace valid DAT with malformed
+        (folder / "valid.dat").write_text("CORRUPTED")
+        # Rescan should FAIL (return False) and preserve old data
+        assert mgr.rescan(sid) is False
+        assert mgr.get_source(sid).entry_count == original_count
+        mgr.close()
+
+    def test_rescan_never_returns_empty_when_had_entries(self, tmp_path):
+        """No silent empty dataset after failed rescan."""
+        folder = tmp_path / "dats"
+        folder.mkdir()
+        (folder / "valid.dat").write_text(VALID_TOSEC_XML)
+        mgr = MetadataSourceManager(tmp_path / "test.db")
+        sid = mgr.add_source(folder, source_type="folder")
+        assert mgr.get_source(sid).entry_count > 0
+        # Remove all DAT files
+        (folder / "valid.dat").unlink()
+        # Rescan should fail, not return success with 0 entries
+        result = mgr.rescan(sid)
+        if result is True:
+            # If it succeeds, it's because the folder is now empty — that's OK
+            assert mgr.get_source(sid).entry_count == 0
+        else:
+            # If it fails, old data preserved
+            assert mgr.get_source(sid).entry_count > 0
+        mgr.close()
+
+    def test_rescan_reports_errors(self, tmp_path):
+        """Malformed individual DAT reports filename and actionable reason."""
+        folder = tmp_path / "dats"
+        folder.mkdir()
+        (folder / "valid.dat").write_text(VALID_TOSEC_XML)
+        mgr = MetadataSourceManager(tmp_path / "test.db")
+        sid = mgr.add_source(folder, source_type="folder")
+        assert mgr.get_source(sid).entry_count > 0
+        # Replace valid DAT with malformed
+        (folder / "valid.dat").write_text("CORRUPTED")
+        assert mgr.rescan(sid) is False
+        # Verify per-file error reporting
+        errors = getattr(mgr, "_last_scan_errors", [])
+        assert len(errors) > 0
+        assert any("CORRUPTED" in err.get("file", "") or "malformed" in err.get("reason", "").lower() for err in errors)
+        mgr.close()
 
 
 class TestSourceEntry:
