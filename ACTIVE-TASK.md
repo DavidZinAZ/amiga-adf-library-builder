@@ -1,67 +1,80 @@
-# ACTIVE-TASK — GH-119 CORRECTION-DEV
+# ACTIVE-TASK.md — GH-143 Canonical Lifecycle Implementation
 
 ## Task
-Implement ONLY the three Q Branch correction items for GH-119:
-1. Release workflow hard-fails when tag version != canonical app version (Gap A)
-2. Frozen Windows EXE receives real FileVersion/ProductVersion PE metadata (Gap B)
-3. Runtime About/version lookup works inside frozen onedir/onefile builds (Gap C)
+GH-143 — CASE CANONICAL LIFECYCLE IMPLEMENTATION
+Implement P1 canonical.db lifecycle remediation end-to-end per approved Q Branch design.
 
 ## Authority Mode
 IMPLEMENT
 
-## Repository
-/path: /home/dumbo/projects/amiga-adf-library-builder/.worktrees/t_37e4a94c
-Branch: wt/t_37e4a94c
-HEAD: c7c35aa982f884efde61b53820a25d8ebab25a44 (matches origin/main)
-BASE_SHA: c7c35aa982f884efde61b53820a25d8ebab25a44
+## Repository Path
+/home/dumbo/projects/amiga-adf-library-builder
+
+## Worktree Path
+/home/dumbo/.hermes/kanban/boards/amiga-adf-library-builder/workspaces/t_50f99dfb
+
+## Branch
+gh143-implement-t50f99dfb
+
+## HEAD
+8186d8122031f96c0ec26ee2ad5fcef83b483221 (origin/main)
+
+## BASE SHA
+8186d8122031f96c0ec26ee2ad5fcef83b483221
 
 ## Applicable Standards
-- Research report: /archive01/dumbo/project-planner/technical-advisor/gh119-correction-research.md (exact spec in Appendix A)
-- pyproject.toml [project].version = "0.2.13"
-- Existing test: tests/test_version_identity.py
-- Existing workflow: .github/workflows/build-windows.yml
+- hermes-bounded-implementation
+- hermes-kanban-worker
+- design doc: /home/dumbo/.hermes/kanban/boards/amiga-adf-library-builder/attachments/t_816862a5/GH143-QBRANCH-CANONICAL-LIFECYCLE-DESIGN.md
 
 ## Confirmed Decisions
-- Implementation order: C (frozen-runtime) → B (PE metadata) → A (tag equality)
-- All three fixes in one PR
-- Generated files: `_frozen_version.py` and `_version_info.txt` must be gitignored
-- `skip_tag_version_check` workflow_dispatch bypass input included for Gap A
+- Alt C adopted: record-of-authority with scoped release retirement
+- SEED=15 tier between PARSER(10) and DAT(20)
+- Soft-delete `retired` flag on release rows
+- CLI passes `library_state_path` when available
+- Schema migration v1→v2 via existing `_migrate()` pattern
+- 7-step implementation plan from design doc §17
+- Stop conditions: release_id hash invariant, migrate_staged_library parameterization, soft-delete vs FK cascade
+
+## Unresolved Assumptions
+- U1: Descriptor columns not read directly by production code (only `game_id` from `release_row`), but must stay consistent
+- U2: Performance of re-resolving on every migrate_staged_library call — bounded by small DAT source counts
+- U3: `manual_lookup.py` should show retired releases with flag (design doc recommends this)
 
 ## Current Phase
-Phase 1: Implement Gap C (frozen-runtime version safety)
+Step 1 — Schema migration (SCHEMA_VERSION 1→2, add `retired` column + index)
 
 ## Last Verified Completed Action
-None yet — implementation starting now.
+None yet — implementation just starting
 
 ## Exact Next Safe Action
-1. Create `src/amiga_adf_library_builder/_frozen_version.py` (generated, gitignored)
-2. Refactor `src/amiga_adf_library_builder/_version.py` to add `sys.frozen` guard
-3. Modify `tools/build_windows.py` to generate `_frozen_version.py`
-4. Add `_frozen_version.py` to `.gitignore`
-5. Add test `test_frozen_version_fallback_when_sys_frozen` to `tests/test_version_identity.py`
-6. Fix `test_no_stale_hardcoded_versions` to skip `_frozen_version.py`
+Implement Step 1: Add SEED tier, SCHEMA_VERSION=2, `retired` column + index to `_migrate()`
 
 ## Files Intended to Change
-- src/amiga_adf_library_builder/_version.py (Gap C)
-- tools/build_windows.py (Gap C + Gap B)
-- .gitignore (Gap C + Gap B)
-- tests/test_version_identity.py (Gap C + Gap B tests)
-- .github/workflows/build-windows.yml (Gap A)
+- src/amiga_adf_library_builder/canonical.py (Steps 1-6)
+- src/amiga_adf_library_builder/pipeline.py (Steps 3, 5)
+- src/amiga_adf_library_builder/cli.py (Step 7)
+- tests/test_canonical_lifecycle.py (new test file)
 
 ## Files Independently Verified as Changed
-None yet
+(None)
+
+## Files Attempted but Not Changed
+(None)
 
 ## Tests Completed and Outstanding
-- pytest tests/test_version_identity.py (baseline, then after each gap)
+- Existing: test_canonical_model.py, test_canonical_naming.py, test_canonical_naming_production.py
+- New: tests/test_canonical_lifecycle.py (12+ tests)
+
+## Commands or Processes Still Running
+(None)
 
 ## Artifact and Rollback Locations
-- Active task state: ACTIVE-TASK.md (this file)
-- Research report: /archive01/dumbo/project-planner/technical-advisor/gh119-correction-research.md
+- /home/dumbo/.hermes/kanban/boards/amiga-adf-library-builder/workspaces/t_50f99dfb/
 
 ## Blockers, Risks, and Uncertainties
-- `test_no_stale_hardcoded_versions` regex `r'__version__\s*=\s*"[0-9]"'` will match `_frozen_version.py` — must skip it in the scan
-- The test for frozen path uses `sys.frozen = True` injection which requires careful cleanup
-- Gap A workflow YAML change is untestable locally — qualification by inspection only
+- Branch name `gh143-canonical-lifecycle` already existed in main repo; using `gh143-implement-t50f99dfb`
+- Must verify release_id hash invariant is preserved throughout
 
 ## Timestamp
-2026-09-13T18:10:00 America/Phoenix
+2026-09-14T05:14:00-07:00 (America/Phoenix)

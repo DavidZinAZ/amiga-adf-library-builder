@@ -37,7 +37,7 @@ from enum import IntEnum
 from pathlib import Path
 from typing import Optional
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
@@ -58,6 +58,7 @@ class SourceAuthority(IntEnum):
     """Documented authority ranking for claim sources (see module docstring)."""
 
     PARSER = 10
+    SEED = 15
     DAT = 20
     CURATION_MEMORY = 30
     CURATION = 40
@@ -66,6 +67,7 @@ class SourceAuthority(IntEnum):
     def tier(self) -> str:
         return {
             SourceAuthority.PARSER: "parser",
+            SourceAuthority.SEED: "seed",
             SourceAuthority.DAT: "dat",
             SourceAuthority.CURATION_MEMORY: "curation_memory",
             SourceAuthority.CURATION: "curation",
@@ -368,6 +370,7 @@ class CanonicalLibrary:
                 region TEXT,
                 language TEXT,
                 publisher TEXT,
+                retired INTEGER NOT NULL DEFAULT 0,
                 FOREIGN KEY (game_id) REFERENCES game(game_id)
             )
             """
@@ -414,6 +417,17 @@ class CanonicalLibrary:
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_release_game ON release(game_id)"
         )
+        # Add retired column to existing tables if missing (v1→v2 migration)
+        cols = [r[1] for r in cur.execute(
+            "PRAGMA table_info(release)"
+        ).fetchall()]
+        if "retired" not in cols:
+            cur.execute(
+                "ALTER TABLE release ADD COLUMN retired INTEGER NOT NULL DEFAULT 0"
+            )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_release_retired ON release(retired)"
+        )
         cur.execute(
             f"PRAGMA user_version = {SCHEMA_VERSION}"
         )
@@ -449,27 +463,81 @@ class CanonicalLibrary:
             ),
         )
         self._conn.commit()
+        # Re-resolve release descriptor columns from winning claims
+        # when the new claim has authority >= DAT.
+        if (entity_type == "release"
+                and field_name in ("edition", "region", "language", "publisher")
+                and provenance.authority.value >= SourceAuthority.DAT.value):
+            self.resolve_descriptor_columns(entity_id)
 
     def claims_for(self, entity_type: str, entity_id: str,
-                   field_name: str) -> list:
-        """All preserved claims for one field, most-preferred first."""
-        rows = self._conn.execute(
-            """
-            SELECT * FROM field_claim
-            WHERE entity_type = ? AND entity_id = ? AND field_name = ?
-            """,
-            (entity_type, entity_id, field_name),
-        ).fetchall()
+                   field_name: str, include_retired: bool = False
+                   ) -> list:
+        """All preserved claims for one field, most-preferred first.
+
+        When ``include_retired`` is False (default), claims belonging to
+        retired releases are excluded from the result.
+        """
+        if include_retired or entity_type not in ("release", "disk"):
+            rows = self._conn.execute(
+                """
+                SELECT * FROM field_claim
+                WHERE entity_type = ? AND entity_id = ? AND field_name = ?
+                """,
+                (entity_type, entity_id, field_name),
+            ).fetchall()
+        elif entity_type == "disk":
+            # For disk claims, join through disk table to check release retired status
+            # Use LEFT JOIN so claims without a matching disk/release are still returned.
+            rows = self._conn.execute(
+                """
+                SELECT fc.* FROM field_claim fc
+                LEFT JOIN disk d ON fc.entity_id = d.disk_id
+                LEFT JOIN release r ON d.release_id = r.release_id
+                WHERE fc.entity_type = ? AND fc.entity_id = ?
+                    AND fc.field_name = ?
+                    AND (r.retired = 0 OR r.release_id IS NULL)
+                """,
+                (entity_type, entity_id, field_name),
+            ).fetchall()
+        else:
+            # entity_type == "release": direct join on release table
+            # Use LEFT JOIN so claims without a matching release row
+            # are still returned (e.g., claims created before the
+            # release row was upserted).
+            rows = self._conn.execute(
+                """
+                SELECT fc.* FROM field_claim fc
+                LEFT JOIN release r ON fc.entity_id = r.release_id
+                WHERE fc.entity_type = ? AND fc.entity_id = ?
+                    AND fc.field_name = ?
+                    AND (r.retired = 0 OR r.release_id IS NULL)
+                """,
+                (entity_type, entity_id, field_name),
+            ).fetchall()
         out = []
         for r in rows:
+            auth_val = r["authority"]
+            # Handle both tier strings ("seed") and integer values (15)
+            # from different storage formats across migration paths.
+            if isinstance(auth_val, str) and auth_val in (
+                "parser", "seed", "dat", "curation_memory", "curation"
+            ):
+                authority = dict(
+                    parser=SourceAuthority.PARSER, dat=SourceAuthority.DAT,
+                    seed=SourceAuthority.SEED,
+                    curation_memory=SourceAuthority.CURATION_MEMORY,
+                    curation=SourceAuthority.CURATION,
+                )[auth_val]
+            else:
+                try:
+                    authority = SourceAuthority(int(auth_val))
+                except (ValueError, KeyError):
+                    authority = SourceAuthority.PARSER
             prov = Provenance(
                 source=r["source"], record_key=r["record_key"] or "",
                 url=r["url"] or "",
-                authority=dict(
-                    parser=SourceAuthority.PARSER, dat=SourceAuthority.DAT,
-                    curation_memory=SourceAuthority.CURATION_MEMORY,
-                    curation=SourceAuthority.CURATION,
-                ).get(r["authority"], SourceAuthority.PARSER),
+                authority=authority,
                 authority_rank=r["authority_rank"],
                 confidence=r["confidence"], observed_at=r["observed_at"] or "",
             )
@@ -554,7 +622,10 @@ class CanonicalLibrary:
 
     def releases_for_game(self, game_id: str) -> list:
         rows = self._conn.execute(
-            "SELECT release_id FROM release WHERE game_id = ? ORDER BY release_id",
+            """
+            SELECT release_id FROM release WHERE game_id = ? AND retired = 0
+            ORDER BY release_id
+            """,
             (game_id,),
         ).fetchall()
         return [r["release_id"] for r in rows]
@@ -571,7 +642,9 @@ class CanonicalLibrary:
 
     def release_row(self, release_id: str) -> Optional[dict]:
         r = self._conn.execute(
-            "SELECT * FROM release WHERE release_id = ?", (release_id,)
+            """
+            SELECT * FROM release WHERE release_id = ? AND retired = 0
+            """, (release_id,)
         ).fetchone()
         if r is None:
             return None
@@ -586,13 +659,64 @@ class CanonicalLibrary:
             return None
         return dict(r)
 
+    def retire_releases(self, active_release_ids: set[str]) -> int:
+        """Soft-delete releases not in the active set. Returns count retired."""
+        # Load all release IDs first
+        all_rows = self._conn.execute(
+            "SELECT release_id FROM release WHERE retired = 0"
+        ).fetchall()
+        all_ids = {r[0] for r in all_rows}
+        if not all_ids:
+            return 0
+        # Releases to retire = all active - active_release_ids
+        to_retire = all_ids - active_release_ids if active_release_ids else all_ids
+        if not to_retire:
+            return 0
+        placeholders = ",".join("?" for _ in to_retire)
+        cur = self._conn.execute(
+            f"""
+            UPDATE release SET retired = 1
+            WHERE release_id IN ({placeholders}) AND retired = 0
+            """,
+            list(to_retire),
+        )
+        self._conn.commit()
+        return cur.rowcount
+
+    def resolve_descriptor_columns(self, release_id: str) -> None:
+        """Re-resolve edition/region/language/publisher from winning claims.
+
+        Updates the release row in-place when the winning claim has
+        authority >= DAT and differs from the current column value.
+        Safe: release_id PK is a deterministic hash of original descriptors
+        and is never recomputed.
+        """
+        descriptor_fields = ("edition", "region", "language", "publisher")
+        for field_name in descriptor_fields:
+            value, prov = self.resolve_field("release", release_id, field_name)
+            if prov is None or value is None:
+                continue
+            if prov.authority.value >= SourceAuthority.DAT.value:
+                cur = self._conn.execute(
+                    f"SELECT {field_name} FROM release WHERE release_id = ?",
+                    (release_id,),
+                ).fetchone()
+                if cur is not None and cur[field_name] != value:
+                    self._conn.execute(
+                        f"UPDATE release SET {field_name} = ? WHERE release_id = ?",
+                        (value, release_id),
+                    )
+        self._conn.commit()
+
 
 # ---------------------------------------------------------------------------
 # Migration from staged curation state (backwards compatible)
 # ---------------------------------------------------------------------------
 
 def migrate_staged_library(staged, library: CanonicalLibrary,
-                           identity_store=None) -> dict:
+                           identity_store=None,
+                           seed_authority: SourceAuthority = SourceAuthority.CURATION
+                           ) -> dict:
     """Import an existing ``StagedLibrary`` into the canonical model.
 
     Backwards compatible: accepts any loaded staged state (schema v1 JSON
@@ -642,7 +766,7 @@ def migrate_staged_library(staged, library: CanonicalLibrary,
         )
 
         now = _now_iso()
-        operator = Provenance(source="operator", authority=SourceAuthority.CURATION,
+        operator = Provenance(source="operator", authority=seed_authority,
                               observed_at=now)
         trace = Provenance(source="staged_migration",
                            authority=SourceAuthority.CURATION_MEMORY,
@@ -700,6 +824,7 @@ def migrate_staged_library(staged, library: CanonicalLibrary,
             stats["disks"] += 1
 
         library.upsert_release(release)
+        library.resolve_descriptor_columns(release_id)
         stats["releases"] += 1
 
     for game_id in sorted(seen_games):

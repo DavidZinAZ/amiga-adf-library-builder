@@ -140,6 +140,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="explicit config file for the optional Hasheous identity resolver",
     )
     build_cmd.add_argument("--json", action="store_true", help="emit JSON result")
+    build_cmd.add_argument(
+        "--library-state-path", type=str, default=None,
+        help="path to library_state JSON for curation convergence "
+             "(enables CLI to see GUI curation)",
+    )
 
     export_cmd = commands.add_parser(
         "export",
@@ -188,6 +193,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--selection-manifest", type=str, default=None,
         metavar="PATH",
         help="write selection manifest JSON to PATH",
+    )
+    export_cmd.add_argument(
+        "--library-state-path", type=str, default=None,
+        help="path to library_state JSON for curation convergence "
+             "(enables CLI to see GUI curation)",
     )
 
     gate_cmd = commands.add_parser(
@@ -550,6 +560,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             screenscraper_config_path=getattr(args, "config", None),
             retroachievements_config_path=getattr(args, "config", None),
             retrokit_config_path=getattr(args, "config", None),
+            library_state_path=getattr(args, "library_state_path", None),
         )
         return _emit(
             result,
@@ -589,6 +600,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 screenscraper_config_path=getattr(args, "config", None),
                 retroachievements_config_path=getattr(args, "config", None),
                 retrokit_config_path=getattr(args, "config", None),
+                library_state_path=getattr(args, "library_state_path", None),
             )
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)

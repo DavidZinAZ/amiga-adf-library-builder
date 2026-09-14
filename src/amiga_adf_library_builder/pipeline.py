@@ -946,6 +946,7 @@ def _persist_canonical_library(
         from .canonical import (
             CanonicalLibrary,
             migrate_staged_library,
+            SourceAuthority,
         )
     except ImportError:  # pragma: no cover - canonical model always present
         return None
@@ -953,8 +954,15 @@ def _persist_canonical_library(
     try:
         with CanonicalLibrary(db_path) as canon:
             migrate_staged_library(
-                library, canon, identity_store=identity_store
+                library, canon, identity_store=identity_store,
+                seed_authority=SourceAuthority.CURATION,
             )
+            # Scope retirement: releases not in current library are
+            # marked retired (soft delete) to halt monotonic growth.
+            active_ids = {
+                r.release_id for r in library.releases.values()
+            }
+            canon.retire_releases(active_ids)
     except (OSError, sqlite3.Error, ValueError, TypeError):
         return None
     return db_path
@@ -1004,7 +1012,11 @@ def _ensure_canonical_library(
     Returns the opened CanonicalLibrary, or None on failure.
     """
     try:
-        from .canonical import CanonicalLibrary, migrate_staged_library
+        from .canonical import (
+            CanonicalLibrary,
+            migrate_staged_library,
+            SourceAuthority,
+        )
         from .models import StagedLibrary, StagedReleaseEntry, StagedState, StagedChange, CurationAction
     except ImportError:
         return None
@@ -1038,7 +1050,9 @@ def _ensure_canonical_library(
         library.releases[g.release_key] = entry
     try:
         with CanonicalLibrary(db_path) as canon:
-            migrate_staged_library(library, canon)
+            migrate_staged_library(
+                library, canon, seed_authority=SourceAuthority.SEED
+            )
         return CanonicalLibrary(db_path)
     except (OSError, sqlite3.Error, ValueError, TypeError):
         return None
