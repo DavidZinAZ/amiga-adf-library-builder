@@ -370,7 +370,20 @@ class PreviewWidget(QWidget):
         return widget
 
     def _build_detail_pane(self) -> QWidget:
-        """Build the detail/preview pane."""
+        """Build the detail/preview pane.
+
+        (GH-73) The detail pane stacks three QGroupBoxes with hard minimum
+        heights (Release Detail ~348 px, Artwork Preview ~234 px, Curation
+        Actions ~110 px). Without a scroll viewport that ~738 px propagates
+        through the QSplitter → PreviewWidget → QTabWidget → MainWindow,
+        pinning the window's minimumSizeHint at 1262 px. A QScrollArea caps
+        the pane's own minimum to the viewport; the tall content scrolls
+        inside the pane instead.
+        """
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
         widget = QWidget()
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -485,8 +498,8 @@ class PreviewWidget(QWidget):
         layout.addLayout(detail_btns)
 
         layout.addStretch(1)
-
-        return widget
+        scroll.setWidget(widget)
+        return scroll
 
     def _connect_signals(self) -> None:
         """Connect internal signals."""

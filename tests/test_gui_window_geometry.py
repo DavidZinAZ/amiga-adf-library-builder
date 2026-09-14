@@ -467,6 +467,37 @@ def test_providers_tab_scrolls_instead_of_pinning_window(
     mw.close()
 
 
+def test_preview_detail_pane_scrolls_instead_of_pinning_window(
+    qt_app, tmp_path: Path
+):
+    """GH-73: the Preview & Curation detail pane used to demand ~738 px
+    of minimum height (three stacked QGroupBoxes), pinning the whole
+    window. The pane is now a scroll viewport: its own minimumSizeHint
+    stays small and the tall content scrolls inside the pane."""
+    from PySide6.QtWidgets import QTabWidget
+
+    mw = _make_window(tmp_path / "gh73-scroll")
+    tabs = mw.findChild(QTabWidget)
+    assert tabs is not None, "main window lost its tab widget"
+    idx = next(
+        (i for i in range(tabs.count()) if tabs.tabText(i) == "Preview & Curation"),
+        None,
+    )
+    assert idx is not None, "Preview & Curation tab missing"
+    preview_tab = tabs.widget(idx)
+
+    # The tab's own minimum hint must be small (scroll viewport), not
+    # the full stacked height of all three group boxes.
+    tab_hint = preview_tab.minimumSizeHint()
+    assert tab_hint.height() < 400, (
+        f"Preview & Curation tab minimumSizeHint {tab_hint} still pins "
+        "the window height (expected a small scroll viewport)"
+    )
+    # The window minimum must not be driven by that content either.
+    assert mw.minimumSize().height() == MIN_WINDOW_SIZE.height()
+    mw.close()
+
+
 def _providers_scroll_area(providers_tab: QWidget) -> QScrollArea:
     """Return the QScrollArea that wraps the Providers tab content (GH-40).
 
