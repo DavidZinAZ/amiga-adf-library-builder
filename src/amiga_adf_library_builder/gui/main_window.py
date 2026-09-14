@@ -367,6 +367,7 @@ class MainWindow(QMainWindow):
         self._run_mode = "build"
         self._worker = None
         self._cancel_event = None
+        self._state = "IDLE"  # IDLE, RUNNING, CANCELLING, JOINING
         # (Issue #18) Re-apply the maximized flag now that the window is fully
         # built, so widget construction cannot clobber it. ``setWindowState``
         # (not ``showMaximized``) keeps a hidden window hidden -- the flag
@@ -2170,6 +2171,7 @@ class MainWindow(QMainWindow):
             self._run_button.setEnabled(False)
             self._cancel_button.setEnabled(True)
             self._status_label.setText("Running…")
+            self._state = "RUNNING"
             self._worker.start()
         except Exception as exc:  # configuration errors surface as clear UI text
             self._run_in_progress = False
@@ -2222,10 +2224,14 @@ class MainWindow(QMainWindow):
         self._append_diag(line)
 
     def _on_cancel(self) -> None:
+        if self._state in ("CANCELLING", "JOINING"):
+            return
         if self._cancel_event is not None:
             self._cancel_event.set()
+            self._state = "CANCELLING"
             self._status_label.setText("Cancelling…")
             self._append_diag("Cancelling the run…")
+            self._cancel_button.setEnabled(False)
 
     def _on_progress(self, phase: str, percent: int, detail: str) -> None:
         # (Issue #21) The Diagnostics log no longer repeats stage names here;
@@ -2238,6 +2244,7 @@ class MainWindow(QMainWindow):
         self._run_in_progress = False
         self._run_button.setEnabled(True)
         self._cancel_button.setEnabled(False)
+        self._state = "IDLE"
         if cancelled:
             self._status_label.setText("Cancelled.")
             self._run_marker("Run cancelled by the operator.")
@@ -2441,6 +2448,16 @@ class MainWindow(QMainWindow):
         # session that never started a run still survives the close/reopen cycle;
         # (Issue #18) the same call also persists the window geometry. Never
         # blocks or crashes the close (see _persist_defaults).
+        # (GH-84) Bounded wait for worker thread before destroying window.
+        if self._worker is not None and self._thread is not None and self._thread.isRunning():
+            if self._cancel_event is not None:
+                self._cancel_event.set()
+            self._status_label.setText("Stopping worker…")
+            self._append_diag("Waiting for worker to finish…")
+            finished = self._worker.wait_for_finished(5000)
+            if not finished:
+                logger.warning("Worker did not stop within timeout; abandoning thread")
+                self._append_diag("Worker did not stop within timeout; abandoning thread")
         self._persist_defaults()
         if self._cancel_event is not None:
             self._cancel_event.set()

@@ -12,6 +12,7 @@ import itertools
 import json
 import os
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
@@ -85,6 +86,7 @@ def run_pipeline(
     screenscraper_config_path: Optional[str] = None,
     retroachievements_config_path: Optional[str] = None,
     retrokit_config_path: Optional[str] = None,
+    cancel_event: Optional[threading.Event] = None,
     activity: Optional[Callable[[str], None]] = None,
     # (GH-102) Progressive JPEG conversion policy.
     convert_progressive_jpeg: str = "never",
@@ -353,6 +355,7 @@ def run_pipeline(
         retroachievements_provider=retroachievements_provider,
         include_artwork=include_artwork,
         activity=activity,
+        cancel_event=cancel_event,
     )
     _act("Metadata and artwork preparation complete.")
 
