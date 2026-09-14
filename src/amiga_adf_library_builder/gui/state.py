@@ -97,6 +97,11 @@ class GuiState:
     one_per_game: bool = True
     operator_decisions_path: str = ""
     selection_manifest_path: str = ""
+    # --- (GH-136) Curation state path -------------------------------------
+    # Path to the library_state_<run_id>.json file produced by the build
+    # run. When set, the pipeline applies accepted/rejected curation
+    # decisions before 1G1R selection and export.
+    library_state_path: str = ""
 
 
 def build_path_config_from_gui_state(
@@ -289,6 +294,9 @@ def build_pipeline_kwargs(
         "one_per_game": bool(state.one_per_game),
         "operator_decisions_path": state.operator_decisions_path or None,
         "selection_manifest_path": state.selection_manifest_path or None,
+        # (GH-136) Curation state path — threaded to run_pipeline for
+        # applying accepted/rejected curation decisions before 1G1R.
+        "library_state_path": state.library_state_path or None,
         # CLI-equivalent verified artwork dimensions for the exporter gate.
         "verified_artwork_width": ARTWORK_MAX_W,
         "verified_artwork_height": ARTWORK_MAX_H,
