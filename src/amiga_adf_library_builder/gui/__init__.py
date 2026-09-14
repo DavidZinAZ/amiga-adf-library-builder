@@ -14,7 +14,7 @@ Key entry points:
 
 from __future__ import annotations
 
-__version__ = "0.2.10+gui"
+__version__ = __import__("amiga_adf_library_builder._version", fromlist=["__version__"]).__version__
 
 from .layout import PortablePaths
 from .main_window import MainWindow

@@ -46,6 +46,10 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PKG_SRC = REPO_ROOT / "src" / "amiga_adf_library_builder"
 SPEC_DEFAULT = REPO_ROOT / "AmigaADFGui.spec"
+# Discover canonical version from pyproject.toml
+import re as _re
+_pyproject_text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+_APPLICATION_VERSION = _re.search(r'^version\s*=\s*"(.*?)"', _pyproject_text, _re.MULTILINE).group(1)
 # Bootstrap is written to the repo root, NOT under build/ -- PyInstaller's
 # --clean wipes build/ at startup, which would delete a launcher placed there
 # (and then fail with "script ... not found").
@@ -120,6 +124,7 @@ def render_spec(
     pathex_rel: list[str],
     hidden_imports: list[str],
     console: bool,
+    application_version: str,
 ) -> str:
     """Render the deterministic PyInstaller spec referenced by this driver.
 
@@ -148,6 +153,7 @@ import sys
 SPECDIR = SPECPATH
 TARGET = "{target}"                 # "onedir" | "onefile"
 APP_NAME = "{name}"                 # shipped exe base name (no .exe suffix)
+APPLICATION_VERSION = "{application_version}"
 SCRIPT = os.path.join(SPECDIR, {launcher_rel!r})   # bootstrap -> gui.app:run
 PATHEX = [os.path.join(SPECDIR, p) for p in {pathex_rel!r}]
 HIDDEN_IMPORTS = {hidden_imports!r}
@@ -308,6 +314,7 @@ def main() -> int:
         pathex_rel=pathex_rel,
         hidden_imports=hidden_imports,
         console=bool(args.console),
+        application_version=_APPLICATION_VERSION,
     )
 
     spec_path = Path(args.spec_out)

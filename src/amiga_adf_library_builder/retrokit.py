@@ -89,7 +89,7 @@ DEFAULT_ITEM_ID = "retrokit-manuals"
 DEFAULT_SYSTEM = "amiga"
 
 #: Outbound identity for Archive.org requests.
-USER_AGENT = "AmigaADFLibraryBuilder/1.0"
+USER_AGENT = f"AmigaADFLibraryBuilder/{__import__('amiga_adf_library_builder._version', fromlist=['__version__']).__version__}"
 
 #: Hard cap for the per-system index file (bytes). The real Amiga index is ~290 KB;
 #: this cap is generous but bounded so a malformed response cannot OOM the builder.

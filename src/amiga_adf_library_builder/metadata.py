@@ -23,7 +23,7 @@ from typing import Any, Callable, Optional
 
 from .manual_approvals import validate_source_url
 
-USER_AGENT = "AmigaADFLibraryBuilder/0.2.1 (+preservation metadata client)"
+USER_AGENT = f"AmigaADFLibraryBuilder/{__import__('amiga_adf_library_builder._version', fromlist=['__version__']).__version__} (+preservation metadata client)"
 _ALLOWED_ARTWORK_PAGE_HOSTS = {
     "www.lemonamiga.com", "lemonamiga.com", "amiga.abime.net",
     "www.openretro.org", "openretro.org", "amiga.lychesis.net",
