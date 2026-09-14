@@ -150,6 +150,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Verify tag matches canonical application version
         # GH-119 Gap A: reject a pushed tag whose normalized version does NOT
         # exactly equal pyproject.toml [project].version. Accepts both vX.Y.Z
