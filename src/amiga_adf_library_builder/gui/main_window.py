@@ -1287,7 +1287,9 @@ class MainWindow(QMainWindow):
         for src in sources:
             row = table.rowCount()
             table.insertRow(row)
-            table.setItem(row, 0, QTableWidgetItem(src.name))
+            name_item = QTableWidgetItem(src.name)
+            name_item.setData(Qt.UserRole, src.source_id)
+            table.setItem(row, 0, name_item)
             table.setItem(row, 1, QTableWidgetItem(src.source_type))
             table.setItem(row, 2, QTableWidgetItem(str(src.entry_count)))
             table.setItem(row, 3, QTableWidgetItem(src.status))
@@ -1341,7 +1343,7 @@ class MainWindow(QMainWindow):
         sid = self._ms_table.item(row, 0).data(Qt.UserRole)
         if sid is None:
             # Fallback: look up by path
-            path = self._ms_table.item(row, 5).text
+            path = self._ms_table.item(row, 5).text()
             sources = self._metadata_manager.list_sources()
             sid = next((s.source_id for s in sources if s.path == path), source_id)
         try:
@@ -1372,9 +1374,11 @@ class MainWindow(QMainWindow):
         if row < 0:
             QMessageBox.information(self, "Remove", "Select a source first.")
             return
-        path = self._ms_table.item(row, 5).text
-        sources = self._metadata_manager.list_sources()
-        sid = next((s.source_id for s in sources if s.path == path), None)
+        path = self._ms_table.item(row, 5).text()
+        sid = self._ms_table.item(row, 0).data(Qt.UserRole)
+        if sid is None:
+            sources = self._metadata_manager.list_sources()
+            sid = next((s.source_id for s in sources if s.path == path), None)
         if sid is None:
             return
         name = self._ms_table.item(row, 0).text()
