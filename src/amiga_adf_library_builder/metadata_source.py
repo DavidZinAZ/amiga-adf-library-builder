@@ -24,6 +24,8 @@ from typing import Iterable, Optional
 
 logger = logging.getLogger(__name__)
 
+SCHEMA_VERSION = 1
+
 
 # --- indexing status ----------------------------------------------------------
 class IndexStatus:
@@ -194,15 +196,28 @@ class MetadataSourceManager:
         db_path: Path to the SQLite database. Parent dir is created on init.
     """
 
-    SCHEMA_VERSION = 1
 
     def __init__(self, db_path: Path) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self.db_path))
         self._conn.row_factory = sqlite3.Row
-        self._create_tables()
+        self._migrate()
         self._last_scan_errors: list[dict] = []
+
+    def _migrate(self) -> None:
+        """Explicit deterministic migration via PRAGMA user_version.
+
+        Mirrors the pattern in file_identity.py. Creates tables if the
+        schema version is missing or stale; otherwise a no-op.
+        """
+        cur = self._conn.cursor()
+        version = cur.execute("PRAGMA user_version").fetchone()[0]
+        if version >= SCHEMA_VERSION:
+            return
+        self._create_tables()
+        cur.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        self._conn.commit()
 
     def _create_tables(self) -> None:
         """Create the schema if it does not exist."""

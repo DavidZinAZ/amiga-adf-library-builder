@@ -186,6 +186,11 @@ class ApprovalRecord:
     @classmethod
     def from_dict(cls, data: dict) -> "ApprovalRecord":
         data = data or {}
+        if "schema_version" in data and data["schema_version"] != SCHEMA_VERSION:
+            raise ValueError(
+                f"ApprovalRecord schema_version {data['schema_version']} "
+                f"does not match current SCHEMA_VERSION {SCHEMA_VERSION}"
+            )
         return cls(
             approval_id=str(data.get("approval_id", "")),
             release_keys=[str(k).lower() for k in (data.get("release_keys") or [])],
