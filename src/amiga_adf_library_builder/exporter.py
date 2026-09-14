@@ -37,7 +37,7 @@ from typing import Callable, Optional
 
 from . import artwork as artwork_mod
 from .exporter_guard import export_gate_open
-from .models import ParsedRecord, ReleaseGroup
+from .models import ParsedRecord, ReleaseGroup, StagedLibrary
 from .naming import release_basename
 from .nfo_render import render_gotek_nfo
 
@@ -198,6 +198,10 @@ def export_release(
     # Must be idempotent and side-effect-free for testability. None disables
     # prompting (the "prompt" policy then falls back to "never" behavior).
     progressive_prompt_callback: Optional[Callable[[str, str], bool]] = None,
+    # (GH-136) Staged library for manual artwork fallback.
+    staged_library: Optional[StagedLibrary] = None,
+    # Internal: release key for staged library lookup.
+    release_key: Optional[str] = None,
 ) -> tuple[list[str], list[str], list[str]]:
     """Export one release group to the staging tree.
 
@@ -304,27 +308,26 @@ def export_release(
     #     - Source progressive + "prompt" + operator no  -> output progressive.
     # Original/source artwork is NEVER overwritten; process_artwork_bytes produces
     # a managed derivative.
+    # (GH-136) If both processed and master are missing, fall back to
+    # the staged library's manually-assigned artwork_front.
     processed = Path(artwork_processed_dir) / f"{basename}.jpg" if artwork_processed_dir is not None else None
+    artwork_data: Optional[bytes] = None
     try:
         if processed is not None and processed.is_file():
-            data = processed.read_bytes()
+            artwork_data = processed.read_bytes()
         elif artwork_original_dir is not None:
             master = artwork_mod.find_artwork_master(group, artwork_original_dir)
-            if master is None:
-                data = None
-            else:
+            if master is not None:
                 raw = master.read_bytes()
                 source_is_progressive = (
                     master.suffix.lower() in (".jpg", ".jpeg")
                     and artwork_mod.is_jpeg_progressive_from_bytes(raw)
                 )
                 if not source_is_progressive:
-                    # Baseline / non-JPEG source -> output baseline. No prompt.
-                    data = artwork_mod.process_artwork_bytes(master, progressive=False)
+                    artwork_data = artwork_mod.process_artwork_bytes(master, progressive=False)
                 else:
-                    # Progressive source. Decide output encoding by policy.
                     if convert_progressive_jpeg == "always":
-                        data = artwork_mod.process_artwork_bytes(master, progressive=False)
+                        artwork_data = artwork_mod.process_artwork_bytes(master, progressive=False)
                     elif convert_progressive_jpeg == "prompt":
                         operator_wants_baseline = False
                         if progressive_prompt_callback is not None:
@@ -334,24 +337,26 @@ def export_release(
                                 )
                             except Exception:
                                 operator_wants_baseline = False
-                        data = artwork_mod.process_artwork_bytes(
+                        artwork_data = artwork_mod.process_artwork_bytes(
                             master, progressive=not operator_wants_baseline
                         )
                     else:
-                        # "never": keep progressive output as-is.
-                        data = artwork_mod.process_artwork_bytes(master, progressive=True)
-        else:
-            data = None
-        if data is not None:
-            art_dest = folder / f"{basename}.jpg"
-            if verify_only:
-                if art_dest.exists() and art_dest.read_bytes() != data:
-                    conflicts.append(str(art_dest))
-            else:
-                status = _copy_if_changed(data, art_dest)
-                (written if status == "written" else unchanged).append(str(art_dest))
+                        artwork_data = artwork_mod.process_artwork_bytes(master, progressive=True)
+        # (GH-136) Fallback: use manually-assigned artwork from the
+        # staged library when no processed artifact or master exists.
+        if artwork_data is None:
+            artwork_data = _find_staged_artwork(staged_library, release_key)
     except RuntimeError as exc:
         conflicts.append(f"artwork processing failed: {exc}")
+
+    if artwork_data is not None:
+        art_dest = folder / f"{basename}.jpg"
+        if verify_only:
+            if art_dest.exists() and art_dest.read_bytes() != artwork_data:
+                conflicts.append(str(art_dest))
+        else:
+            status = _copy_if_changed(artwork_data, art_dest)
+            (written if status == "written" else unchanged).append(str(art_dest))
 
     return written, unchanged, conflicts
 
@@ -378,6 +383,29 @@ def _build_nfo(group: ReleaseGroup) -> str:
     return render_gotek_nfo(title=title, description=blurb)
 
 
+def _find_staged_artwork(
+    staged_library: Optional[StagedLibrary],
+    release_key: Optional[str],
+) -> Optional[bytes]:
+    """Return manual artwork bytes from the staged library, or None.
+
+    Looks up the staged library entry by ``release_key`` and returns
+    the bytes of ``artwork_front`` if it exists and is readable.
+    """
+    if staged_library is None or not release_key:
+        return None
+    entry = staged_library.releases.get(release_key)
+    if entry is None or not entry.artwork_front:
+        return None
+    art_path = Path(entry.artwork_front)
+    if not art_path.is_file():
+        return None
+    try:
+        return art_path.read_bytes()
+    except OSError:
+        return None
+
+
 def export_all(
     groups: list[ReleaseGroup],
     *,
@@ -398,6 +426,8 @@ def export_all(
     require_artwork: bool = False,
     # Internal: original/ path used to resolve source bytes.
     original_dir: Optional[Path] = None,
+    # (GH-136) Staged library for artwork fallback.
+    staged_library: Optional[StagedLibrary] = None,
     # Canonical naming: explicit library root (replaces staging_root.parent.parent).
     library_root: Optional[Path] = None,
 ) -> ExportResult:
@@ -493,6 +523,9 @@ def export_all(
             verify_only=verify_only,
             convert_progressive_jpeg=convert_progressive_jpeg,
             progressive_prompt_callback=progressive_prompt_callback,
+            # (GH-136) Staged library for manual artwork fallback.
+            staged_library=staged_library,
+            release_key=g.release_key,
         )
         result.files_written.extend(written)
         result.files_unchanged.extend(unchanged)

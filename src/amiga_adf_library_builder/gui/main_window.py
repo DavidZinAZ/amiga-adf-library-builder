@@ -1747,6 +1747,10 @@ class MainWindow(QMainWindow):
             one_per_game=self._cb_one_per_game.isChecked(),
             operator_decisions_path=self._le_operator_decisions.text().strip(),
             selection_manifest_path=self._le_selection_manifest.text().strip(),
+            # (GH-136) Curation state path from the preview widget.
+            library_state_path=str(
+                self._preview_widget._state.current_state_path
+            ) if self._preview_widget._state.current_state_path else "",
         )
         return state
 

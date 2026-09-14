@@ -54,6 +54,63 @@ def _run_id() -> str:
     return f"{stamp}-{os.getpid()}-{seq:05d}"
 
 
+def _apply_curation(
+    groups: list[ReleaseGroup],
+    library_state_path: Optional[str],
+    decisions: Optional[dict],
+) -> tuple[Optional[StagedLibrary], dict]:
+    """Apply curation state to groups between quarantine and 1G1R.
+
+    Loads the staged library from ``library_state_path``, then for each
+    group matches by ``release_key`` and:
+      * ACCEPTED  — clears quarantine_reason and seeds the ``decisions``
+        dict so ``select_one_per_game`` keeps this release as the
+        winner for its game.
+      * REJECTED  — sets quarantine_reason so the group is skipped by
+        export.
+      * Other states — leaves quarantine as-is (MODIFIED/NEEDS_REVIEW
+        groups may still need manual review).
+
+    Returns the loaded ``StagedLibrary`` (or ``None`` if no state file)
+    and the updated ``decisions`` dict (seeded with ACCEPTED entries).
+    """
+    if not library_state_path:
+        return None, decisions or {}
+
+    state_path = Path(library_state_path)
+    if not state_path.exists():
+        return None, decisions or {}
+
+    from .library_state import CurationStateManager
+
+    manager = CurationStateManager(state_path)
+    library = manager.load()
+
+    if not library.releases:
+        return library, decisions or {}
+
+    updated_decisions = dict(decisions) if decisions else {}
+
+    for group in groups:
+        entry = library.releases.get(group.release_key)
+        if entry is None:
+            continue
+
+        if entry.curation_state == StagedState.ACCEPTED:
+            # Clear quarantine so the group survives to export.
+            group.quarantine_reason = None
+            # Seed 1G1R decisions: accepted entry wins its game.
+            game_id = group.release_key.split("|")[0].lower()
+            updated_decisions[game_id] = group.release_key.lower()
+        elif entry.curation_state == StagedState.REJECTED:
+            group.quarantine_reason = "rejected by curation"
+        # MODIFIED/NEEDS_REVIEW: keep existing quarantine; operator
+        # has flagged these for review and the pipeline should not
+        # silently export them.
+
+    return library, updated_decisions
+
+
 def run_pipeline(
     *,
     cfg: PathConfig,
@@ -96,6 +153,10 @@ def run_pipeline(
     # Must be idempotent and side-effect-free for testability. None disables
     # prompting (the "prompt" policy then falls back to "never" behavior).
     progressive_prompt_callback: Optional[Callable[[str, str], bool]] = None,
+    # (GH-136) Path to the library_state_<run_id>.json file produced by
+    # the build run. When set, the pipeline applies accepted/rejected
+    # curation decisions between quarantine and 1G1R selection.
+    library_state_path: Optional[str] = None,
 ) -> dict:
     """Execute phases 2-4, 5 (optional), and 6. Returns a result summary dict.
 
@@ -440,6 +501,12 @@ def run_pipeline(
             decisions = None
             if operator_decisions_path:
                 decisions = load_operator_decisions(Path(operator_decisions_path))
+            # (GH-136) Apply curation state between quarantine and
+            # 1G1R: ACCEPTED entries clear quarantine and seed
+            # decisions; REJECTED entries get a quarantine flag.
+            staged_library, decisions = _apply_curation(
+                groups, library_state_path, decisions
+            )
             if one_per_game:
                 # Load canonical library once for region/language/version scoring.
                 # If no canonical.db exists yet (fresh CLI export), create one
@@ -512,6 +579,8 @@ def run_pipeline(
             # (GH-102) Forward per-image progressive-conversion prompt callback.
             progressive_prompt_callback=progressive_prompt_callback,
             library_root=library_root,
+            # (GH-136) Staged library for artwork fallback.
+            staged_library=staged_library,
         )
         _act(
             f"Export finished: {export_result.releases_exported} release(s), "
