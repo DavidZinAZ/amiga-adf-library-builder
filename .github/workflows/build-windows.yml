@@ -2,6 +2,12 @@ name: Build Windows GUI
 
 on:
   workflow_dispatch:
+    inputs:
+      skip_tag_version_check:
+        description: "Skip the tag/version equality gate (operator override only)"
+        required: false
+        default: false
+        type: boolean
   push:
     branches:
       - main
@@ -144,6 +150,36 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Verify tag matches canonical application version
+        # GH-119 Gap A: reject a pushed tag whose normalized version does NOT
+        # exactly equal pyproject.toml [project].version. Accepts both vX.Y.Z
+        # and X.Y.Z tag forms. Prevents silent release-name/version drift.
+        # Bypass only via explicit workflow_dispatch input skip_tag_version_check.
+        if: |
+          github.event_name == 'push'
+          && startsWith(github.ref, 'refs/tags/')
+          && !(inputs.skip_tag_version_check == true)
+        run: |
+          set -euo pipefail
+          TAG="${{ github.ref_name }}"
+          # Normalize: strip optional leading 'v'
+          NORMALIZED="${TAG#v}"
+          PYPROJECT_VERSION=$(python -c "
+          import re
+          from pathlib import Path
+          pyproject = Path('pyproject.toml').read_text(encoding='utf-8')
+          m = re.search(r'^version\s*=\s*\"(.*?)\"', pyproject, re.MULTILINE)
+          if not m:
+              raise SystemExit('pyproject.toml missing [project].version')
+          print(m.group(1))
+          ")
+          echo "tag=$TAG normalized=$NORMALIZED pyproject=$PYPROJECT_VERSION"
+          if [ "$NORMALIZED" != "$PYPROJECT_VERSION" ]; then
+            echo "::error::Tag '$TAG' (normalized '$NORMALIZED') does NOT match pyproject.toml version '$PYPROJECT_VERSION'. Aborting release. To bypass, rerun with skip_tag_version_check=true."
+            exit 1
+          fi
+          echo "Tag/version equality check passed."
+
       - name: Download onedir artifact
         uses: actions/download-artifact@v4
         with:
