@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.16 — 2026-09-14
+
+- GH-73: PreviewWidget detail pane wrapped in QScrollArea.
+- GH-84: Cooperative cancellation and close lifecycle.
+- GH-119: Release identity enforcement and frozen Windows versioning (correction + unification).
+- GH-93: Fix stale Move/Merge selection after GHOST.
+- GH-107: Canonical Game/Release/Disk model, manual lookup UI, canonical naming/export policy, 1G1R selection, persistent hash identity, curation memory.
+- GH-106: GHOST curation state for emptied releases.
+- GH-76: GUI discovers default config when no provider-config path set.
+
 ## 0.2.13 — 2026-09-10
 
 - GH-99: Coherent Preview/Curation workflow repair (8 defects).
