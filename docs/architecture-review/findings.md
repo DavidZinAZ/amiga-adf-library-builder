@@ -325,3 +325,12 @@ and record claim superseding rather than pure accumulation.
   mis-export) was not constructed; mechanism chain is fully cited instead.
 - Provider auth flows, exporter_guard.py/diagnostics.py internals, CI matrix
   were explicitly out of scope for all three passes.
+
+---
+
+## See also
+
+- `docs/architecture-review/remediation-ledger.md` — full remediation
+  ledger covering all AR-001 … AR-012 dispositions, commit lineage,
+  preserved invariants, retained behaviors, and v0.2.17 qualified
+  baseline.

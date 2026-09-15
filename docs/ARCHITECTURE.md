@@ -110,3 +110,17 @@ unique release name so it never breaks the Gotek flat layout.
 - Network operations require `--online`.
 - Paths derived from filenames or online data are sanitized.
 - Hashes are recorded and re-verifiable (integrity / preservation proof).
+
+## Architecture review documents
+
+- `docs/architecture-review/findings.md` — GH-141 findings catalog
+  (AR-001 … AR-012)
+- `docs/architecture-review/final-review.md` — GH-141 final verdict
+  and P1–P5 remediation priorities
+- `docs/architecture-review/remediation-ledger.md` — post-remediation
+  ledger covering all AR dispositions, commit lineage, preserved
+  invariants, and v0.2.17 baseline
+- `docs/architecture-review/architecture-truth-map.md` — 6-store
+  truth map
+- `docs/STATE-OWNERSHIP-MAP.md` — authoritative per-fact ownership
+  table (GH-145)
