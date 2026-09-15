@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Optional
+from .utils import sha256_file
 
 logger = logging.getLogger(__name__)
 

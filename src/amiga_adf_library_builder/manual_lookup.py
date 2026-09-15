@@ -312,7 +312,7 @@ def apply_manual_override(canon: CanonicalLibrary, entity_type: str,
     provider claims; survives any provider refresh because the curation tier
     dominates resolution and automated claims never delete manual ones.
     """
-    from .canonical import _now_iso  # module-private helper, single caller
+    from .utils import now_iso as _now_iso  # module-private helper, single caller
 
     prov = Provenance(
         source="operator",

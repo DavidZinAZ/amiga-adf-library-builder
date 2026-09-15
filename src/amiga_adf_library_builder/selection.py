@@ -173,7 +173,7 @@ def _find_canonical_release_id(canon, group: ReleaseGroup) -> Optional[str]:
     game-id slug mismatches (e.g. 'battlesquadron' vs 'battle-squadron')
     do not prevent canonical region/language lookups.
     """
-    from .canonical_naming import _slugify_title
+    from .canonical_naming import slugify_title
     # Try exact release_key game prefix first.
     game_id = group.release_key.split("|")[0].lower()
     for rid in canon.releases_for_game(game_id):
@@ -182,7 +182,7 @@ def _find_canonical_release_id(canon, group: ReleaseGroup) -> Optional[str]:
             if value == group.release_key:
                 return rid
     # Fallback: title-based slug for canonical lookups.
-    title_game_id = _slugify_title(group.title) if group.title else ""
+    title_game_id = slugify_title(group.title) if group.title else ""
     if title_game_id and title_game_id != game_id:
         for rid in canon.releases_for_game(title_game_id):
             claims = canon.claims_for("release", rid, "release_key")

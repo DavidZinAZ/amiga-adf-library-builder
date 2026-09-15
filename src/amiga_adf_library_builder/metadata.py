@@ -15,13 +15,13 @@ import urllib.request
 import ipaddress
 import socket
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 from .manual_approvals import validate_source_url
+from .utils import now_iso as utc_now
 
 USER_AGENT = f"AmigaADFLibraryBuilder/{__import__('amiga_adf_library_builder._version', fromlist=['__version__']).__version__} (+preservation metadata client)"
 _ALLOWED_ARTWORK_PAGE_HOSTS = {
@@ -176,10 +176,6 @@ class MetadataRecord:
             relevance_confidence=float(data.get("relevance_confidence") or 0.0),
             relevance_evidence=list(data.get("relevance_evidence") or []),
         )
-
-
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def cache_key(title: str) -> str:

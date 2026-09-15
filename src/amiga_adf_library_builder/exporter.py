@@ -29,7 +29,6 @@ Quarantined groups (have a quarantine_reason) are never exported.
 """
 from __future__ import annotations
 
-import hashlib
 import os
 import warnings
 from dataclasses import dataclass, field
@@ -37,6 +36,8 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from . import artwork as artwork_mod
+from .utils import sha256_bytes
+_sha256_bytes = sha256_bytes
 from .exporter_guard import export_gate_open
 from .models import ParsedRecord, ReleaseGroup, StagedLibrary
 from .naming import release_basename
@@ -190,8 +191,7 @@ def _copy_if_changed(src_bytes: bytes, dest: Path) -> str:
     return "written"
 
 
-def _sha256_bytes(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
+
 
 
 def export_release(
