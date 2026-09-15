@@ -122,6 +122,9 @@ Only the docstring remains true of the pre-change code.
 (and, if AR-001 lands, the authority of seeded claims). Low severity, high
 value: a false invariant statement in the lifecycle root-cause module is
 actively misleading to the next reviewer.
+**Resolution (2026-09-14):** Docstring rewritten in `_ensure_canonical_library`
+to accurately describe create-if-absent behavior. No behavioral change. See
+GH-153/P5 Item 1.
 
 ### AR-003 — Six persistent stores encode overlapping identity facts with no documented SSOT (ARCH, High/High)
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import logging
 import os
 import sqlite3
 import threading
@@ -17,6 +18,8 @@ import warnings
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
+
+logger = logging.getLogger(__name__)
 
 from . import artwork as artwork_mod
 from . import catalog, enrich, exporter, grouper, quarantine, scanner
@@ -929,10 +932,13 @@ def build_staged_library_from_result(
         _persist_canonical_library(
             library, curation_dir, identity_store=identity_store
         )
-    except Exception:
+    except Exception as exc:
         # Canonical persistence is best-effort: the staged state file is the
         # curation authority and must never fail to build because of it.
-        pass
+        # Surface the failure so the operator can see it in the activity log.
+        logger.warning(
+            "canonical.db persistence failed (non-fatal): %s", exc
+        )
 
     # Save under the managed curation dir (independent of output/ and original/).
     state_path = curation_dir / f"library_state_{run_id}.json"
@@ -986,7 +992,10 @@ def _persist_canonical_library(
                 r.release_id for r in library.releases.values()
             }
             canon.retire_releases(active_ids)
-    except (OSError, sqlite3.Error, ValueError, TypeError):
+    except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
+        logger.warning(
+            "canonical.db write failed (non-fatal): %s", exc
+        )
         return None
     return db_path
 
@@ -1024,13 +1033,14 @@ def _ensure_canonical_library(
     library_root: Path,
     groups: list[ReleaseGroup],
 ) -> Optional["CanonicalLibrary"]:
-    """Create a canonical.db from current groups when none exists yet.
+    """Create a canonical.db from current groups when none exists and return it.
 
-    Fresh CLI exports never create canonical.db (only the GUI staged-library
-    path does), leaving region/language scoring neutral (20.0). This helper
-    builds a minimal canonical model from the pipeline's current groups so
-    region/language become effective in the normal production export path
-    without inventing a second canonical store.
+    On a fresh CLI export, no canonical.db exists yet and region/language
+    scoring would be neutral (20.0). This helper builds a minimal canonical
+    model from the pipeline's current groups so those fields become effective
+    in the normal production export path without inventing a second canonical
+    store. When canonical.db already exists, it is opened read-only and
+    returned unchanged.
 
     Returns the opened CanonicalLibrary, or None on failure.
     """
