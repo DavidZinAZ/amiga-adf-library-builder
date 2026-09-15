@@ -473,6 +473,293 @@ class TestCollectCandidates:
         assert best.get("confidence", 0) >= 0.7
 
 
+# --- GH-157 DEF-4: match_type from evidence, not confidence thresholds ------
+
+class TestMatchTypeEvidence:
+    """DEF-4: match_type must reflect actual hash/evidence, not just confidence."""
+
+    def test_exact_hash_record_gets_exact_match_type(self):
+        from amiga_adf_library_builder.lookup_workflow import (
+            LookupResult, KIND_ONLINE, MODE_ONLINE, _result_to_candidate,
+        )
+        from amiga_adf_library_builder.metadata import MetadataRecord
+
+        record = MetadataRecord(
+            canonical_title="Test Game", provider="curated", confidence=1.0,
+        )
+        r = LookupResult(
+            mode=MODE_ONLINE, kind=KIND_ONLINE, provider_ids=["curated"],
+            status="found", record=record, confidence=1.0, consulted=["curated"],
+        )
+        cands = _result_to_candidate(r)
+        assert len(cands) == 1
+        assert cands[0]["match_type"] == "exact_hash", \
+            f"Expected exact_hash but got {cands[0]['match_type']!r}"
+
+    def test_high_confidence_record_gets_exact_hash(self):
+        from amiga_adf_library_builder.lookup_workflow import (
+            LookupResult, KIND_ONLINE, MODE_ONLINE, _result_to_candidate,
+        )
+        from amiga_adf_library_builder.metadata import MetadataRecord
+
+        record = MetadataRecord(
+            canonical_title="Test Game", provider="wikipedia", confidence=0.97,
+        )
+        r = LookupResult(
+            mode=MODE_ONLINE, kind=KIND_ONLINE, provider_ids=["wikipedia"],
+            status="found", record=record, confidence=0.97, consulted=["wikipedia"],
+        )
+        cands = _result_to_candidate(r)
+        assert len(cands) == 1
+        assert cands[0]["match_type"] == "exact_hash", \
+            f"Expected exact_hash (conf=0.97) but got {cands[0]['match_type']!r}"
+
+    def test_medium_confidence_gets_normalized_title(self):
+        from amiga_adf_library_builder.lookup_workflow import (
+            LookupResult, KIND_ONLINE, MODE_ONLINE, _result_to_candidate,
+        )
+        from amiga_adf_library_builder.metadata import MetadataRecord
+
+        record = MetadataRecord(
+            canonical_title="Test Game", provider="hall-of-light", confidence=0.88,
+        )
+        r = LookupResult(
+            mode=MODE_ONLINE, kind=KIND_ONLINE, provider_ids=["hall-of-light"],
+            status="found", record=record, confidence=0.88, consulted=["hall-of-light"],
+        )
+        cands = _result_to_candidate(r)
+        assert len(cands) == 1
+        assert cands[0]["match_type"] == "normalized_title", \
+            f"Expected normalized_title (conf=0.88) but got {cands[0]['match_type']!r}"
+
+    def test_low_confidence_gets_fuzzy_title(self):
+        from amiga_adf_library_builder.lookup_workflow import (
+            LookupResult, KIND_ONLINE, MODE_ONLINE, _result_to_candidate,
+        )
+        from amiga_adf_library_builder.metadata import MetadataRecord
+
+        record = MetadataRecord(
+            canonical_title="Test Game", provider="wikipedia", confidence=0.62,
+        )
+        r = LookupResult(
+            mode=MODE_ONLINE, kind=KIND_ONLINE, provider_ids=["wikipedia"],
+            status="found", record=record, confidence=0.62, consulted=["wikipedia"],
+        )
+        cands = _result_to_candidate(r)
+        assert len(cands) == 1
+        assert cands[0]["match_type"] == "fuzzy_title", \
+            f"Expected fuzzy_title (conf=0.62) but got {cands[0]['match_type']!r}"
+
+
+# --- GH-157 DEF-1 + DEF-2: Candidate storage and validation ------------------
+
+class TestCandidateStorageAndValidation:
+    """DEF-1: candidates stored in _candidates_list. DEF-2: apply rejects bad status."""
+
+    def test_candidates_list_stored_on_receive(self):
+        """_on_candidates_received stores self._candidates_list with the raw dicts."""
+        from PySide6.QtWidgets import QApplication
+        from amiga_adf_library_builder.gui.preview_widget import UnifiedLookupDialog
+        from amiga_adf_library_builder.models import StagedReleaseEntry
+
+        app = QApplication.instance() or QApplication([])
+        entry = StagedReleaseEntry(
+            release_key="test_rk", title="Test Game", edition=None,
+            group=None, chipset=None, language=None, adf_files=[],
+        )
+        dialog = UnifiedLookupDialog.__new__(UnifiedLookupDialog)
+        dialog._entry = entry
+        dialog._mode = "online"
+        dialog._candidate = {}
+        dialog._candidates_list = []  # pre-init so setattr works
+        # Minimal mock of _progress
+        class MockProgress:
+            def setRange(self, a, b): pass
+            def setValue(self, v): pass
+        dialog._progress = MockProgress()
+        # Minimal mock of _cand_table (required by _on_candidates_received)
+        class MockCandTable:
+            def setRowCount(self, n): pass
+            def setItem(self, r, c, item): pass
+        dialog._cand_table = MockCandTable()
+        # Remaining mocks needed by _on_candidates_received body
+        dialog._cand_status = type("L", (), {"setText": lambda s, t: None})()
+        dialog._summary_label = type("L", (), {"setText": lambda s, t: None})()
+        dialog._status_label = type("L", (), {"setText": lambda s, t: None})()
+        dialog._btn_compare = type("B", (), {"setEnabled": lambda s, v: None})()
+
+        fake_cands = [
+            {"title": "Game A", "provider": "wikipedia", "confidence": 0.93, "status": "found"},
+            {"status": "error", "error": "network timeout", "confidence": 0.0},
+            {"status": "no_match", "confidence": 0.0},
+        ]
+        dialog._on_candidates_received(fake_cands)
+
+        assert hasattr(dialog, "_candidates_list")
+        stored = dialog._candidates_list
+        assert len(stored) == 3
+        # Must be the ACTUAL dicts, not fabricated ones
+        assert stored[0]["title"] == "Game A"
+        assert stored[1]["status"] == "error"
+        assert stored[2]["status"] == "no_match"
+
+    def test_compare_rejects_error_candidate(self):
+        """_show_compare_detail blocks comparison for error-status rows."""
+        from PySide6.QtWidgets import QApplication
+        from amiga_adf_library_builder.gui.preview_widget import UnifiedLookupDialog
+        from amiga_adf_library_builder.models import StagedReleaseEntry
+
+        app = QApplication.instance() or QApplication([])
+        entry = StagedReleaseEntry(
+            release_key="test_rk", title="Test Game", edition=None,
+            group=None, chipset=None, language=None, adf_files=[],
+        )
+        dialog = UnifiedLookupDialog.__new__(UnifiedLookupDialog)
+        dialog._entry = entry
+        dialog._mode = "online"
+        dialog._candidate = {}
+
+        # Build minimal UI components for _show_compare_detail
+        class MockTextEdit:
+            def setText(self, t): self.last_text = t
+            def clear(self): pass
+        class MockButton:
+            def __init__(self): self.enabled = True
+            def setEnabled(self, v): self.enabled = v
+
+        dialog._pre_text = MockTextEdit()
+        dialog._post_text = MockTextEdit()
+        dialog._btn_apply = MockButton()
+        dialog._candidate = {"status": "error", "error": "DNS failure"}
+
+        dialog._show_compare_detail()
+
+        assert "cannot compare" in dialog._pre_text.last_text.lower()
+        assert not dialog._btn_apply.enabled
+
+    def test_compare_rejects_no_match_candidate(self):
+        """_show_compare_detail blocks comparison for no_match-status rows."""
+        from PySide6.QtWidgets import QApplication
+        from amiga_adf_library_builder.gui.preview_widget import UnifiedLookupDialog
+        from amiga_adf_library_builder.models import StagedReleaseEntry
+
+        app = QApplication.instance() or QApplication([])
+        entry = StagedReleaseEntry(
+            release_key="test_rk", title="Test Game", edition=None,
+            group=None, chipset=None, language=None, adf_files=[],
+        )
+        dialog = UnifiedLookupDialog.__new__(UnifiedLookupDialog)
+        dialog._entry = entry
+        dialog._mode = "online"
+        dialog._candidate = {}
+
+        class MockTextEdit:
+            def setText(self, t): self.last_text = t
+            def clear(self): pass
+        class MockButton:
+            def __init__(self): self.enabled = True
+            def setEnabled(self, v): self.enabled = v
+
+        dialog._pre_text = MockTextEdit()
+        dialog._post_text = MockTextEdit()
+        dialog._btn_apply = MockButton()
+        dialog._candidate = {"status": "no_match", "confidence": 0.0}
+
+        dialog._show_compare_detail()
+
+        assert "cannot compare" in dialog._pre_text.last_text.lower()
+        assert not dialog._btn_apply.enabled
+
+    def test_get_candidate_at_row_returns_stored_dict(self):
+        """_get_candidate_at_row returns the real dict from _candidates_list,
+        not a fabricated fallback."""
+        from PySide6.QtWidgets import QApplication
+        from amiga_adf_library_builder.gui.preview_widget import UnifiedLookupDialog
+        from amiga_adf_library_builder.models import StagedReleaseEntry
+
+        app = QApplication.instance() or QApplication([])
+        entry = StagedReleaseEntry(
+            release_key="test_rk", title="Test Game", edition=None,
+            group=None, chipset=None, language=None, adf_files=[],
+        )
+        dialog = UnifiedLookupDialog.__new__(UnifiedLookupDialog)
+        dialog._entry = entry
+        dialog._mode = "online"
+        dialog._cand_table = type("CT", (), {"item": lambda s,r,c: None})()
+        dialog._candidates_list = [
+            {"title": "Real Title", "kind": "offline", "confidence": 0.95, "status": "found"},
+        ]
+
+        got = dialog._get_candidate_at_row(0)
+
+        assert isinstance(got, dict)
+        # Must have the REAL data — including kind, title, etc.
+        assert got["kind"] == "offline"  # NOT "online" as fabricated dict would give
+        assert got["title"] == "Real Title"
+
+    def test_get_candidate_at_row_returns_empty_when_none_stored(self):
+        """Without any candidates, returns empty dict (not a lie)."""
+        from PySide6.QtWidgets import QApplication
+        from amiga_adf_library_builder.gui.preview_widget import UnifiedLookupDialog
+        from amiga_adf_library_builder.models import StagedReleaseEntry
+
+        app = QApplication.instance() or QApplication([])
+        entry = StagedReleaseEntry(
+            release_key="test_rk", title="Test Game", edition=None,
+            group=None, chipset=None, language=None, adf_files=[],
+        )
+        dialog = UnifiedLookupDialog.__new__(UnifiedLookupDialog)
+        dialog._entry = entry
+        dialog._mode = "online"
+        dialog._cand_table = type("CT", (), {"item": lambda s,r,c: None})()
+        dialog._candidates_list = None
+
+        got = dialog._get_candidate_at_row(0)
+
+        assert got == {}  # empty, not {"status": "found"}
+
+
+# --- GH-157 DEF-7: explicit states preserved --------------------------------
+
+class TestExplicitStatesPreserved:
+    """Error/no_match rows remain visible and separate after merge."""
+
+    def test_merge_preserves_error_and_no_match_as_separate_rows(self):
+        from amiga_adf_library_builder.lookup_workflow import _merge_candidates
+
+        existing = [
+            {"status": "error", "error": "DNS fail", "provider": "lookup_workflow",
+             "confidence": 0.0},
+            {"status": "no_match", "provider": "online", "confidence": 0.0},
+        ]
+        new = [
+            {"title": "Game X", "provider": "wikipedia", "confidence": 0.93},
+        ]
+        merged = _merge_candidates(existing, new)
+
+        # Should have 3 rows: error, no_match, Game X
+        statuses = [c.get("status") for c in merged]
+        assert "error" in statuses
+        assert "no_match" in statuses
+        assert "Game X" in str([c.get("title") for c in merged])
+        assert len(merged) == 3
+
+    def test_merge_deduplicates_same_title_keeps_highest(self):
+        from amiga_adf_library_builder.lookup_workflow import _merge_candidates
+
+        existing = [
+            {"title": "Game X", "provider": "old", "confidence": 0.70},
+        ]
+        new = [
+            {"title": "Game X", "provider": "new", "confidence": 0.93},
+        ]
+        merged = _merge_candidates(existing, new)
+
+        assert len(merged) == 1
+        assert merged[0]["provider"] == "new"
+        assert merged[0]["confidence"] == 0.93
+
+
 if __name__ == "__main__":  # pragma: no cover
     import sys
     sys.exit(pytest.main([__file__, "-v"]))

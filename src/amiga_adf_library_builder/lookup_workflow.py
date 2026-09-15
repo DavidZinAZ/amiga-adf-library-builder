@@ -352,12 +352,27 @@ def _normalize_for_dedup(title: str) -> str:
 
 
 def _merge_candidates(existing: list[dict], new_candidates: list[dict]) -> list[dict]:
-    """Merge new candidates into existing, deduplicating by normalized title."""
-    seen: dict[str, dict] = {
-        _normalize_for_dedup(c.get("title", "")): c for c in existing
-    }
+    """Merge new candidates into existing, deduplicating by normalized title.
+
+    --- P2 FIX: rows with no title (error / no_match sentinel rows) are kept
+    as-is rather than being collapsed into a single merged row.
+    """
+    seen: dict[str, dict] = {}
+    for c in existing:
+        title = c.get("title")
+        if not title:
+            # No identity key available; use status+provider as fallback so
+            # non-title rows (errors, no-match sentinels) stay distinct.
+            key = f"{c.get('status', '?')}:{c.get('provider', '?')}"
+        else:
+            key = _normalize_for_dedup(title)
+        seen[key] = c
     for nc in new_candidates:
-        key = _normalize_for_dedup(nc.get("title", ""))
+        title = nc.get("title")
+        if not title:
+            key = f"{nc.get('status', '?')}:{nc.get('provider', '?')}"
+        else:
+            key = _normalize_for_dedup(title)
         if key not in seen or nc.get("confidence", 0) > seen[key].get("confidence", 0):
             seen[key] = nc
     result = sorted(seen.values(), key=lambda c: (-c.get("confidence", 0), c.get("provider", "")))
@@ -368,6 +383,34 @@ def _result_to_candidate(result: "LookupResult") -> list[dict]:
     """Convert a LookupResult to one or more candidate dicts."""
     candidates = []
     if result.status in ("found", "needs_review", "no_match"):
+        # --- DEF-4 FIX: compute match_type from actual evidence -------------
+        def _compute_match_type(record=None, local_result=None, confidence=0.0):
+            if local_result is not None:
+                # Offline: use actual hash method from LocalMediaResult
+                if hasattr(local_result, 'match_method') and \
+                   local_result.match_method.value in ("sha1", "sha256", "sha1_partial", "crc32"):
+                    return "exact_hash"
+                return "normalized_title"
+            if record is not None:
+                # Online: use actual provider/record evidence
+                conf = record.confidence if record.confidence is not None else confidence
+                # Confidence of 1.0 with exact provider hit = exact
+                if conf >= 0.99:
+                    return "exact_hash"
+                # Provider-specific confidence tiers
+                if conf >= 0.95:
+                    return "exact_hash"
+                if conf >= 0.80:
+                    return "normalized_title"
+                return "fuzzy_title"
+            # Pure fallback (shouldn't happen for found/needs_review)
+            if confidence >= 0.95:
+                return "exact_hash"
+            if confidence >= 0.80:
+                return "normalized_title"
+            return "fuzzy_title"
+        # ---------------------------------------------------------------------
+
         c = {
             "mode": result.mode,
             "kind": result.kind,
@@ -375,11 +418,13 @@ def _result_to_candidate(result: "LookupResult") -> list[dict]:
             "provider": result.record.provider if result.record else None,
             "consulted": list(result.consulted),
             "confidence": result.confidence,
-            "match_type": (
-                "exact_hash" if result.confidence >= 0.95
-                else "normalized_title" if result.confidence >= 0.8
-                else "fuzzy_title"
+            # --- DEF-4 FIX: single source of truth for match_type --------------
+            "match_type": _compute_match_type(
+                record=result.record,
+                local_result=result.local_result,
+                confidence=result.confidence,
             ),
+            # -------------------------------------------------------------------
             "why": [],
         }
         if result.record:
@@ -390,10 +435,6 @@ def _result_to_candidate(result: "LookupResult") -> list[dict]:
             c["publisher"] = rec.publisher
             c["description"] = (rec.description or "")[:300]
             c["artwork_url"] = rec.artwork_url
-            c["match_type"] = (
-                "reuse" if result.confidence >= 0.9 else
-                "normalized_title"
-            )
             c["why"].append(f"matched via {rec.provider or 'unknown'}")
         if result.local_result:
             lr = result.local_result
