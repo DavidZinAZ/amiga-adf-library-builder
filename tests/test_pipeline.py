@@ -13,6 +13,7 @@ import pytest
 from amiga_adf_library_builder.exporter_guard import export_gate_open
 from amiga_adf_library_builder.file_identity import FileIdentityStore
 from amiga_adf_library_builder.paths import PathConfig, resolve_config
+from amiga_adf_library_builder.run_config import RunConfig
 from amiga_adf_library_builder.pipeline import run_pipeline, build_staged_library_from_result
 
 
@@ -64,7 +65,7 @@ def test_pipeline_runs_on_synthetic_corpus_and_preserves_originals(tmp_path: Pat
         (data_root / "original" / n).write_bytes(b"x" * 10)
 
     before = {p.name: p.read_bytes() for p in (data_root / "original").iterdir() if p.is_file()}
-    result = run_pipeline(cfg=_cfg(data_root), online=False)
+    result = run_pipeline(cfg=_cfg(data_root), run=RunConfig(online=False))
     after = {p.name: p.read_bytes() for p in (data_root / "original").iterdir() if p.is_file()}
 
     # Acceptance A1: originals untouched (we only read them).
@@ -82,8 +83,8 @@ def test_pipeline_idempotent_catalog(tmp_path: Path) -> None:
     orig.mkdir(parents=True)
     for n in range(1, 5):
         (orig / f"Example - Space Tactics (Disk {n} of 4).adf").write_bytes(b"x" * 10)
-    r1 = run_pipeline(cfg=_cfg(data_root), run_id="run-1")
-    r2 = run_pipeline(cfg=_cfg(data_root), run_id="run-2")
+    r1 = run_pipeline(cfg=_cfg(data_root), run=RunConfig(run_id="run-1"))
+    r2 = run_pipeline(cfg=_cfg(data_root), run=RunConfig(run_id="run-2"))
     # Catalog appends new scan/parse lines only once per unique file.
     assert r1["catalog_new_scan"] == 4
     assert r2["catalog_new_scan"] == 0

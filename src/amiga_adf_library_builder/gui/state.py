@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from ..paths import PathConfig, PathConfigError, discover_default_config_path, resolve_config
+from ..run_config import RunConfig
 
 
 @dataclass
@@ -228,40 +229,12 @@ def build_pipeline_kwargs(
     config_path: Optional[str] = None,
     activity: Optional[Any] = None,
     cache_dir: Optional[os.PathLike] = None,
-) -> dict:
-    """Build the ``run_pipeline`` keyword arguments from GUI state (CLI-equivalent).
+) -> tuple[RunConfig, dict[str, Any]]:
+    """Build the ``run_pipeline`` arguments from GUI state (CLI-equivalent).
 
-    The mapping mirrors ``cli.py`` ``build`` / ``export`` exactly:
-
-      * online                 -> online
-      * refresh_metadata       -> refresh_metadata
-      * require_artwork        -> require_artwork        (export only, harmless on build)
-      * export_gate_acknowledged -> upstream_task_closed
-      * verify_only            -> verify_only            (export only)
-      * export=                -> (state.run_mode == "export")
-      * one_per_game           -> one_per_game
-      * operator_decisions_path -> operator_decisions_path
-      * selection_manifest_path -> selection_manifest_path
-      * provider config paths  -> playmatch/hasheous/rtfm/local_media config paths
-
-    Provider config paths: the GUI passes the same file the CLI would
-    (``--config``), unless an explicit provider config path is set. The core
-    resolves ``[playmatch]``/``[hasheous]``/``[rtfm]``/``[local_media]`` from it.
-
-    (GH-33) The ``local_media_config_path`` is resolved through
-    :func:`resolve_local_media_config_path`: when the GUI holds LaunchBox local
-    mappings, a GUI-managed merged ``[local_media]`` config is written (into
-    ``cache_dir`` when provided, else the system temp dir) and passed instead;
-    with no GUI mappings the original provider-config path is used unchanged.
-
-    ``activity`` (issue #21): optional live-log callback forwarded to the
-    pipeline as a plain-language activity hook. Omitted (absent) when ``None``,
-    so CLI<->GUI equivalence and non-GUI callers are unchanged.
-
-    Verified artwork dimensions: the CLI passes the upstream hard limits
-    (``ARTWORK_MAX_W``/``ARTWORK_MAX_H`` = 2000x2000) to satisfy the exporter
-    gate. The GUI does the same so CLI/GUI equivalence holds for the export
-    gate evaluation.
+    Returns ``(run_config, extra_kwargs)`` where ``run_config`` is a
+    :class:`RunConfig` and ``extra_kwargs`` contains ``cfg``, ``activity``,
+    and any remaining non-RunConfig keyword arguments.
     """
     from ..artwork import ARTWORK_MAX_W, ARTWORK_MAX_H
     provider_cfg = state.provider_config_path or config_path or None
@@ -279,39 +252,39 @@ def build_pipeline_kwargs(
     local_media_cfg = resolve_local_media_config_path(
         state, config_path=config_path, cache_dir=cache_dir
     )
-    kwargs: dict[str, Any] = {
-        "cfg": cfg,
-        "online": bool(state.online),
-        "refresh_metadata": bool(state.refresh_metadata),
-        "require_artwork": bool(state.require_artwork),
-        "upstream_task_closed": bool(state.export_gate_acknowledged),
+    run_config = RunConfig(
+        online=bool(state.online),
+        refresh_metadata=bool(state.refresh_metadata),
+        require_artwork=bool(state.require_artwork),
+        upstream_task_closed=bool(state.export_gate_acknowledged),
         # (GH-24) Independent metadata selection, forwarded verbatim.
-        "include_artwork": bool(state.include_artwork),
-        "include_manuals_rtfm": bool(state.include_manuals_rtfm),
-        "export": (state.run_mode == "export"),
-        "verify_only": bool(state.verify_only),
+        include_artwork=bool(state.include_artwork),
+        include_manuals_rtfm=bool(state.include_manuals_rtfm),
+        export=(state.run_mode == "export"),
+        verify_only=bool(state.verify_only),
         # (GH-107 Slice 6) 1G1R selection controls
-        "one_per_game": bool(state.one_per_game),
-        "operator_decisions_path": state.operator_decisions_path or None,
-        "selection_manifest_path": state.selection_manifest_path or None,
+        one_per_game=bool(state.one_per_game),
+        operator_decisions_path=state.operator_decisions_path or None,
+        selection_manifest_path=state.selection_manifest_path or None,
         # (GH-136) Curation state path — threaded to run_pipeline for
         # applying accepted/rejected curation decisions before 1G1R.
-        "library_state_path": state.library_state_path or None,
+        library_state_path=state.library_state_path or None,
         # CLI-equivalent verified artwork dimensions for the exporter gate.
-        "verified_artwork_width": ARTWORK_MAX_W,
-        "verified_artwork_height": ARTWORK_MAX_H,
+        verified_artwork_width=ARTWORK_MAX_W,
+        verified_artwork_height=ARTWORK_MAX_H,
         # (GH-33) GUI LaunchBox mappings take precedence for local media;
         # otherwise identical to the CLI's provider-config behavior.
-        "local_media_config_path": local_media_cfg,
-        "rtfm_config_path": provider_cfg,
-        "playmatch_config_path": provider_cfg,
-        "hasheous_config_path": provider_cfg,
-        "retrokit_config_path": provider_cfg,
+        local_media_config_path=local_media_cfg,
+        rtfm_config_path=provider_cfg,
+        playmatch_config_path=provider_cfg,
+        hasheous_config_path=provider_cfg,
+        retrokit_config_path=provider_cfg,
         # (GH-102) Progressive JPEG conversion policy.
-        "convert_progressive_jpeg": str(getattr(state, "convert_progressive_jpeg", "never")),
+        convert_progressive_jpeg=str(getattr(state, "convert_progressive_jpeg", "never")),
         # (GH-102) Per-image progressive-conversion prompt callback.
-        "progressive_prompt_callback": getattr(state, "progressive_prompt_callback", None),
-    }
+        progressive_prompt_callback=getattr(state, "progressive_prompt_callback", None),
+    )
+    extra: dict[str, Any] = {"cfg": cfg}
     if activity is not None:
-        kwargs["activity"] = activity
-    return kwargs
+        extra["activity"] = activity
+    return run_config, extra

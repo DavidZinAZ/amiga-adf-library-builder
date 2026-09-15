@@ -30,6 +30,7 @@ from amiga_adf_library_builder.gui.state import (
     build_pipeline_kwargs,
 )
 from amiga_adf_library_builder.paths import resolve_config
+from amiga_adf_library_builder.run_config import RunConfig
 
 
 def _write_config(tmp_path: Path, **kw) -> str:
@@ -95,8 +96,8 @@ def test_pipeline_kwargs_flag_mapping(tmp_path: Path, flag, kwarg, value):
     state = GuiState(library_root=str(root))
     setattr(state, flag, value)
     cfg = build_path_config_from_gui_state(state)
-    kwargs = build_pipeline_kwargs(state, cfg)
-    assert kwargs[kwarg] is value
+    run_config, _extra = build_pipeline_kwargs(state, cfg)
+    assert getattr(run_config, kwarg) is value
 
 
 def test_pipeline_kwargs_export_mode(tmp_path: Path):
@@ -104,13 +105,13 @@ def test_pipeline_kwargs_export_mode(tmp_path: Path):
     root.mkdir()
     state = GuiState(library_root=str(root), run_mode="export")
     cfg = build_path_config_from_gui_state(state)
-    kwargs = build_pipeline_kwargs(state, cfg)
-    assert kwargs["export"] is True
+    run_config, _extra = build_pipeline_kwargs(state, cfg)
+    assert run_config.export is True
 
     state2 = GuiState(library_root=str(root), run_mode="build")
     cfg2 = build_path_config_from_gui_state(state2)
-    kwargs2 = build_pipeline_kwargs(state2, cfg2)
-    assert kwargs2["export"] is False
+    run_config2, _extra2 = build_pipeline_kwargs(state2, cfg2)
+    assert run_config2.export is False
 
 
 def test_pipeline_kwargs_provider_config_path(tmp_path: Path):
@@ -119,13 +120,13 @@ def test_pipeline_kwargs_provider_config_path(tmp_path: Path):
     cfg_file = _write_config(tmp_path, library_root=str(root))
     state = GuiState(library_root=str(root), provider_config_path=cfg_file)
     cfg = build_path_config_from_gui_state(state)
-    kwargs = build_pipeline_kwargs(state, cfg)
+    run_config, _extra = build_pipeline_kwargs(state, cfg)
     # The GUI passes the provider config file to every optional provider, exactly
     # like the CLI passes ``--config`` to playmatch/hasheous/rtfm/local_media.
-    assert kwargs["playmatch_config_path"] == cfg_file
-    assert kwargs["hasheous_config_path"] == cfg_file
-    assert kwargs["rtfm_config_path"] == cfg_file
-    assert kwargs["local_media_config_path"] == cfg_file
+    assert run_config.playmatch_config_path == cfg_file
+    assert run_config.hasheous_config_path == cfg_file
+    assert run_config.rtfm_config_path == cfg_file
+    assert run_config.local_media_config_path == cfg_file
 
 
 def test_gui_vs_cli_build_invocation_match(tmp_path: Path):
@@ -175,16 +176,16 @@ def test_gui_vs_cli_build_invocation_match(tmp_path: Path):
         provider_config_path=cfg_file,
     )
     gui_cfg = build_path_config_from_gui_state(state, config_path=cfg_file)
-    gui_kwargs = build_pipeline_kwargs(state, gui_cfg, config_path=cfg_file)
+    gui_run_config, gui_extra = build_pipeline_kwargs(state, gui_cfg, config_path=cfg_file)
 
     # Compare the meaningful fields; config_path routing must match.
-    assert gui_kwargs["online"] == cli_kwargs["online"]
-    assert gui_kwargs["refresh_metadata"] == cli_kwargs["refresh_metadata"]
-    assert gui_kwargs["upstream_task_closed"] == cli_kwargs["upstream_task_closed"]
-    assert gui_kwargs["export"] == cli_kwargs["export"]
-    assert gui_kwargs["playmatch_config_path"] == cli_kwargs["playmatch_config_path"]
-    assert gui_kwargs["hasheous_config_path"] == cli_kwargs["hasheous_config_path"]
-    assert gui_kwargs["cfg"].library_root == cli_kwargs["cfg"].library_root
+    assert gui_run_config.online == cli_kwargs["online"]
+    assert gui_run_config.refresh_metadata == cli_kwargs["refresh_metadata"]
+    assert gui_run_config.upstream_task_closed == cli_kwargs["upstream_task_closed"]
+    assert gui_run_config.export == cli_kwargs["export"]
+    assert gui_run_config.playmatch_config_path == cli_kwargs["playmatch_config_path"]
+    assert gui_run_config.hasheous_config_path == cli_kwargs["hasheous_config_path"]
+    assert gui_extra["cfg"].library_root == cli_kwargs["cfg"].library_root
 
 
 # ---------------------------------------------------------------------------
@@ -238,17 +239,17 @@ def test_gui_rtfm_config_discovery_fallback(tmp_path: Path, monkeypatch: pytest.
     # double-click scenario.
     state = GuiState(library_root=str(root))
     cfg = build_path_config_from_gui_state(state)
-    kwargs = build_pipeline_kwargs(state, cfg)
+    run_config, _extra = build_pipeline_kwargs(state, cfg)
 
-    assert kwargs["rtfm_config_path"] is not None, (
+    assert run_config.rtfm_config_path is not None, (
         "GH-76: GUI must discover a default config when none is explicitly set"
     )
-    assert kwargs["rtfm_config_path"] == str(cfg_file.resolve())
+    assert run_config.rtfm_config_path == str(cfg_file.resolve())
     # The provider config paths that use ``provider_cfg`` directly must match
     # the discovered config (playmatch/hasheous/retrokit use ``provider_cfg``;
     # local_media uses a separate resolver and is verified elsewhere).
-    assert kwargs["playmatch_config_path"] == kwargs["rtfm_config_path"]
-    assert kwargs["hasheous_config_path"] == kwargs["rtfm_config_path"]
+    assert run_config.playmatch_config_path == run_config.rtfm_config_path
+    assert run_config.hasheous_config_path == run_config.rtfm_config_path
 
 
 def test_gui_rtfm_config_no_config_stays_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -265,11 +266,11 @@ def test_gui_rtfm_config_no_config_stays_none(tmp_path: Path, monkeypatch: pytes
 
     state = GuiState(library_root=str(root))
     cfg = build_path_config_from_gui_state(state)
-    kwargs = build_pipeline_kwargs(state, cfg)
+    run_config, _extra = build_pipeline_kwargs(state, cfg)
 
-    assert kwargs["rtfm_config_path"] is None
-    assert kwargs["playmatch_config_path"] is None
-    assert kwargs["hasheous_config_path"] is None
+    assert run_config.rtfm_config_path is None
+    assert run_config.playmatch_config_path is None
+    assert run_config.hasheous_config_path is None
 
 
 def test_gui_rtfm_config_explicit_overrides_discovery(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -292,6 +293,6 @@ def test_gui_rtfm_config_explicit_overrides_discovery(tmp_path: Path, monkeypatc
 
     state = GuiState(library_root=str(root), provider_config_path=str(explicit_cfg))
     cfg = build_path_config_from_gui_state(state)
-    kwargs = build_pipeline_kwargs(state, cfg)
+    run_config, _extra = build_pipeline_kwargs(state, cfg)
 
-    assert kwargs["rtfm_config_path"] == str(explicit_cfg)
+    assert run_config.rtfm_config_path == str(explicit_cfg)

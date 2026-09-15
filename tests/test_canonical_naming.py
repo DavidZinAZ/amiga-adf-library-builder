@@ -39,6 +39,7 @@ from amiga_adf_library_builder.grouper import group_records
 from amiga_adf_library_builder.models import ParsedRecord, ReleaseGroup
 from amiga_adf_library_builder.parser import parse_filename
 from amiga_adf_library_builder.pipeline import build_staged_library_from_result
+from amiga_adf_library_builder.run_config import RunConfig
 
 
 # ---------------------------------------------------------------------------
@@ -518,7 +519,7 @@ class TestIntegrationPath:
             reports_dir=tmp_path / "reports",
             approvals_dir=tmp_path / "approvals",
         )
-        result = run_pipeline(cfg=cfg, online=False)
+        result = run_pipeline(cfg=cfg, run=RunConfig(online=False))
         assert result is not None
         assert result.get("groups", 0) >= 0
         for pg in result.get("per_group", []):

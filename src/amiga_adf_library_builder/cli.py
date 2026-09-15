@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 from . import pipeline
+from .run_config import RunConfig
 from . import artwork as artwork_mod
 from .enrich import VERIFIED_ARTWORK_WIDTH, VERIFIED_ARTWORK_HEIGHT
 from .exporter_guard import export_gate_open
@@ -550,17 +551,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         started_at = datetime.now(timezone.utc).isoformat()
         result = pipeline.run_pipeline(
             cfg=cfg,
-            online=bool(args.online),
-            refresh_metadata=bool(args.refresh_metadata),
-            upstream_task_closed=bool(args.export_gate_acknowledged),
-            local_media_config_path=getattr(args, "config", None),
-            rtfm_config_path=getattr(args, "config", None),
-            playmatch_config_path=getattr(args, "playmatch_config", None) or getattr(args, "config", None),
-            hasheous_config_path=getattr(args, "hasheous_config", None) or getattr(args, "config", None),
-            screenscraper_config_path=getattr(args, "config", None),
-            retroachievements_config_path=getattr(args, "config", None),
-            retrokit_config_path=getattr(args, "config", None),
-            library_state_path=getattr(args, "library_state_path", None),
+            run=RunConfig(
+                online=bool(args.online),
+                refresh_metadata=bool(args.refresh_metadata),
+                upstream_task_closed=bool(args.export_gate_acknowledged),
+                local_media_config_path=getattr(args, "config", None),
+                rtfm_config_path=getattr(args, "config", None),
+                playmatch_config_path=getattr(args, "playmatch_config", None) or getattr(args, "config", None),
+                hasheous_config_path=getattr(args, "hasheous_config", None) or getattr(args, "config", None),
+                screenscraper_config_path=getattr(args, "config", None),
+                retroachievements_config_path=getattr(args, "config", None),
+                retrokit_config_path=getattr(args, "config", None),
+                library_state_path=getattr(args, "library_state_path", None),
+            ),
         )
         return _emit(
             result,
@@ -581,26 +584,28 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             result = pipeline.run_pipeline(
                 cfg=cfg,
-                online=bool(args.online),
-                refresh_metadata=bool(args.refresh_metadata),
-                require_artwork=bool(args.require_artwork),
-                upstream_task_closed=bool(args.export_gate_acknowledged),
-                export=True,
-                verify_only=bool(args.verify_only),
-                run_id=args.run_id,
-                verified_artwork_width=artwork_mod.ARTWORK_MAX_W,
-                verified_artwork_height=artwork_mod.ARTWORK_MAX_H,
-                one_per_game=bool(args.one_per_game),
-                operator_decisions_path=getattr(args, "operator_decisions", None),
-                selection_manifest_path=getattr(args, "selection_manifest", None),
-                local_media_config_path=getattr(args, "config", None),
-                rtfm_config_path=getattr(args, "config", None),
-                playmatch_config_path=getattr(args, "playmatch_config", None) or getattr(args, "config", None),
-                hasheous_config_path=getattr(args, "hasheous_config", None) or getattr(args, "config", None),
-                screenscraper_config_path=getattr(args, "config", None),
-                retroachievements_config_path=getattr(args, "config", None),
-                retrokit_config_path=getattr(args, "config", None),
-                library_state_path=getattr(args, "library_state_path", None),
+                run=RunConfig(
+                    online=bool(args.online),
+                    refresh_metadata=bool(args.refresh_metadata),
+                    require_artwork=bool(args.require_artwork),
+                    upstream_task_closed=bool(args.export_gate_acknowledged),
+                    export=True,
+                    verify_only=bool(args.verify_only),
+                    run_id=args.run_id,
+                    verified_artwork_width=artwork_mod.ARTWORK_MAX_W,
+                    verified_artwork_height=artwork_mod.ARTWORK_MAX_H,
+                    one_per_game=bool(args.one_per_game),
+                    operator_decisions_path=getattr(args, "operator_decisions", None),
+                    selection_manifest_path=getattr(args, "selection_manifest", None),
+                    local_media_config_path=getattr(args, "config", None),
+                    rtfm_config_path=getattr(args, "config", None),
+                    playmatch_config_path=getattr(args, "playmatch_config", None) or getattr(args, "config", None),
+                    hasheous_config_path=getattr(args, "hasheous_config", None) or getattr(args, "config", None),
+                    screenscraper_config_path=getattr(args, "config", None),
+                    retroachievements_config_path=getattr(args, "config", None),
+                    retrokit_config_path=getattr(args, "config", None),
+                    library_state_path=getattr(args, "library_state_path", None),
+                ),
             )
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)

@@ -582,19 +582,19 @@ def test_build_pipeline_kwargs_forwards_merged_local_media_path(tmp_path: Path):
         logs_dir=Path("/data/lib/logs"),
         cache_dir=Path("/data/lib/cache"),
     )
-    kwargs = build_pipeline_kwargs(
+    run_config, extra = build_pipeline_kwargs(
         state, cfg, config_path=None, activity=None,
         cache_dir=tmp_path / "cache",
     )
     # A merged config file was produced and passed through.
-    assert kwargs["local_media_config_path"] is not None
-    assert Path(kwargs["local_media_config_path"]).is_file()
+    assert run_config.local_media_config_path is not None
+    assert Path(run_config.local_media_config_path).is_file()
     # Without GUI mappings, it stays the operator's config path (None here).
     bare = GuiState(library_root="/data/lib")
-    bare_kwargs = build_pipeline_kwargs(
+    bare_run_config, bare_extra = build_pipeline_kwargs(
         bare, cfg, config_path=None, activity=None, cache_dir=tmp_path / "cache"
     )
-    assert bare_kwargs["local_media_config_path"] is None
+    assert bare_run_config.local_media_config_path is None
 
 
 # --- 8) GUI: MainWindow LaunchBox tab (offscreen) ----------------------------

@@ -11,6 +11,7 @@ from amiga_adf_library_builder.manual_approvals import ApprovalRecord, write_app
 from amiga_adf_library_builder.gui.state import GuiState, build_pipeline_kwargs
 from amiga_adf_library_builder.paths import PathConfig
 from amiga_adf_library_builder.pipeline import run_pipeline, _ensure_canonical_library
+from amiga_adf_library_builder.run_config import RunConfig
 
 def _group(release_key, title="G", language="", version=""):
     rec = ParsedRecord(source_filename=f"{title}.adf", ext="adf", title=title,
@@ -58,7 +59,10 @@ class TestR2_FailClosedSelection:
             for d in ["original","staging","output","quarantine","logs","cache","reports","approvals","curation","config"]:
                 (LIB / d).mkdir(parents=True, exist_ok=True)
             (LIB / "original" / "x.adf").write_bytes(b"ADF" + b"\x00"*900)
-            res = run_pipeline(cfg=PathConfig(library_root=LIB,original_dir=LIB/"original",staging_dir=LIB/"staging",output_dir=LIB/"output",quarantine_dir=LIB/"quarantine",logs_dir=LIB/"logs",cache_dir=LIB/"cache",reports_dir=LIB/"reports",approvals_dir=LIB/"approvals"), export=True, upstream_task_closed=True, run_id="r2-test")
+            res = run_pipeline(
+            cfg=PathConfig(library_root=LIB,original_dir=LIB/"original",staging_dir=LIB/"staging",output_dir=LIB/"output",quarantine_dir=LIB/"quarantine",logs_dir=LIB/"logs",cache_dir=LIB/"cache",reports_dir=LIB/"reports",approvals_dir=LIB/"approvals"),
+            run=RunConfig(export=True, upstream_task_closed=True, run_id="r2-test"),
+        )
             assert res.get("selection_failed") is True
             assert "selection_error" in res
             assert res.get("export_gate_open") is False
@@ -83,10 +87,10 @@ class TestR3_GUISlice6Controls:
                          quarantine_dir=Path("/tmp/lib/quarantine"), logs_dir=Path("/tmp/lib/logs"),
                          cache_dir=Path("/tmp/lib/cache"), reports_dir=Path("/tmp/lib/reports"),
                          approvals_dir=Path("/tmp/lib/approvals"))
-        kwargs = build_pipeline_kwargs(state, cfg)
-        assert kwargs["one_per_game"] is False
-        assert kwargs["operator_decisions_path"] == "/tmp/d.json"
-        assert kwargs["selection_manifest_path"] == "/tmp/m.json"
+        run_config, kwargs = build_pipeline_kwargs(state, cfg)
+        assert run_config.one_per_game is False
+        assert run_config.operator_decisions_path == "/tmp/d.json"
+        assert run_config.selection_manifest_path == "/tmp/m.json"
 
 class TestR4_CanonicalRegionLanguageEffective:
     def test_canonical_availability_creates_db(self):

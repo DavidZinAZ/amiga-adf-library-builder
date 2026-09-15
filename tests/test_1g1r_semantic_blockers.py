@@ -259,7 +259,7 @@ class TestGuiStateBindings:
             cache_dir=Path("/tmp/lib/cache"), reports_dir=Path("/tmp/lib/reports"),
             approvals_dir=Path("/tmp/lib/approvals"),
         )
-        kwargs = build_pipeline_kwargs(state, cfg)
-        assert kwargs["one_per_game"] is True
-        assert kwargs["operator_decisions_path"] == "/tmp/dec.json"
-        assert kwargs["selection_manifest_path"] == "/tmp/sel.json"
+        run_config, extra = build_pipeline_kwargs(state, cfg)
+        assert run_config.one_per_game is True
+        assert run_config.operator_decisions_path == "/tmp/dec.json"
+        assert run_config.selection_manifest_path == "/tmp/sel.json"

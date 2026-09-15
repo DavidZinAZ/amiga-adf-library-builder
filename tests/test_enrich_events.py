@@ -16,6 +16,7 @@ from amiga_adf_library_builder.logging_utils import write_run_log, redact
 from amiga_adf_library_builder.models import ScanRecord
 from amiga_adf_library_builder.parser import parse_filename
 from amiga_adf_library_builder.paths import PathConfig, resolve_config
+from amiga_adf_library_builder.run_config import RunConfig
 
 
 def _ufo_group():
@@ -160,7 +161,7 @@ def test_route_event_appears_in_pipeline_per_group(tmp_path: Path) -> None:
     from amiga_adf_library_builder.initializer import ensure_managed_directories
 
     ensure_managed_directories(cfg)
-    result = pipeline.run_pipeline(cfg=cfg)
+    result = pipeline.run_pipeline(cfg=cfg, run=RunConfig())
     assert result["per_group"], "expected at least one group"
     cats = set()
     for group in result["per_group"]:

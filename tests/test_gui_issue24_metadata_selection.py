@@ -35,6 +35,7 @@ from amiga_adf_library_builder.grouper import group_records
 from amiga_adf_library_builder.models import ScanRecord
 from amiga_adf_library_builder.parser import parse_filename
 from amiga_adf_library_builder.pipeline import run_pipeline
+from amiga_adf_library_builder.run_config import RunConfig
 from amiga_adf_library_builder.paths import resolve_config
 
 
@@ -158,9 +159,11 @@ def test_pipeline_rtfm_config_present_but_deselected_builds_nothing(tmp_path: Pa
     data_root = tmp_path / "library"
     result = run_pipeline(
         cfg=resolve_config(library_root=str(data_root))[0],
-        online=False,
-        rtfm_config_path=str(config_toml),
-        include_manuals_rtfm=False,
+        run=RunConfig(
+            online=False,
+            rtfm_config_path=str(config_toml),
+            include_manuals_rtfm=False,
+        ),
     )
     assert result["include_manuals_rtfm"] is False
     # An [rtfm] config IS present, but the operator deselected it.
@@ -179,9 +182,11 @@ def test_pipeline_rtfm_config_present_and_selected_builds(tmp_path: Path) -> Non
     data_root = tmp_path / "library"
     result = run_pipeline(
         cfg=resolve_config(library_root=str(data_root))[0],
-        online=False,
-        rtfm_config_path=str(config_toml),
-        include_manuals_rtfm=True,
+        run=RunConfig(
+            online=False,
+            rtfm_config_path=str(config_toml),
+            include_manuals_rtfm=True,
+        ),
     )
     assert result["include_manuals_rtfm"] is True
     assert result["rtfm"]["configured"] is True
@@ -198,9 +203,11 @@ def test_pipeline_result_records_both_selection_flags(tmp_path: Path) -> None:
     (data_root / "original" / "Solo Game (Disk 1 of 1).adf").write_bytes(b"\x00" * 16)
     result = run_pipeline(
         cfg=resolve_config(library_root=str(data_root))[0],
-        online=False,
-        include_artwork=False,
-        include_manuals_rtfm=False,
+        run=RunConfig(
+            online=False,
+            include_artwork=False,
+            include_manuals_rtfm=False,
+        ),
     )
     assert result["include_artwork"] is False
     assert result["include_manuals_rtfm"] is False
@@ -230,15 +237,15 @@ def test_build_pipeline_kwargs_forwards_both_flags() -> None:
         logs_dir=Path("/data/lib/logs"),
         cache_dir=Path("/data/lib/cache"),
     )
-    kwargs = build_pipeline_kwargs(state, cfg, config_path=None, activity=None)
+    run_config, kwargs = build_pipeline_kwargs(state, cfg, config_path=None, activity=None)
     # Defaults are ON.
-    assert kwargs["include_artwork"] is True
-    assert kwargs["include_manuals_rtfm"] is True
+    assert run_config.include_artwork is True
+    assert run_config.include_manuals_rtfm is True
     # Toggling the state flows through verbatim.
     off = GuiState(library_root="/data/lib", include_artwork=False, include_manuals_rtfm=False)
-    kwargs_off = build_pipeline_kwargs(off, cfg, config_path=None, activity=None)
-    assert kwargs_off["include_artwork"] is False
-    assert kwargs_off["include_manuals_rtfm"] is False
+    run_config_off, kwargs_off = build_pipeline_kwargs(off, cfg, config_path=None, activity=None)
+    assert run_config_off.include_artwork is False
+    assert run_config_off.include_manuals_rtfm is False
 
 
 # --- settings store ----------------------------------------------------------

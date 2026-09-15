@@ -32,6 +32,7 @@ from amiga_adf_library_builder.gui.state import (
 )
 from amiga_adf_library_builder.initializer import ensure_managed_directories
 from amiga_adf_library_builder import cli, pipeline
+from amiga_adf_library_builder.run_config import RunConfig
 
 _SHARED_ORIGINAL = (
     Path(__file__).resolve().parent / "fixtures" / "issue15-lib"
@@ -149,14 +150,16 @@ def test_equiv_build_produces_identical_artifacts(tmp_path: Path):
         run_mode="build",
     )
     gui_cfg = build_path_config_from_gui_state(gui_state)
-    gui_kwargs = build_pipeline_kwargs(gui_state, gui_cfg)
+    gui_run_config, gui_extra = build_pipeline_kwargs(gui_state, gui_cfg)
     ensure_managed_directories(gui_cfg)
-    gui_result = pipeline.run_pipeline(**gui_kwargs)
+    gui_extra_kwargs = {k: v for k, v in gui_extra.items() if k != "cfg"}
+    gui_result = pipeline.run_pipeline(gui_extra["cfg"], gui_run_config, **gui_extra_kwargs)
 
     # --- CLI path (exactly what cli._run_build does) --------------------------
     cli_kwargs = _cli_build_kwargs(str(cli_root), original)
     ensure_managed_directories(cli_kwargs["cfg"])
-    cli_result = pipeline.run_pipeline(**cli_kwargs)
+    cli_run_config = RunConfig(**{k: v for k, v in cli_kwargs.items() if k != "cfg"})
+    cli_result = pipeline.run_pipeline(cli_kwargs["cfg"], cli_run_config)
 
     # 1) The pipeline invocation inputs are equivalent. The GUI's
     #    build_pipeline_kwargs always sets export/verify_only/require_artwork
@@ -165,26 +168,40 @@ def test_equiv_build_produces_identical_artifacts(tmp_path: Path):
     #    verified_artwork_width/height (CLI-equivalent defaults for the exporter
     #    gate; harmless on build); the CLI build handler omits all seven and
     #    relies on those same defaults. Both resolve to the identical effective
-    #    call. Prove the GUI adds exactly those seven default-only keys and that
-    #    every CLI-passed key matches.
-    gui_only_keys = set(gui_kwargs) - set(cli_kwargs)
+    # Prove the GUI adds exactly those seven default-only keys and that
+    # every CLI-passed key matches.
+    # RunConfig fields that correspond to old-style kwargs passed by build_pipeline_kwargs.
+    _run_config_kwarg_names = {
+        "online", "refresh_metadata", "require_artwork",
+        "upstream_task_closed", "include_artwork", "include_manuals_rtfm",
+        "export", "verify_only", "one_per_game",
+        "operator_decisions_path", "selection_manifest_path",
+        "library_state_path", "verified_artwork_width", "verified_artwork_height",
+        "local_media_config_path", "rtfm_config_path",
+        "playmatch_config_path", "hasheous_config_path",
+        "retrokit_config_path",
+    }
+    gui_only_keys = _run_config_kwarg_names - set(cli_kwargs)
+    # The CLI build handler omits these; they default in the GUI.
     assert gui_only_keys == {
         "export", "verify_only", "require_artwork",
         "include_artwork", "include_manuals_rtfm",
         "verified_artwork_width", "verified_artwork_height",
+        "one_per_game", "operator_decisions_path",
+        "selection_manifest_path", "library_state_path",
     }
-    assert gui_kwargs["export"] is False
-    assert gui_kwargs["verify_only"] is False
-    assert gui_kwargs["require_artwork"] is False
-    assert gui_kwargs["include_artwork"] is True
-    assert gui_kwargs["include_manuals_rtfm"] is True
+    assert gui_run_config.export is False
+    assert gui_run_config.verify_only is False
+    assert gui_run_config.require_artwork is False
+    assert gui_run_config.include_artwork is True
+    assert gui_run_config.include_manuals_rtfm is True
     for k in cli_kwargs:
         if k == "cfg":
             # The PathConfig legitimately differs by library root; only the
             # original/ corpus (the shared read-only input) must be identical.
-            assert gui_kwargs["cfg"].original_dir == cli_kwargs["cfg"].original_dir
+            assert gui_extra["cfg"].original_dir == cli_kwargs["cfg"].original_dir
             continue
-        assert gui_kwargs[k] == cli_kwargs[k], f"pipeline kwarg {k} differs"
+        assert getattr(gui_run_config, k) == cli_kwargs[k], f"pipeline kwarg {k} differs"
 
     # 2) Deterministic catalog outputs match byte-for-byte *after stripping
     #    the run-wall-clock timestamp* (the only field that legitimately
@@ -247,14 +264,16 @@ def test_equiv_export_produces_identical_staging(tmp_path: Path):
         export_gate_acknowledged=True,
     )
     gui_cfg = build_path_config_from_gui_state(gui_state)
-    gui_kwargs = build_pipeline_kwargs(gui_state, gui_cfg)
+    gui_run_config, gui_extra = build_pipeline_kwargs(gui_state, gui_cfg)
     ensure_managed_directories(gui_cfg)
-    gui_result = pipeline.run_pipeline(**gui_kwargs)
+    gui_extra_kwargs = {k: v for k, v in gui_extra.items() if k != "cfg"}
+    gui_result = pipeline.run_pipeline(gui_extra["cfg"], gui_run_config, **gui_extra_kwargs)
 
     # --- CLI path -------------------------------------------------------------
     cli_kwargs = _cli_export_kwargs(str(cli_root), original, verify_only=False)
     ensure_managed_directories(cli_kwargs["cfg"])
-    cli_result = pipeline.run_pipeline(**cli_kwargs)
+    cli_run_config = RunConfig(**{k: v for k, v in cli_kwargs.items() if k != "cfg"})
+    cli_result = pipeline.run_pipeline(cli_kwargs["cfg"], cli_run_config)
 
     # The gate must be OPEN (operator-acknowledged) and the export must run.
     assert gui_result["export_gate_open"] is True

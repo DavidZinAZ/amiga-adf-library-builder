@@ -17,6 +17,7 @@ from amiga_adf_library_builder import activity_log
 from amiga_adf_library_builder import diagnostics as diag
 from amiga_adf_library_builder import logging_utils
 from amiga_adf_library_builder.pipeline import run_pipeline
+from amiga_adf_library_builder.run_config import RunConfig
 from amiga_adf_library_builder.paths import resolve_config
 
 
@@ -166,7 +167,7 @@ def test_pipeline_result_has_serializable_provider_diagnostics(tmp_path: Path) -
     orig.mkdir(parents=True)
     for n in range(1, 5):
         (orig / f"Example - Space Tactics (Disk {n} of 4).adf").write_bytes(b"x" * 10)
-    result = run_pipeline(cfg=_cfg(data_root), run_id="gh44")
+    result = run_pipeline(cfg=_cfg(data_root), run=RunConfig(run_id="gh44"))
 
     assert "provider_diagnostics" in result
     pd = result["provider_diagnostics"]
@@ -194,7 +195,7 @@ def test_pipeline_diagnostics_never_breaks_the_run(tmp_path: Path) -> None:
     orig = data_root / "original"
     orig.mkdir(parents=True)
     (orig / "Solo Game (Disk 1 of 1).adf").write_bytes(b"x" * 10)
-    result = run_pipeline(cfg=_cfg(data_root), run_id="gh44-safe")
+    result = run_pipeline(cfg=_cfg(data_root), run=RunConfig(run_id="gh44-safe"))
     assert "provider_diagnostics" in result
     assert result["files_scanned"] == 1
 

@@ -27,6 +27,7 @@ from amiga_adf_library_builder.naming import _sanitize, release_basename
 from amiga_adf_library_builder.parser import parse_filename
 from amiga_adf_library_builder.paths import PathConfig, resolve_config
 from amiga_adf_library_builder.pipeline import run_pipeline
+from amiga_adf_library_builder.run_config import RunConfig
 
 # Two EXAMPLE base keys committed in config/manual-approvals.toml (manual-approval feature).
 EXAMPLE_KEYS = ("examplequestiii", "exampleqest3")
@@ -479,9 +480,10 @@ def test_nfo_omits_approved_source_when_absent(tmp_path):
         }
         _write_json_approval(data_root, rec)
         res = run_pipeline(
-            cfg=_cfg(data_root), upstream_task_closed=True, run_id="nfo-no-url",
-            verified_artwork_width=artwork_mod.ARTWORK_MAX_W,
-            verified_artwork_height=artwork_mod.ARTWORK_MAX_H)
+            cfg=_cfg(data_root), run=RunConfig(
+                upstream_task_closed=True, run_id="nfo-no-url",
+                verified_artwork_width=artwork_mod.ARTWORK_MAX_W,
+                verified_artwork_height=artwork_mod.ARTWORK_MAX_H))
         nfo = (data_root / "assets" / "nfo" / "Foo Quest.nfo").read_text()
         # Gotek NFO never embeds provenance (Gotek NFO contract).
         assert "Approved source:" not in nfo
@@ -515,9 +517,10 @@ def test_nfo_cites_approved_source_per_role(tmp_path):
         }
         _write_json_approval(data_root, rec)
         run_pipeline(
-            cfg=_cfg(data_root), upstream_task_closed=True, run_id="nfo-url",
-            verified_artwork_width=artwork_mod.ARTWORK_MAX_W,
-            verified_artwork_height=artwork_mod.ARTWORK_MAX_H)
+            cfg=_cfg(data_root), run=RunConfig(
+                upstream_task_closed=True, run_id="nfo-url",
+                verified_artwork_width=artwork_mod.ARTWORK_MAX_W,
+                verified_artwork_height=artwork_mod.ARTWORK_MAX_H))
         nfo = (data_root / "assets" / "nfo" / "Foo Quest.nfo").read_text()
         # Gotek NFO must NOT embed the approved-source URLs.
         assert "Approved source:" not in nfo
