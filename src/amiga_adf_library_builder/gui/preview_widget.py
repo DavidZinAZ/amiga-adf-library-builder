@@ -599,7 +599,7 @@ class UnifiedLookupDialog(QDialog):
     def reject(self) -> None:
         # Also stop the worker if running
         if hasattr(self, "_worker") and self._worker.isRunning():
-            self._worker.terminate()
+            self._worker.quit()  # safe graceful shutdown (never use terminate)
             self._worker.wait()
         super().reject()
 

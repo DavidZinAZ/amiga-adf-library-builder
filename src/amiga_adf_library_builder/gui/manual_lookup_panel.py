@@ -7,7 +7,7 @@ module only renders and forwards operator actions.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any
 
 from PySide6.QtWidgets import (
     QComboBox,
@@ -399,9 +399,11 @@ class ManualLookupPanel(QWidget):
         else:
             kwargs["title"] = query
 
+        dat_error: Optional[str] = None
         try:
             cands = candidates_from_sources(self._manager, **kwargs) if kwargs else []
-        except Exception:
+        except Exception as exc:
+            dat_error = f"DAT search error: {exc}"
             cands = []
 
         # Update candidate table with DAT results
@@ -421,6 +423,8 @@ class ManualLookupPanel(QWidget):
                 self._candidates_table.setItem(r, col, QTableWidgetItem(str(val)))
 
         # Also try online lookup via the shared workflow (if context available)
+        online_ok = False
+        online_result: Optional[Any] = None
         try:
             ctx_provider = getattr(self, "_lookup_ctx_provider", None)
             if ctx_provider:
@@ -428,16 +432,20 @@ class ManualLookupPanel(QWidget):
                 if ctx:
                     from ..lookup_workflow import run_lookup, MODE_ONLINE
                     ctx.query = query
-                    result = run_lookup(MODE_ONLINE, ctx, collect_candidates=True)
-                    # Could populate another table or status here
-                    self._status_label.setText(
-                        f"DAT results: {len(cands)} | Online candidates collected"
-                    )
-                else:
-                    self._status_label.setText(f"DAT results: {len(cands)}")
-            else:
-                self._status_label.setText(f"DAT results: {len(cands)}")
-        except Exception:
+                    online_result = run_lookup(MODE_ONLINE, ctx, collect_candidates=True)
+                    online_ok = True
+        except Exception as online_exc:
+            online_ok = False
+            dat_error = dat_error or ""
+            dat_error += f"; online lookup failed: {online_exc}"
+
+        if dat_error:
+            self._status_label.setText(dat_error)
+        elif online_ok and online_result:
+            self._status_label.setText(
+                f"DAT results: {len(cands)} | Online: {len(online_result.candidates) if hasattr(online_result, 'candidates') else '?'} candidates"
+            )
+        else:
             self._status_label.setText(f"DAT results: {len(cands)}")
 
     def closeEvent(self, event) -> None:  # release the canonical DB promptly

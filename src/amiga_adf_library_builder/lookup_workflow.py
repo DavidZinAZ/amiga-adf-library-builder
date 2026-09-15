@@ -306,7 +306,14 @@ def run_lookup(mode: str, ctx: LookupContext, *, collect_candidates: bool = Fals
     return _online_lookup(mode, ctx)
 
 
-# --- Multi-candidate collection (GH-157) ------------------------------------
+# --- DAT index candidate collection (future) ---------------------------------
+# TODO(GH-157 follow-up): Restore DAT index as a parallel candidate source.
+# Requires passing a DB path to _collect_all_candidates so we can construct
+# MetadataSourceManager(db_path) properly instead of the current __new__() stub
+# which never runs __init__ and crashes silently inside candidates_from_sources.
+
+
+# --- Multi-candidate collection helpers --------------------------------------
 
 
 @dataclass
@@ -443,42 +450,8 @@ def _run_offline_once(ctx: LookupContext) -> "LookupResult":
     return _offline_lookup(MODE_OFFLINE, ctx)
 
 
-def _run_dat_once(ctx: LookupContext) -> list[dict]:
-    """Query DAT index for candidates matching entry hashes/title."""
-    results = []
-    try:
-        from .manual_lookup import candidates_from_sources
-        from .metadata_source import MetadataSourceManager
-
-        # Get entry hashes from ADF files
-        sha1s, md5s, crc32s = [], [], []
-        for stem in ctx.disk_stems:
-            sha1s.append(stem.lower())  # placeholder - real hashes come from pipeline
-        # Try by title first
-        if ctx.title:
-            entries = candidates_from_sources(
-                MetadataSourceManager.__new__(MetadataSourceManager),  # stub; use DB path instead
-                title=ctx.title,
-            )
-            # Filter out empty manager error
-            if entries:
-                for e in entries:
-                    results.append({
-                        "mode": "dat",
-                        "kind": "offline",
-                        "status": "found" if e.get("title") else "no_match",
-                        "provider": e.get("source_name", "dat"),
-                        "consulted": ["dat_index"],
-                        "confidence": 0.85,
-                        "match_type": "dat_exact" if (e.get("sha1") or e.get("md5")) else "dat_title",
-                        "why": [f"DAT source: {e.get('source_name', '')}"],
-                        "title": e.get("title"),
-                        "year": e.get("year"),
-                        "publisher": e.get("publisher"),
-                    })
-    except Exception:
-        pass  # DAT unavailable -- will show as no-DAT state
-    return results
+# NOTE: _run_dat_once removed — it used MetadataSourceManager.__new__() which
+# never runs __init__, guaranteeing silent failure. See TODO above for re-add plan.
 
 
 def _collect_all_candidates(ctx: LookupContext) -> LookupResultCollection:
