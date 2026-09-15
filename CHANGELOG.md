@@ -1,5 +1,7 @@
 # Changelog
 
+## 0.2.17 — 2026-09-15
+
 ## 0.2.16 — 2026-09-14
 
 - GH-73: PreviewWidget detail pane wrapped in QScrollArea.
