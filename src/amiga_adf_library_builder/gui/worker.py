@@ -31,6 +31,7 @@ from PySide6.QtCore import QObject, QThread, Signal
 
 from ..logging_utils import redact
 from .state import GuiState, build_path_config_from_gui_state, build_pipeline_kwargs
+from ..run_config import RunConfig
 
 
 class PipelineWorker(QObject):
@@ -133,7 +134,7 @@ class PipelineWorker(QObject):
             if self._cancelled():
                 return
 
-            kwargs = build_pipeline_kwargs(
+            run_config, extra = build_pipeline_kwargs(
                 self._state, cfg, config_path=self._config_path,
                 activity=_enrich_progress_activity,
                 # (GH-33) GUI LaunchBox mappings are merged into a managed
@@ -164,7 +165,8 @@ class PipelineWorker(QObject):
             if self._cancelled():
                 return
 
-            result: dict[str, Any] = pipeline.run_pipeline(**kwargs)
+            extra_kwargs = {k: v for k, v in extra.items() if k != "cfg"}
+            result: dict[str, Any] = pipeline.run_pipeline(extra["cfg"], run_config, **extra_kwargs)
 
             if self._cancelled():
                 return

@@ -52,7 +52,8 @@ from amiga_adf_library_builder.gui.settings import (  # noqa: E402
     SettingsStore,
 )
 from amiga_adf_library_builder.paths import resolve_config  # noqa: E402
-from amiga_adf_library_builder.pipeline import run_pipeline  # noqa: E402
+from amiga_adf_library_builder.pipeline import run_pipeline
+from amiga_adf_library_builder.run_config import RunConfig  # noqa: E402
 from amiga_adf_library_builder.logging_utils import redact  # noqa: E402
 
 
@@ -166,7 +167,7 @@ def test_run_pipeline_emits_activity_milestones(tmp_path: Path):
     cfg = resolve_config(library_root=str(data_root))[0]
 
     lines: list[str] = []
-    result = run_pipeline(cfg=cfg, online=False, activity=lines.append)
+    result = run_pipeline(cfg=cfg, run=RunConfig(online=False), activity=lines.append)
 
     joined = "\n".join(lines)
     # Each major milestone reports at least one plain-language line.
@@ -188,7 +189,7 @@ def test_run_pipeline_no_activity_hook_is_noop(tmp_path: Path):
     _build_synthetic_corpus(data_root, _NAMES)
     cfg = resolve_config(library_root=str(data_root))[0]
     # No hook (CLI path) still works and returns the same shape.
-    result = run_pipeline(cfg=cfg, online=False)
+    result = run_pipeline(cfg=cfg, run=RunConfig(online=False))
     assert result["files_scanned"] == 5
 
 
@@ -200,7 +201,7 @@ def test_run_pipeline_activity_hook_failure_is_swallowed(tmp_path: Path):
     def _boom(_msg: str) -> None:
         raise RuntimeError("a logging hook must never break the run")
 
-    result = run_pipeline(cfg=cfg, online=False, activity=_boom)
+    result = run_pipeline(cfg=cfg, run=RunConfig(online=False), activity=_boom)
     assert result["files_scanned"] == 5  # run completed despite the bad hook
 
 
@@ -210,7 +211,7 @@ def test_run_pipeline_activity_lines_are_redacted(tmp_path: Path):
     cfg = resolve_config(library_root=str(data_root))[0]
 
     lines: list[str] = []
-    run_pipeline(cfg=cfg, online=False, activity=lines.append)
+    run_pipeline(cfg=cfg, run=RunConfig(online=False), activity=lines.append)
     for line in lines:
         assert line == redact(line), f"activity line not redacted: {line!r}"
 

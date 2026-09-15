@@ -16,7 +16,7 @@ import threading
 import warnings
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from . import artwork as artwork_mod
 from . import catalog, enrich, exporter, grouper, quarantine, scanner
@@ -33,6 +33,7 @@ from .canonical_naming import (
     _load_canonical_library,
 )
 from .paths import PathConfig
+from .run_config import RunConfig
 
 
 def _release_basename_with_warn(group: ReleaseGroup) -> str:
@@ -128,51 +129,9 @@ def _apply_curation(
 
 
 def run_pipeline(
-    *,
     cfg: PathConfig,
-    online: bool = False,
-    refresh_metadata: bool = False,
-    require_artwork: bool = False,
-    # (GH-24) Independent selection of the two optional metadata types. Both
-    # default ON so existing callers (CLI, tests) keep the current behaviour.
-    # include_artwork gates BOTH local lookup and online acquisition of cover
-    # artwork; include_manuals_rtfm gates the deterministic RTFM build. The
-    # require_artwork export-stop gate above is a DISTINCT concept and is
-    # unaffected by either of these.
-    include_artwork: bool = True,
-    include_manuals_rtfm: bool = True,
-    upstream_task_closed: bool = False,
-    run_id: Optional[str] = None,
-    export: bool = False,
-    verify_only: bool = False,
-    verified_artwork_width: Optional[int] = VERIFIED_ARTWORK_WIDTH,
-    verified_artwork_height: Optional[int] = VERIFIED_ARTWORK_HEIGHT,
-    local_media_config_path: Optional[str] = None,
-    rtfm_config_path: Optional[str] = None,
-    playmatch_config_path: Optional[str] = None,
-    hasheous_config_path: Optional[str] = None,
-    # (GH-107 Slice 6) 1G1R selection controls
-    one_per_game: bool = True,
-    operator_decisions_path: Optional[str] = None,
-    selection_manifest_path: Optional[str] = None,
-    igdb_config_path: Optional[str] = None,
-    screenscraper_config_path: Optional[str] = None,
-    retroachievements_config_path: Optional[str] = None,
-    retrokit_config_path: Optional[str] = None,
-    cancel_event: Optional[threading.Event] = None,
-    activity: Optional[Callable[[str], None]] = None,
-    # (GH-102) Progressive JPEG conversion policy.
-    convert_progressive_jpeg: str = "never",
-    # (GH-102) Per-image progressive-conversion prompt callback. Called ONLY when
-    # the source is a detected JPEG AND is progressive. Signature:
-    #   callback(basename: str, title: str) -> bool
-    # Must be idempotent and side-effect-free for testability. None disables
-    # prompting (the "prompt" policy then falls back to "never" behavior).
-    progressive_prompt_callback: Optional[Callable[[str, str], bool]] = None,
-    # (GH-136) Path to the library_state_<run_id>.json file produced by
-    # the build run. When set, the pipeline applies accepted/rejected
-    # curation decisions between quarantine and 1G1R selection.
-    library_state_path: Optional[str] = None,
+    run: RunConfig,
+    **kwargs: Any,
 ) -> dict:
     """Execute phases 2-4, 5 (optional), and 6. Returns a result summary dict.
 
@@ -184,7 +143,43 @@ def run_pipeline(
     plain-language line. The hook is optional and safe: a missing or failing
     callback never changes pipeline behavior. CLI callers omit it, so CLI
     output is byte-identical to before.
+
+    RunConfig fields govern behavioral toggles and config-path references.
+    Complex runtime controls (``cancel_event``, ``activity``,
+    ``progressive_prompt_callback``) may be passed via ``**kwargs``.
     """
+    from . import run_config as _rc
+
+    # Extract RunConfig fields for backward compatibility within the body.
+    online = run.online
+    refresh_metadata = run.refresh_metadata
+    require_artwork = run.require_artwork
+    include_artwork = run.include_artwork
+    include_manuals_rtfm = run.include_manuals_rtfm
+    upstream_task_closed = run.upstream_task_closed
+    run_id = run.run_id
+    export = run.export
+    verify_only = run.verify_only
+    verified_artwork_width = run.verified_artwork_width
+    verified_artwork_height = run.verified_artwork_height
+    local_media_config_path = run.local_media_config_path
+    rtfm_config_path = run.rtfm_config_path
+    playmatch_config_path = run.playmatch_config_path
+    hasheous_config_path = run.hasheous_config_path
+    igdb_config_path = run.igdb_config_path
+    screenscraper_config_path = run.screenscraper_config_path
+    retroachievements_config_path = run.retroachievements_config_path
+    retrokit_config_path = run.retrokit_config_path
+    one_per_game = run.one_per_game
+    operator_decisions_path = run.operator_decisions_path
+    selection_manifest_path = run.selection_manifest_path
+    library_state_path = run.library_state_path
+    convert_progressive_jpeg = kwargs.pop("convert_progressive_jpeg", run.convert_progressive_jpeg)
+    progressive_prompt_callback = kwargs.pop("progressive_prompt_callback", run.progressive_prompt_callback)
+    cancel_event = kwargs.pop("cancel_event", None)
+    activity = kwargs.pop("activity", None)
+    if kwargs:
+        raise TypeError(f"unexpected keyword arguments: {sorted(kwargs)}")
     def _act(msg: str) -> None:
         if activity is None:
             return
