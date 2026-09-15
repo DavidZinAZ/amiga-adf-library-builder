@@ -73,6 +73,7 @@ import json
 import time
 import urllib.error
 import urllib.request
+import warnings
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -478,6 +479,12 @@ def _group_identities(group) -> list[str]:
     try:
         from .naming import release_basename
 
+        warnings.warn(
+            "release_basename() called from retrokit._matching_forms. "
+            "Use canonical_release_name() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         bn = (release_basename(group) or "").strip()
     except Exception:
         bn = ""

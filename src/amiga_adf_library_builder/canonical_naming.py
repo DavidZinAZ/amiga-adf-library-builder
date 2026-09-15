@@ -21,12 +21,18 @@ The existing ``release_basename(group)`` in this module is preserved for
 backward compatibility (pipeline preview path, manual approvals). The new
 functions are the canonical path: they read the canonical model, not the
 ReleaseGroup filename-derived fields.
+
+.. deprecated:: 0.3.0
+    ``release_basename`` usage in this module is limited to the compatibility
+    fallback path only. All primary naming goes through
+    :func:`canonical_release_name`. See AR-005.
 """
 from __future__ import annotations
 
 import os
 import re
 import sqlite3
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -464,10 +470,16 @@ def export_name_for_release_group(
                 return canonical_release_name(canon, rid)
 
     # No canonical match: fall back to the existing naming (deterministic
-    # given the ReleaseGroup state).
+    # given the ReleaseGroup state). This is the AR-005 compatibility fallback.
     if fallback_basename is not None:
         basename = fallback_basename
     else:
+        warnings.warn(
+            "release_basename() fallback called from canonical_naming: "
+            "no canonical DB match. Use canonical_release_name() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         basename = release_basename(group)
     return ProposedName(
         entity_type="release",

@@ -13,6 +13,7 @@ import json
 import os
 import sqlite3
 import threading
+import warnings
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
@@ -32,6 +33,21 @@ from .canonical_naming import (
     _load_canonical_library,
 )
 from .paths import PathConfig
+
+
+def _release_basename_with_warn(group: ReleaseGroup) -> str:
+    """Return release_basename(group) with a deprecation warning.
+
+    AR-005: release_basename is deprecated. This helper ensures callers
+    are notified when the legacy path is taken.
+    """
+    warnings.warn(
+        "release_basename() fallback called from pipeline diagnostics: "
+        "no canonical DB. Use canonical_release_name() instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return release_basename(group)
 
 # Monotonic, process-global counter that guarantees a unique run identifier even
 # when two operations start within the same wall-clock second. A bare
@@ -621,6 +637,7 @@ def run_pipeline(
         # (GH-107 Slice 5) Canonical naming: propose the canonical export
         # name when the canonical DB is available; fall back to
         # release_basename(group) when no canonical match exists.
+        # (AR-005: release_basename is deprecated; canonical path preferred.)
         _canon = _load_canonical_library(library_root)
         if _canon is not None:
             try:
@@ -630,6 +647,12 @@ def run_pipeline(
             finally:
                 _canon.close()
         else:
+            warnings.warn(
+                "release_basename() fallback called from pipeline preview: "
+                "no canonical DB. Use canonical_release_name() instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
             _folder = release_basename(g)
             _canon_prov = "fallback: no canonical DB"
         per_group.append(
@@ -661,6 +684,7 @@ def run_pipeline(
                 # single canonical naming source; honours operator folder override).
                 # (GH-107 Slice 5) "folder" uses the canonical proposed name when
                 # the canonical DB is available, else falls back to release_basename.
+                # (AR-005: release_basename is deprecated; canonical path preferred.)
                 "folder": _folder,
                 # (GH-107 Slice 5) Provenance for the proposed folder name.
                 "canonical_proposed_name": {
@@ -721,7 +745,11 @@ def run_pipeline(
         "catalog_new_parse": n_parse,
         "nfo_written": [str(r.nfo_path) for r in enrich_results if r.nfo_path],
         "artwork_resized": [str(r.artwork_resized) for r in enrich_results if r.artwork_resized],
-        "artwork_missing": [release_basename(g) for g, r in zip(groups, enrich_results) if not g.quarantine_reason and r.artwork_missing],
+        "artwork_missing": [
+            _release_basename_with_warn(g)
+            for g, r in zip(groups, enrich_results)
+            if not g.quarantine_reason and r.artwork_missing
+        ],
         "enrichment_notes": [note for r in enrich_results for note in r.notes],
         "review_routed": quarantine_summary["review"],
         "unknown_routed": quarantine_summary["unknown"],

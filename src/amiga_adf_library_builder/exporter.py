@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
@@ -61,6 +62,13 @@ def _get_canonical_basename(
     """
     from .canonical_naming import export_name_for_release_group, _load_canonical_library
     if library_root is None:
+        warnings.warn(
+            "release_basename() fallback called from exporter: "
+            "no canonical DB and no library_root. "
+            "Use canonical_release_name() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         return release_basename(group), "fallback: no canonical DB"
     _canon = _load_canonical_library(library_root)
     if _canon is not None:
@@ -69,6 +77,13 @@ def _get_canonical_basename(
             return _cn.basename, _cn.provenance_text
         finally:
             _canon.close()
+    warnings.warn(
+        "release_basename() fallback called from exporter: "
+        "canonical DB could not be loaded. "
+        "Use canonical_release_name() instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     return release_basename(group), "fallback: no canonical DB"
 
 
@@ -218,6 +233,13 @@ def export_release(
             return [], [], [str(exc)]
     else:
         try:
+            warnings.warn(
+                "release_basename() fallback called from export_release: "
+                "no explicit basename provided. "
+                "Use canonical_release_name() instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
             basename = _sanitize_component(release_basename(group))
         except ValueError as exc:
             return [], [], [str(exc)]
@@ -487,7 +509,8 @@ def export_all(
     # allowed; release_basename already disambiguates version/language/alt_marker
     # so most distinct releases get distinct folders, but FAT32 sanitization can
     # still collapse two distinct human-readable names to one component, and this
-    # guard catches that residual case safely.
+    # guard catches that residual case safely. (AR-005: release_basename is
+    # deprecated; canonical_release_name is the primary path.)
     folder_owner: dict[str, str] = {}
 
     for g in groups:
@@ -498,7 +521,8 @@ def export_all(
             result.skipped_quarantined.append(g.release_key)
             continue
         # (GH-107 Slice 5) Canonical naming: propose canonical name
-        # when DB available; fall back to release_basename(group).
+        # when DB available; falls back to release_basename(group).
+        # (AR-005: release_basename is deprecated; use canonical path.)
         basename, _prov = _get_canonical_basename(g, staging_root, library_root=library_root)
         folder_path = str(staging_root / _ext_root(g) / basename)
         owner = folder_owner.get(folder_path)
