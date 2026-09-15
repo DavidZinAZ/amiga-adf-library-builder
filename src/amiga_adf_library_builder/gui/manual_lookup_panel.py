@@ -422,9 +422,10 @@ class ManualLookupPanel(QWidget):
             for col, val in enumerate(values):
                 self._candidates_table.setItem(r, col, QTableWidgetItem(str(val)))
 
-        # Also try online lookup via the shared workflow (if context available)
+        # --- DEF-6 FIX: surface online candidates in the status / table ------
         online_ok = False
-        online_result: Optional[Any] = None
+        online_result = None
+        online_candidates: list[dict] = []
         try:
             ctx_provider = getattr(self, "_lookup_ctx_provider", None)
             if ctx_provider:
@@ -434,19 +435,70 @@ class ManualLookupPanel(QWidget):
                     ctx.query = query
                     online_result = run_lookup(MODE_ONLINE, ctx, collect_candidates=True)
                     online_ok = True
+                    if hasattr(online_result, "candidates"):
+                        online_candidates = online_result.candidates
         except Exception as online_exc:
             online_ok = False
             dat_error = dat_error or ""
             dat_error += f"; online lookup failed: {online_exc}"
 
+        if online_ok and online_result:
+            # Merge online candidates into the visible candidate table (after
+            # any DAT rows).  This prevents the unified lookup from fetching
+            # online results and silently throwing them away.
+            if hasattr(online_result, "candidates") and online_result.candidates:
+                all_cands = cands + online_result.candidates
+                self._candidates_table.setRowCount(len(all_cands))
+                for r, cand in enumerate(cands):
+                    values = [
+                        cand.get("source_name", ""),
+                        cand.get("title") or "",
+                        cand.get("year") or "",
+                        cand.get("publisher") or "",
+                        cand.get("region") or "",
+                        cand.get("sha1") or "",
+                        cand.get("record_key", ""),
+                    ]
+                    for col, val in enumerate(values):
+                        self._candidates_table.setItem(r, col, QTableWidgetItem(str(val)))
+                n_dat = len(cands)
+                for idx, oc in enumerate(online_result.candidates):
+                    values = [
+                        oc.get("provider") or "online",
+                        oc.get("title") or "",
+                        str(oc.get("year") or ""),
+                        oc.get("publisher") or "",
+                        oc.get("region") or "",
+                        oc.get("sha1") or "",
+                        oc.get("record_key") or "",
+                    ]
+                    for col, val in enumerate(values):
+                        self._candidates_table.setItem(n_dat + idx, col, QTableWidgetItem(str(val)))
+            else:
+                self._candidates_table.setRowCount(len(cands))
+                for r, cand in enumerate(cands):
+                    values = [
+                        cand.get("source_name", ""),
+                        cand.get("title") or "",
+                        cand.get("year") or "",
+                        cand.get("publisher") or "",
+                        cand.get("region") or "",
+                        cand.get("sha1") or "",
+                        cand.get("record_key", ""),
+                    ]
+                    for col, val in enumerate(values):
+                        self._candidates_table.setItem(r, col, QTableWidgetItem(str(val)))
+
         if dat_error:
             self._status_label.setText(dat_error)
         elif online_ok and online_result:
+            n_on = len(online_candidates)
             self._status_label.setText(
-                f"DAT results: {len(cands)} | Online: {len(online_result.candidates) if hasattr(online_result, 'candidates') else '?'} candidates"
+                f"DAT results: {len(cands)} | Online: {n_on} candidate(s)"
             )
         else:
             self._status_label.setText(f"DAT results: {len(cands)}")
+        # ---------------------------------------------------------------------
 
     def closeEvent(self, event) -> None:  # release the canonical DB promptly
         try:

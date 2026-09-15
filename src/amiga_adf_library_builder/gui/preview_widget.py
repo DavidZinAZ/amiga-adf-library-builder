@@ -405,6 +405,43 @@ class UnifiedLookupDialog(QDialog):
         mode = "online" if self._radio_online.isChecked() else \
                "offline" if self._radio_offline.isChecked() else "alternate"
 
+        search_query = self._search_edit.text().strip() or (self._entry.title or "")
+
+        # --- DEF-3 FIX: wire mode selector and search edit to re-run lookup --
+        # Build reverse lookup: radio -> mode string
+        _RADIO_MODE = {
+            self._radio_online: "online",
+            self._radio_offline: "offline",
+            self._radio_alternate: "alternate",
+        }
+        self._current_mode = "online"
+
+        def _on_radio_toggled(checked: bool, target_radioButton: QRadioButton) -> None:
+            if not checked:
+                return
+            for r in _RADIO_MODE:
+                r.blockSignals(True)
+                r.setChecked(r is target_radioButton)
+                r.blockSignals(False)
+            self._current_mode = _RADIO_MODE[target_radioButton]
+            self._run_lookup()
+
+        self._radio_online.toggled.connect(
+            lambda c: _on_radio_toggled(c, self._radio_online)
+        )
+        self._radio_offline.toggled.connect(
+            lambda c: _on_radio_toggled(c, self._radio_offline)
+        )
+        self._radio_alternate.toggled.connect(
+            lambda c: _on_radio_toggled(c, self._radio_alternate)
+        )
+
+        # --- DEF-3 FIX: connect search edit text changes to re-search --------
+        self._search_edit.textChanged.connect(
+            lambda: self._run_lookup()
+        )
+        # ---------------------------------------------------------------------
+
         ctx: Optional[LookupContext] = None
         ctx_provider = getattr(self, "_lookup_ctx_provider", None)
         if ctx_provider:
@@ -416,15 +453,26 @@ class UnifiedLookupDialog(QDialog):
             try:
                 from ..paths import resolve_config
                 paths_cfg, source = resolve_config()
+                # --- DEF-8 FIX: pass ALL required LookupContext fields -------
                 ctx = LookupContext(
+                    query=search_query,
+                    release_key=self._entry.release_key,
+                    title=self._entry.title or "",
+                    disk_stems=[Path(f).stem for f in (self._entry.adf_files or [])],
                     cache_dir=paths_cfg.metadata_cache_dir,
                     curated_dir=paths_cfg.curated_metadata_dir,
                     config_path=source.config_path,
                 )
             except Exception:
-                ctx = LookupContext()
+                # --- DEF-8 FIX: fallback still provides query + release_key -
+                ctx = LookupContext(
+                    query=search_query,
+                    release_key=self._entry.release_key,
+                    title=self._entry.title or "",
+                    disk_stems=[Path(f).stem for f in (self._entry.adf_files or [])],
+                )
 
-        ctx.query = self._search_edit.text().strip() or (self._entry.title or "")
+        ctx.query = search_query
         ctx.release_key = self._entry.release_key
         ctx.title = self._entry.title or ""
         ctx.disk_stems = [Path(f).stem for f in (self._entry.adf_files or [])]
@@ -438,6 +486,11 @@ class UnifiedLookupDialog(QDialog):
         """Handle finished candidate collection."""
         self._progress.setRange(0, 1)
         self._progress.setValue(1)
+
+        # --- DEF-1 FIX: store the actual candidate dicts --------------------
+        # Always store; _get_candidate_at_row reads from this, not a fabricated dict.
+        self._candidates_list = candidates
+        # --------------------------------------------------------------------
 
         # Update candidates tab
         self._cand_table.setRowCount(len(candidates))
@@ -500,27 +553,34 @@ class UnifiedLookupDialog(QDialog):
         self._show_compare_detail()
 
     def _get_candidate_at_row(self, row: int) -> dict:
-        """Best effort: rebuild candidate from visible table data."""
-        # Store candidates in a temporary attribute during receive
+        """Return the stored candidate dict for a given table row."""
+        # --- DEF-1 FIX: use stored candidates exclusively --------------------
+        # No more fabricated fallback dicts. If no candidates are stored or the
+        # row is out of range, return None rather than lying about data.
         candidates = getattr(self, "_candidates_list", None)
         if candidates and 0 <= row < len(candidates):
             return candidates[row]
-        # Fallback: create minimal dict from visible data
-        conf_s = self._cand_table.item(row, 0)
-        prov = self._cand_table.item(row, 2)
-        mt = self._cand_table.item(row, 1)
-        return {
-            "confidence": float(conf_s.text()) if conf_s else 0,
-            "provider": prov.text() if prov else "",
-            "match_type": mt.text() if mt else "",
-            "status": "found",
-        }
+        return {}  # empty dict signals "nothing available"
+        # --------------------------------------------------------------------
 
     def _show_compare_detail(self) -> None:
         """Show pre/post compare view for selected candidate."""
         cand = self._candidate
         if not cand:
             return
+
+        # --- DEF-2 FIX: reject error/no_match candidates in Compare ----------
+        status = cand.get("status", "")
+        if status in ("error", "no_match"):
+            self._pre_text.setText(
+                f"Cannot compare candidate with status '{status}'.\n"
+                f"This result has no actionable metadata.\n\n"
+                f"Error details: {cand.get('error', 'N/A')}"
+            )
+            self._post_text.clear()
+            self._btn_apply.setEnabled(False)
+            return
+        # ---------------------------------------------------------------------
 
         # Show pre-state
         pre = {
@@ -554,42 +614,104 @@ class UnifiedLookupDialog(QDialog):
         self._btn_apply.setEnabled(True)
 
     def _check_provenance(self, cand: dict) -> None:
-        """Check for existing curation-operator overrides."""
+        """Check for existing curation-operator overrides.
+
+        --- DEF-5 FIX: no longer gates on ``hasattr(self, \"_state\")`` which
+        UnifiedLookupDialog never sets.  Instead we resolve the canonical DB
+        from the entry's ADF-file location (parent directory contains
+        ``canonical.db``), exactly like other GUI modules do.
+        """
         has_override = False
         override_info = ""
         try:
             from ..canonical import CanonicalLibrary, SourceAuthority
-            # If we have access to canonical db through state manager, check
-            if hasattr(self, "_state") and hasattr(self._state, "state_manager"):
-                sm = self._state.state_manager
-                if sm and hasattr(sm, "_state_file") and sm._state_file:
-                    lib_path = Path(sm._state_file).parent / "canonical.db"
-                    if lib_path.exists():
-                        canon = CanonicalLibrary(lib_path)
-                        # Check key fields for CURATION authority claims
-                        for field_name in ("title",):
-                            try:
-                                claims = canon.claims_for("release", self._entry.release_key, field_name)
-                                for cl in claims:
-                                    if cl.authority >= SourceAuthority.CURATION.tier:
-                                        has_override = True
-                                        override_info += f"\n⚠ Curation override exists for '{field_name}' by {cl.source}"
-                            except Exception:
-                                pass
-                        canon.close()
+
+            # Try to find canonical.db alongside the entry's ADF files.
+            lib_path = None
+            adf_files = []
+            if hasattr(self, "_entry") and self._entry.adf_files:
+                # Resolve parent dir of first ADF; canonical.db is sibling.
+                for f in self._entry.adf_files:
+                    p = Path(f).resolve()
+                    if p.parent.name.lower() == "amiga":
+                        # Inside a LaunchBox-style tree; walk up to find canonical.db.
+                        candidate = p.parent.parent / "canonical.db"
+                        if candidate.exists():
+                            lib_path = candidate
+                            break
+                        candidate = p.parent / ".." / "canonical.db"
+                        if candidate.exists():
+                            lib_path = candidate.resolve().parent / "canonical.db"
+                            break
+                if lib_path is None:
+                    # Fallback: check each parent component
+                    adf_files = self._entry.adf_files
+                    for f in adf_files:
+                        for part in Path(f).resolve().parents:
+                            db = part / "canonical.db"
+                            if db.exists():
+                                lib_path = db
+                                break
+                        if lib_path:
+                            break
+
+            # If we couldn't auto-discover, fall back to looking at the config path.
+            if lib_path is None:
+                ctx_provider = getattr(self, "_lookup_ctx_provider", None)
+                if ctx_provider:
+                    try:
+                        ctx = ctx_provider()
+                        if ctx and ctx.config_path:
+                            cfg_dir = ctx.config_path.parent
+                            lib_path = cfg_dir / "canonical.db"
+                    except Exception:
+                        pass
+
+            if lib_path and lib_path.exists():
+                canon = CanonicalLibrary(lib_path)
+                for field_name in ("title",):
+                    try:
+                        claims = canon.claims_for(
+                            "release", self._entry.release_key, field_name
+                        )
+                        for cl in claims:
+                            if cl.authority >= SourceAuthority.CURATION.tier:
+                                has_override = True
+                                override_info += (
+                                    f"\n\u26a0 Curation override exists for "
+                                    f"'{field_name}' by {cl.source}"
+                                )
+                    except Exception:
+                        pass
+                canon.close()
         except Exception:
             pass
 
         if has_override:
-            self._override_label.setText(f"Existing curation overrides detected{override_info}")
+            self._override_label.setText(
+                f"Existing curation overrides detected{override_info}"
+            )
             self._override_label.setStyleSheet("color: orange; font-weight: bold;")
         else:
-            self._override_label.setText("No existing curation overrides for this field.")
+            self._override_label.setText(
+                "No existing curation overrides for this field."
+            )
             self._override_label.setStyleSheet("color: green;")
 
     def _on_apply(self) -> None:
         if not self._candidate:
             return
+        # --- DEF-2 FIX: only allow apply on actionable candidates -----------
+        status = self._candidate.get("status", "")
+        if status not in ("found", "needs_review"):
+            QMessageBox.warning(
+                self,
+                "Apply Blocked",
+                f"Cannot apply candidate with status '{status}'.\n"
+                f"Only 'found' or 'needs_review' results are applicable.",
+            )
+            return
+        # --------------------------------------------------------------------
         try:
             self.applied.emit(self._candidate)
             self.accept()
