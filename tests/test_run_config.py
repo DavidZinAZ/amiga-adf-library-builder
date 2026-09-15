@@ -138,14 +138,26 @@ def test_from_legacy_kwargs_rejects_unknown():
             RunConfig.from_legacy_kwargs(unknown_param=True)
 
 
-def test_from_legacy_kwargs_drops_local_media_config_path():
-    """local_media_config_path is accepted but dropped (maps to None)."""
+def test_from_legacy_kwargs_preserves_local_media_config_path():
+    """local_media_config_path is a valid field and is preserved (not dropped)."""
     with warnings.catch_warnings(record=True):
         warnings.simplefilter("always")
         run = RunConfig.from_legacy_kwargs(
             online=True, local_media_config_path="/tmp/local.toml"
         )
-    assert run.local_media_config_path is None
+    assert run.local_media_config_path == "/tmp/local.toml"
+
+
+def test_from_legacy_kwargs_drops_legacy_local_media_config():
+    """local_media_config (old key) is dropped as designed."""
+    with warnings.catch_warnings(record=True):
+        warnings.simplefilter("always")
+        run = RunConfig.from_legacy_kwargs(
+            online=True, local_media_config="/tmp/local.toml"
+        )
+    # local_media_config is the legacy shim key; it should not appear
+    # as an attribute on RunConfig (it was never a dataclass field).
+    assert not hasattr(run, "local_media_config") or getattr(run, "local_media_config", None) is None
 
 
 # --- invariants -------------------------------------------------------------
@@ -170,12 +182,29 @@ def test_post_init_allows_export_and_verify_with_run_id():
 
 
 def test_post_init_rejects_none_verified_artwork():
-    """verified_artwork_width/height must be int, not None."""
-    # Type is int, so None would fail at construction if passed.
-    # This test verifies the default values are always valid ints.
+    """verified_artwork_width/height must be int, not None — falls back to defaults."""
     run = RunConfig()
     assert run.verified_artwork_width is not None
     assert run.verified_artwork_height is not None
+
+
+def test_post_init_none_artwork_falls_back_to_defaults():
+    """Defect 2: verified_artwork_width=None falls back to ARTWORK_MAX_W."""
+    from amiga_adf_library_builder.artwork import ARTWORK_MAX_W, ARTWORK_MAX_H
+    run = RunConfig(verified_artwork_width=None, verified_artwork_height=None)
+    assert run.verified_artwork_width == ARTWORK_MAX_W
+    assert run.verified_artwork_height == ARTWORK_MAX_H
+
+
+def test_post_init_partial_none_artwork_falls_back():
+    """Defect 2: partial None artwork dims fall back individually."""
+    from amiga_adf_library_builder.artwork import ARTWORK_MAX_W, ARTWORK_MAX_H
+    run_w = RunConfig(verified_artwork_width=None)
+    assert run_w.verified_artwork_width == ARTWORK_MAX_W
+    assert run_w.verified_artwork_height == ARTWORK_MAX_H  # default preserved
+    run_h = RunConfig(verified_artwork_height=None)
+    assert run_h.verified_artwork_width == ARTWORK_MAX_W  # default preserved
+    assert run_h.verified_artwork_height == ARTWORK_MAX_H
 
 
 # --- frozen / immutable -----------------------------------------------------

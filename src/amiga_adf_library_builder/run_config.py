@@ -93,9 +93,8 @@ class RunConfig:
         unknown = set(kwargs) - known
         if unknown:
             raise TypeError(f"unknown RunConfig kwargs: {sorted(unknown)}")
-        # local_media_config_path maps to local_media_config=None in the
-        # shim; PathConfig resolution should load it properly.
-        kwargs.pop("local_media_config_path", None)
+        # local_media_config is the legacy key; local_media_config_path
+        # is a valid RunConfig field — preserve it.
         kwargs.pop("local_media_config", None)
         # verified_artwork_width/height must be int (not Optional[int])
         # in RunConfig; convert if needed
@@ -112,3 +111,9 @@ class RunConfig:
             raise ValueError(
                 "run_id is required when both export=True and verify_only=True"
             )
+        # verified_artwork_width/height must be int (not Optional[int]);
+        # fall back to defaults if None is passed.
+        if self.verified_artwork_width is None:
+            object.__setattr__(self, "verified_artwork_width", ARTWORK_MAX_W)
+        if self.verified_artwork_height is None:
+            object.__setattr__(self, "verified_artwork_height", ARTWORK_MAX_H)
