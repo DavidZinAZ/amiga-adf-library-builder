@@ -11,15 +11,11 @@ it never alters ``original/``.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
 from .models import ReleaseGroup, ScanRecord
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+from .utils import now_iso as _now
 
 
 def _route_dir(base: Path, name: str) -> Path:

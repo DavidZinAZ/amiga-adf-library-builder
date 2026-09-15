@@ -44,6 +44,7 @@ from .canonical import (
     Disk,
     Release,
     Game,
+    slugify_title,
 )
 from .exporter import _sanitize_component as _base_sanitize
 from .naming import _sanitize, release_basename
@@ -452,7 +453,7 @@ def export_name_for_release_group(
     # Try to find a matching release in the canonical DB via release_key
     # claim. The staged migration records release_key as a curation_memory
     # claim on the release's "release_key" field.
-    game_id = _slugify_title(group.title or group.release_key)
+    game_id = slugify_title(group.title or group.release_key)
     candidates = []
     for rid in canon.releases_for_game(game_id):
         row = canon.release_row(rid)
@@ -491,12 +492,7 @@ def export_name_for_release_group(
     )
 
 
-def _slugify_title(title: str) -> str:
-    """Deterministic slug for a game title (mirrors canonical.slugify_title)."""
-    slug = re.sub(r"[^a-z0-9]+", "-", (title or "").strip().lower()).strip("-")
-    if not slug:
-        slug = "untitled"
-    return slug[:80]
+
 
 
 def _sanitize_component(value: str) -> str:

@@ -105,6 +105,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+from .utils import write_json_atomic
 import json
 import os
 import time
@@ -375,7 +376,7 @@ def _cache_store(cache_dir: Path, key: str, data: dict) -> None:
     cache_path = _cache_file(cache_dir, key)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     data["_cached_at"] = time.time()
-    _write_json_atomic(cache_path, data)
+    write_json_atomic(cache_path, data)
 
 
 def _cache_load(cache_dir: Path, key: str, ttl: float) -> Optional[dict]:
@@ -839,7 +840,7 @@ class ScreenScraperProvider:
     def _mark_negative_cache(self, key: str) -> None:
         """Mark a lookup as negative (not found) in the shared file cache."""
         try:
-            _write_json_atomic(_negative_cache_file(self.cache_dir, key), {"_cached_at": time.time()})
+            write_json_atomic(_negative_cache_file(self.cache_dir, key), {"_cached_at": time.time()})
         except OSError:
             # Caching is best-effort; a failed marker write must not break the lookup.
             pass
@@ -1350,11 +1351,3 @@ def enrich_group_with_screenscraper(
 
 
 # --- Utility -----------------------------------------------------------------
-
-def _write_json_atomic(path: Path, data: dict) -> None:
-    """Write JSON to ``path`` via a temp file + atomic replace (no partial reads)."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    tmp.replace(path)

@@ -36,11 +36,11 @@ an overall verdict (``high`` | ``low`` | ``unavailable``).
 
 from __future__ import annotations
 
-import hashlib
 import os
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
+from .utils import sha256_bytes
 from typing import Optional
 
 # --- Configuration -----------------------------------------------------------
@@ -566,7 +566,3 @@ def extract_image_text(path, cfg: Optional[RtfmDocsConfig] = None) -> Extraction
 
 
 # --- Determinism helper (used by tests + provenance) -------------------------
-
-
-def _sha256_bytes(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()

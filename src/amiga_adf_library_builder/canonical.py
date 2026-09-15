@@ -41,9 +41,7 @@ SCHEMA_VERSION = 2
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+from .utils import now_iso as _now_iso
 
 
 def slugify_title(title: str) -> str:

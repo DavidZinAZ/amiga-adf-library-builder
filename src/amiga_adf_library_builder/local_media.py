@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import difflib
 import hashlib
+from .utils import sha256_file as _sha256_file
 import json
 import os
 import re
@@ -1856,14 +1857,6 @@ def _relative_to_root(path: Path, root: Path) -> str:
         return path.relative_to(root).as_posix()
     except ValueError:
         return path.name
-
-
-def _sha256_file(path: Path) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as fh:
-        for chunk in iter(lambda: fh.read(65536), b""):
-            h.update(chunk)
-    return h.hexdigest()
 
 
 def assert_read_only_roots(config: LocalMediaConfig) -> None:

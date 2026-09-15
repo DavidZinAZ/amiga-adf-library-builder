@@ -80,7 +80,8 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from .metadata import guard_url  # noqa: F401  (re-exported for tests)
-from .local_media import _sha256_file  # pure helper (re-exported for tests)
+from .utils import sha256_file as _sha256_file  # pure helper (re-exported for tests)
+from .utils import write_json_atomic
 
 # --- Constants ---------------------------------------------------------------
 
@@ -515,12 +516,7 @@ def _atomic_write(path: Path, data: bytes) -> None:
     tmp.replace(path)
 
 
-def _write_json_atomic(path: Path, data: dict) -> None:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    tmp.replace(path)
+
 
 
 def _read_json(path: Path) -> Optional[dict]:
@@ -649,7 +645,7 @@ class RetroKitProvider:
         if rows:
             try:
                 _atomic_write(idx_file, data)
-                _write_json_atomic(
+                write_json_atomic(
                     meta_file,
                     {
                         "_cached_at": time.time(),
@@ -680,7 +676,7 @@ class RetroKitProvider:
 
     def _mark_negative(self, title: str) -> None:
         try:
-            _write_json_atomic(
+            write_json_atomic(
                 self._negative_file(self._neg_key(title)),
                 {"_cached_at": time.time(), "system": self.config.system},
             )
@@ -868,7 +864,7 @@ class RetroKitProvider:
 
         _atomic_write(out_file, data)
         sha = hashlib.sha256(data).hexdigest()
-        _write_json_atomic(
+        write_json_atomic(
             meta_file,
             {
                 "provider": "retrokit",

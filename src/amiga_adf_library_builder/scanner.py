@@ -6,26 +6,13 @@ byte-for-byte (preservation proof, documented behavior).
 """
 from __future__ import annotations
 
-import hashlib
-from datetime import datetime, timezone
 from pathlib import Path
 
 from .models import ScanRecord
+from .utils import now_iso as _now_iso
+from .utils import sha256_file as sha256_of_file
 
 SUPPORTED_EXTENSIONS = (".adf", ".dsk")
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def sha256_of_file(path: Path, chunk_size: int = 1 << 20) -> str:
-    """Return hex SHA-256 of a file without loading it fully into memory."""
-    h = hashlib.sha256()
-    with open(path, "rb") as fh:
-        for chunk in iter(lambda: fh.read(chunk_size), b""):
-            h.update(chunk)
-    return h.hexdigest()
 
 
 def scan_file(path: Path) -> ScanRecord:

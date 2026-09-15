@@ -13,15 +13,11 @@ Layout under ``<data_root>/catalog``:
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
 from .models import ParsedRecord, ReleaseGroup, ScanRecord
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+from .utils import now_iso as _now
 
 
 def _ensure_dir(path: Path) -> None:

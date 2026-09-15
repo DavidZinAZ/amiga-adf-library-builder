@@ -32,6 +32,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from .utils import now_iso, sha256_file, write_json_atomic
+utc_now = now_iso
+_sha256_file = sha256_file
+_atomic_write_json = write_json_atomic
+
 # --- Ratified constants ------------------------------------------------------
 
 #: Finalized URL host allowlist (ratified, docs/issue1-security-ratification.md
@@ -246,29 +251,6 @@ def _base_key(release_key: str) -> str:
     full pipe-padded key or the short base (e.g. ``examplequestiii``).
     """
     return release_key.split("|")[0].lower()
-
-
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _sha256_file(path: Path) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as fh:
-        for chunk in iter(lambda: fh.read(65536), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def _atomic_write_json(path: Path, data: dict) -> None:
-    """Write JSON atomically (temp file + os.replace)."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(
-        json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
-    tmp.replace(path)
 
 
 # --- URL validation (ratified, section 2.1) ----------------------------------

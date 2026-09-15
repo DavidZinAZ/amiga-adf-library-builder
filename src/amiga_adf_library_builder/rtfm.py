@@ -62,8 +62,6 @@ section only and never invents a split.
 
 from __future__ import annotations
 
-import hashlib
-import json
 import os
 import re
 import stat
@@ -75,7 +73,9 @@ from typing import Iterable, Optional
 
 # Reuse the local-media provenance privacy helpers (root-relative path + hash).
 # They are pure helpers with no network/state dependency.
-from .local_media import _relative_to_root, _sha256_file  # noqa: F401  (re-exported for tests)
+from .local_media import _relative_to_root  # noqa: F401  (re-exported for tests)
+from .utils import sha256_file as _sha256_file  # noqa: F401  (re-exported for tests)
+from .utils import write_json_atomic
 
 # Issue #5: PDF/image text extraction layer (optional dependency, offline only).
 # Imported lazily inside the load path so the core library stays importable
@@ -1433,15 +1433,7 @@ def _provenance_source_from_scored(src: "RtfmSource", group, *, kind: str) -> "R
     )
 
 
-def _write_json_atomic(path: Path, data: dict) -> None:
-    """Write JSON to ``path`` via a temp file + atomic replace (no partial reads)."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(
-        json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
-    tmp.replace(path)
+
 
 
 def _build_provenance(group, result: RtfmResult, *, max_bytes: int, mode: str) -> dict:
@@ -1521,7 +1513,7 @@ def build_rtfm_for_group(
         assert result.review_reason is not None
         result.notes.append(result.review_reason)
         result.sources = []
-        _write_json_atomic(
+        write_json_atomic(
             prov_path, _build_provenance(group, result, max_bytes=cfg.max_bytes, mode="deterministic")
         )
         result.provenance_path = prov_path
@@ -1558,7 +1550,7 @@ def build_rtfm_for_group(
             ))
             for s in matched
         ]
-        _write_json_atomic(
+        write_json_atomic(
             prov_path, _build_provenance(group, result, max_bytes=cfg.max_bytes, mode="deterministic")
         )
         result.provenance_path = prov_path
@@ -1590,7 +1582,7 @@ def build_rtfm_for_group(
                 ))
                 for s, sc in scored if sc.matched
             ]
-            _write_json_atomic(
+            write_json_atomic(
                 prov_path, _build_provenance(group, result, max_bytes=cfg.max_bytes, mode="deterministic")
             )
             result.provenance_path = prov_path
@@ -1620,7 +1612,7 @@ def build_rtfm_for_group(
             ))
             for s, sc in scored if sc.matched
         ]
-        _write_json_atomic(
+        write_json_atomic(
             prov_path, _build_provenance(group, result, max_bytes=cfg.max_bytes, mode="deterministic")
         )
         result.provenance_path = prov_path
@@ -1654,7 +1646,7 @@ def build_rtfm_for_group(
         result.review_reason = "all matched sources failed to decode; routed for review"
         result.notes.append(result.review_reason)
         result.provenance_path = prov_path
-        _write_json_atomic(
+        write_json_atomic(
             prov_path, _build_provenance(group, result, max_bytes=cfg.max_bytes, mode="deterministic")
         )
         return result
@@ -1679,7 +1671,7 @@ def build_rtfm_for_group(
         result.review_reason = reason or "routed for review"
         result.notes.append(result.review_reason)
         # Provenance still written (auditable); no .rtfm emitted over the cap.
-        _write_json_atomic(
+        write_json_atomic(
             prov_path, _build_provenance(group, result, max_bytes=cfg.max_bytes, mode="deterministic")
         )
         result.provenance_path = prov_path
@@ -1693,7 +1685,7 @@ def build_rtfm_for_group(
     result.rtfm_path = rtfm_path
     result.written = True
     result.bytes = len(text.encode("utf-8"))
-    _write_json_atomic(
+    write_json_atomic(
         prov_path, _build_provenance(group, result, max_bytes=cfg.max_bytes, mode="deterministic")
     )
     result.provenance_path = prov_path
