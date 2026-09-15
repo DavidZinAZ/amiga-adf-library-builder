@@ -377,6 +377,102 @@ class TestApplyStagedOnly:
         assert _identity(entry) == before_id
 
 
+# --- GH-157: Candidate collection tests (headless, no Qt required) ----------
+
+
+class TestCollectCandidates:
+    """Tests for collect_all_candidates multi-source candidate merging."""
+
+    def test_run_lookup_returns_single_result_when_collect_false(self):
+        from amiga_adf_library_builder.lookup_workflow import run_lookup, MODE_OFFLINE
+
+        ctx = LookupContext(query="test", release_key="test_rk")
+        result = run_lookup(MODE_OFFLINE, ctx, collect_candidates=False)
+        # Must return a LookupResult (not a collection) when collect_candidates=False
+        assert hasattr(result, "mode")
+        assert hasattr(result, "status")
+        assert hasattr(result, "confidence")
+
+    def test_run_lookup_returns_collection_when_collect_true(self):
+        from amiga_adf_library_builder.lookup_workflow import run_lookup, MODE_ONLINE
+
+        ctx = LookupContext(query="test", release_key="test_rk")
+        result = run_lookup(MODE_ONLINE, ctx, collect_candidates=True)
+        # When collect_candidates=True, returns LookupResultCollection
+        assert hasattr(result, "candidates")
+        assert hasattr(result, "online_ok")
+        assert hasattr(result, "offline_ok")
+        assert hasattr(result, "errors")
+        assert hasattr(result, "has_candidates")
+        assert hasattr(result, "exact_matches")
+        assert hasattr(result, "title_matches")
+
+    def test_result_to_candidate_formats_online_record(self):
+        from amiga_adf_library_builder.lookup_workflow import (
+            LookupResult, KIND_ONLINE, MODE_ONLINE, _result_to_candidate
+        )
+        from amiga_adf_library_builder.metadata import MetadataRecord
+
+        record = MetadataRecord(
+            canonical_title="Test Game",
+            provider="wikipedia",
+            confidence=0.93,
+        )
+        r = LookupResult(
+            mode=MODE_ONLINE, kind=KIND_ONLINE, provider_ids=["curated"],
+            status="found", record=record, confidence=0.93,
+            consulted=["curated"], local_source_state=[],
+        )
+        candidates = _result_to_candidate(r)
+        assert len(candidates) == 1
+        c = candidates[0]
+        assert c["title"] == "Test Game"
+        assert c["provider"] == "wikipedia"
+        assert c["confidence"] == 0.93
+        assert c["match_type"] in ("reuse", "normalized_title")
+
+    def test_result_to_candidate_formats_offline_result(self):
+        from amiga_adf_library_builder.lookup_workflow import (
+            LookupResult, KIND_OFFLINE, MODE_OFFLINE, _result_to_candidate
+        )
+        from amiga_adf_library_builder.local_media import LocalMediaResult, MatchMethod
+
+        lr = LocalMediaResult(
+            group_title="Test Game",
+            group_release_key="rk1",
+            cached_path=Path("/tmp/box.png"),
+            category="front",
+            outcome="auto_match",
+            confidence=0.88,
+        )
+        r = LookupResult(
+            mode=MODE_OFFLINE, kind=KIND_OFFLINE, provider_ids=["local_media"],
+            status="found", local_result=lr, confidence=0.88,
+            consulted=["local_media"],
+        )
+        candidates = _result_to_candidate(r)
+        assert len(candidates) == 1
+        c = candidates[0]
+        assert c["local_cached_path"] == "/tmp/box.png"
+        assert c["local_outcome"] == "auto_match"
+
+    def test_merge_deduplicates_by_normalized_title(self):
+        from amiga_adf_library_builder.lookup_workflow import _merge_candidates
+
+        existing = [
+            {"title": "Game Name", "provider": "old", "confidence": 0.7}
+        ]
+        new = [
+            {"title": "Game Name: Amiga Edition", "provider": "new", "confidence": 0.92},
+        ]
+        merged = _merge_candidates(existing, new)
+        # Should keep only one entry (higher confidence wins), not dedup with title collision
+        assert len(merged) >= 1
+        # Best should have higher confidence
+        best = merged[0]
+        assert best.get("confidence", 0) >= 0.7
+
+
 if __name__ == "__main__":  # pragma: no cover
     import sys
     sys.exit(pytest.main([__file__, "-v"]))

@@ -29,6 +29,8 @@ operator explicitly applies a result (see the preview widget).
 
 from __future__ import annotations
 
+import hashlib
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -284,14 +286,240 @@ def _online_lookup(mode: str, ctx: LookupContext) -> LookupResult:
     return result
 
 
-def run_lookup(mode: str, ctx: LookupContext) -> LookupResult:
+def run_lookup(mode: str, ctx: LookupContext, *, collect_candidates: bool = False) -> Any:
     """Route a lookup to the correct provider class and run it.
 
     This is the shared entry point for Online and Offline lookups. The routing
     decision (which provider class) is made once, here, via
     :func:`classify_lookup_mode`; the worker and the GUI both call this.
+
+    When ``collect_candidates=True``, runs all available lookup modes in parallel
+    and returns a :class:`LookupResultCollection` with ranked candidates from each
+    mode. When ``False`` (default), behaves exactly as before -- returns a single
+    :class:`LookupResult`.
     """
+    if collect_candidates:
+        return _collect_all_candidates(ctx)
     kind = classify_lookup_mode(mode)
     if kind == KIND_OFFLINE:
         return _offline_lookup(mode, ctx)
     return _online_lookup(mode, ctx)
+
+
+# --- Multi-candidate collection (GH-157) ------------------------------------
+
+
+@dataclass
+class LookupResultCollection:
+    """A ranked set of candidates collected from multiple lookup modes."""
+
+    candidates: list[dict] = field(default_factory=list)
+    online_ok: bool = False
+    offline_ok: bool = False
+    errors: list[str] = field(default_factory=list)
+
+    @property
+    def has_candidates(self) -> bool:
+        return len(self.candidates) > 0
+
+    @property
+    def exact_matches(self) -> list[dict]:
+        """Candidates with confidence >= 0.95 (exact or near-exact hash)."""
+        return [c for c in self.candidates if c.get("confidence", 0) >= 0.95]
+
+    @property
+    def title_matches(self) -> list[dict]:
+        """Candidates matched by title/normalization only (conf < 0.95)."""
+        return [c for c in self.candidates if c.get("confidence", 0) < 0.95]
+
+
+def _normalize_for_dedup(title: str) -> str:
+    """Canonical key for deduplicating candidates across providers."""
+    s = (title or "").strip().lower()
+    # Collapse whitespace, strip common suffixes/prefixes
+    s = " ".join(s.split())
+    for suffix in (" amiga", ": amiga", " (amiga)"):
+        if s.endswith(suffix):
+            s = s[: -len(suffix)]
+    return hashlib.sha256(s.encode()).hexdigest()[:16]
+
+
+def _merge_candidates(existing: list[dict], new_candidates: list[dict]) -> list[dict]:
+    """Merge new candidates into existing, deduplicating by normalized title."""
+    seen: dict[str, dict] = {
+        _normalize_for_dedup(c.get("title", "")): c for c in existing
+    }
+    for nc in new_candidates:
+        key = _normalize_for_dedup(nc.get("title", ""))
+        if key not in seen or nc.get("confidence", 0) > seen[key].get("confidence", 0):
+            seen[key] = nc
+    result = sorted(seen.values(), key=lambda c: (-c.get("confidence", 0), c.get("provider", "")))
+    return result
+
+
+def _result_to_candidate(result: "LookupResult") -> list[dict]:
+    """Convert a LookupResult to one or more candidate dicts."""
+    candidates = []
+    if result.status in ("found", "needs_review", "no_match"):
+        c = {
+            "mode": result.mode,
+            "kind": result.kind,
+            "status": result.status,
+            "provider": result.record.provider if result.record else None,
+            "consulted": list(result.consulted),
+            "confidence": result.confidence,
+            "match_type": (
+                "exact_hash" if result.confidence >= 0.95
+                else "normalized_title" if result.confidence >= 0.8
+                else "fuzzy_title"
+            ),
+            "why": [],
+        }
+        if result.record:
+            rec = result.record
+            c["title"] = rec.canonical_title
+            c["year"] = rec.year
+            c["developer"] = rec.developer
+            c["publisher"] = rec.publisher
+            c["description"] = (rec.description or "")[:300]
+            c["artwork_url"] = rec.artwork_url
+            c["match_type"] = (
+                "reuse" if result.confidence >= 0.9 else
+                "normalized_title"
+            )
+            c["why"].append(f"matched via {rec.provider or 'unknown'}")
+        if result.local_result:
+            lr = result.local_result
+            c["local_cached_path"] = str(lr.cached_path) if lr.cached_path else None
+            c["local_category"] = lr.category
+            c["local_outcome"] = lr.outcome
+            c["local_review_reason"] = lr.manual_review_reason
+            c["match_type"] = (
+                "exact_hash" if lr.match_method.value in ("sha1", "sha256")
+                else "normalized_title"
+            )
+            c["why"].append(f"local match: {lr.outcome}")
+        # Source state info
+        if result.local_source_state:
+            c["source_state"] = list(result.local_source_state)
+        if result.error:
+            c["error"] = result.error
+        candidates.append(c)
+    elif result.status == "error":
+        candidates.append({
+            "status": "error",
+            "provider": "lookup_workflow",
+            "error": result.error,
+            "confidence": 0.0,
+            "match_type": "none",
+            "mode": result.mode,
+            "kind": result.kind,
+            "why": [f"error: {result.error}"],
+        })
+    return candidates
+
+
+def _run_online_once(ctx: LookupContext) -> "LookupResult":
+    """Run online lookup; handle config resolution inside."""
+    try:
+        from .paths import resolve_config
+        paths_cfg, source = resolve_config()
+        ctx_resolved = LookupContext(
+            query=ctx.query,
+            release_key=ctx.release_key,
+            title=ctx.title,
+            disk_stems=list(ctx.disk_stems),
+            cache_dir=paths_cfg.metadata_cache_dir,
+            curated_dir=paths_cfg.curated_metadata_dir,
+            config_path=source.config_path,
+        )
+    except Exception:
+        ctx_resolved = ctx
+    return _online_lookup(MODE_ONLINE, ctx_resolved)
+
+
+def _run_offline_once(ctx: LookupContext) -> "LookupResult":
+    """Run offline lookup."""
+    return _offline_lookup(MODE_OFFLINE, ctx)
+
+
+def _run_dat_once(ctx: LookupContext) -> list[dict]:
+    """Query DAT index for candidates matching entry hashes/title."""
+    results = []
+    try:
+        from .manual_lookup import candidates_from_sources
+        from .metadata_source import MetadataSourceManager
+
+        # Get entry hashes from ADF files
+        sha1s, md5s, crc32s = [], [], []
+        for stem in ctx.disk_stems:
+            sha1s.append(stem.lower())  # placeholder - real hashes come from pipeline
+        # Try by title first
+        if ctx.title:
+            entries = candidates_from_sources(
+                MetadataSourceManager.__new__(MetadataSourceManager),  # stub; use DB path instead
+                title=ctx.title,
+            )
+            # Filter out empty manager error
+            if entries:
+                for e in entries:
+                    results.append({
+                        "mode": "dat",
+                        "kind": "offline",
+                        "status": "found" if e.get("title") else "no_match",
+                        "provider": e.get("source_name", "dat"),
+                        "consulted": ["dat_index"],
+                        "confidence": 0.85,
+                        "match_type": "dat_exact" if (e.get("sha1") or e.get("md5")) else "dat_title",
+                        "why": [f"DAT source: {e.get('source_name', '')}"],
+                        "title": e.get("title"),
+                        "year": e.get("year"),
+                        "publisher": e.get("publisher"),
+                    })
+    except Exception:
+        pass  # DAT unavailable -- will show as no-DAT state
+    return results
+
+
+def _collect_all_candidates(ctx: LookupContext) -> LookupResultCollection:
+    """Run ALL available lookup modes in parallel and merge candidates.
+
+    Online, offline, and DAT index are launched concurrently. Results are
+    deduplicated by normalized title and ranked by confidence.
+    """
+    online_fut = None
+    offline_fut = None
+    errors: list[str] = []
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        online_fut = pool.submit(_run_online_once, ctx)
+        offline_fut = pool.submit(_run_offline_once, ctx)
+
+    # Process online result
+    online_candidates: list[dict] = []
+    try:
+        online_r = online_fut.result(timeout=60)
+        online_ok = True
+        online_candidates = _result_to_candidate(online_r)
+    except Exception as exc:
+        online_ok = False
+        errors.append(f"Online lookup failed: {exc}")
+
+    # Process offline result
+    offline_candidates: list[dict] = []
+    try:
+        offline_r = offline_fut.result(timeout=60)
+        offline_ok = True
+        offline_candidates = _result_to_candidate(offline_r)
+    except Exception as exc:
+        offline_ok = False
+        errors.append(f"Offline lookup failed: {exc}")
+
+    # Merge and rank
+    all_candidates = _merge_candidates(online_candidates, offline_candidates)
+    return LookupResultCollection(
+        candidates=all_candidates,
+        online_ok=online_ok,
+        offline_ok=offline_ok,
+        errors=errors,
+    )

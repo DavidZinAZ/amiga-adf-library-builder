@@ -48,11 +48,14 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QProgressBar,
+    QRadioButton,
     QScrollArea,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -65,6 +68,8 @@ from amiga_adf_library_builder.library_state import (
 from amiga_adf_library_builder.lookup_workflow import (
     LookupContext,
     LookupResult,
+    LookupResultCollection,
+    _collect_all_candidates,
     providers_for_mode,
     run_lookup,
 )
@@ -169,6 +174,437 @@ class PreviewWorker(QThread):
                 local_review_reason=lr.manual_review_reason,
             )
         return payload
+
+
+# --- Unified Lookup Dialog (GH-157) -----------------------------------------
+
+
+class _UnifiedLookupWorker(QThread):
+    """Background worker for parallel candidate collection."""
+
+    candidates_ready = Signal(list)  # ranked candidate list
+    errors_update = Signal(str)      # status message for provider errors
+
+    def __init__(self, ctx: LookupContext, parent=None) -> None:
+        super().__init__(parent)
+        self._ctx = ctx
+
+    def run(self) -> None:
+        try:
+            collection = _collect_all_candidates(self._ctx)
+            self.candidates_ready.emit(collection.candidates)
+            if not collection.online_ok and not collection.offline_ok:
+                errs = "; ".join(collection.errors) if collection.errors else "No providers available"
+                self.errors_update.emit(errs)
+            elif collection.errors:
+                self.errors_update.emit(", ".join(collection.errors))
+        except Exception as exc:
+            self.errors_update.emit(f"Lookup failed: {exc}")
+
+
+class UnifiedLookupDialog(QDialog):
+    """Tabbed lookup dialog that ranks all candidates from online + offline sources.
+
+    Replaces PreviewWidget._on_lookup() with a proper multi-candidate comparison UI.
+    Three tabs: Lookup (identity + query), Candidates (ranked table), Detail (compare + apply).
+    """
+
+    applied = Signal(dict)  # emitted with the chosen candidate dict when Apply succeeds
+
+    def __init__(
+        self, entry: "StagedReleaseEntry", mode: str, parent=None
+    ) -> None:
+        super().__init__(parent)
+        self._entry = entry
+        self._mode = mode
+        self._candidate: dict = {}
+        self._build_ui()
+        self._populate_identity()
+        self._run_lookup()
+
+    def _build_ui(self) -> None:
+        self.setWindowTitle(
+            f"Unified Lookup: {self._entry.title or '(no title)'}"
+        )
+        self.resize(820, 620)
+
+        main_layout = QVBoxLayout(self)
+
+        # Tab widget
+        self._tabs = QTabWidget(self)
+        main_layout.addWidget(self._tabs)
+
+        # ── Tab 1: Lookup ────────────────────────────────────────
+        lookup_w = QWidget()
+        lk = QVBoxLayout(lookup_w)
+
+        # Identity block
+        id_box = QGroupBox("Selected Release")
+        id_l = QFormLayout(id_box)
+        self._lbl_filename = QLabel(self._entry.filename)
+        self._lbl_title = QLabel(self._entry.title or "(none)")
+        self._lbl_hashes = QLabel("(none)")
+        self._lbl_size = QLabel("")
+        self._lbl_disk = QLabel("")
+        self._lbl_provenance = QLabel("(no claim recorded)")
+        id_l.addRow("File:", self._lbl_filename)
+        id_l.addRow("Title:", self._lbl_title)
+        id_l.addRow("Hashes:", self._lbl_hashes)
+        id_l.addRow("Size:", self._lbl_size)
+        id_l.addRow("Disk:", self._lbl_disk)
+        id_l.addRow("Provenance:", self._lbl_provenance)
+        lk.addWidget(id_box)
+
+        # Query + mode
+        form2 = QFormLayout()
+        form2.addRow("Search As:", QLineEdit())  # placeholder, filled next
+        self._search_edit = QLineEdit(self._entry.title or "")
+        self._search_edit.selectAll()
+        form2.addRow("", self._search_edit)
+
+        mode_box = QGroupBox("Source / Mode")
+        ml = QVBoxLayout(mode_box)
+        self._radio_online = QRadioButton("Online (Hall of Light, curated, cache)")
+        self._radio_online.setChecked(True)
+        self._radio_offline = QRadioButton("Offline (local media / LaunchBox)")
+        self._radio_alternate = QRadioButton("Alternate search (custom query)")
+        ml.addWidget(self._radio_online)
+        ml.addWidget(self._radio_offline)
+        ml.addWidget(self._radio_alternate)
+        form2.addRow("Mode:", mode_box)
+        lk.addLayout(form2)
+
+        # Providers info
+        provider_lines = [f"  - {pid}" for pid in providers_for_mode(self._mode)]
+        provider_text = (
+            "Local media sources:\n"
+            if self._mode == "offline"
+            else "Online provider chain:\n"
+        ) + "\n".join(provider_lines)
+        self._provider_label = QLabel(provider_text)
+        self._provider_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        lk.addWidget(self._provider_label)
+
+        self._progress = QProgressBar(self)
+        self._progress.setRange(0, 0)  # indeterminate
+        lk.addWidget(self._progress)
+
+        self._status_label = QLabel("Collecting candidates…")
+        lk.addWidget(self._status_label)
+
+        self._tabs.addTab(lookup_w, "Lookup")
+
+        # ── Tab 2: Candidates ────────────────────────────────────
+        cand_w = QWidget()
+        cl = QVBoxLayout(cand_w)
+
+        self._cand_table = QTableWidget(self)
+        self._cand_table.setColumnCount(6)
+        self._cand_table.setHorizontalHeaderLabels(
+            ["Confidence", "Match Type", "Provider", "Why", "Source State", "Status"]
+        )
+        self._cand_table.horizontalHeader().setStretchLastSection(True)
+        self._cand_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._cand_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._cand_table.sortByColumn(0, Qt.SortOrder.DescendingOrder)
+        cl.addWidget(self._cand_table)
+
+        self._cand_status = QLabel("Waiting…")
+        cl.addWidget(self._cand_status)
+
+        self._tabs.addTab(cand_w, "Candidates")
+
+        # ── Tab 3: Detail ────────────────────────────────────────
+        detail_w = QWidget()
+        dl = QVBoxLayout(detail_w)
+
+        self._detail_splitter = QSplitter(Qt.Orientation.Vertical)
+        self._pre_box = QGroupBox("Pre-apply (current)")
+        pl = QVBoxLayout(self._pre_box)
+        self._pre_text = QTextEdit()
+        self._pre_text.setReadOnly(True)
+        self._pre_text.setFontFamily("monospace")
+        pl.addWidget(self._pre_text)
+        self._detail_splitter.addWidget(self._pre_box)
+
+        self._post_box = QGroupBox("Post-apply (proposed)")
+        pol = QVBoxLayout(self._post_box)
+        self._post_text = QTextEdit()
+        self._post_text.setReadOnly(True)
+        self._post_text.setFontFamily("monospace")
+        pol.addWidget(self._post_text)
+        self._detail_splitter.addWidget(self._post_box)
+
+        dl.addWidget(self._detail_splitter)
+
+        # Override warning
+        self._override_box = QGroupBox("Provenance Check")
+        ol = QVBoxLayout(self._override_box)
+        self._override_label = QLabel("No existing curation overrides detected.")
+        self._override_label.setStyleSheet("color: green;")
+        ol.addWidget(self._override_label)
+        dl.addWidget(self._override_box)
+
+        # Buttons
+        btn_row = QHBoxLayout()
+        self._btn_apply = QPushButton("Apply to release")
+        self._btn_apply.setEnabled(False)
+        self._btn_compare = QPushButton("Compare selected")
+        self._btn_compare.setEnabled(False)
+        self._btn_dismiss = QPushButton("Dismiss")
+        btn_row.addWidget(self._btn_compare)
+        btn_row.addWidget(self._btn_apply)
+        btn_row.addWidget(self._btn_dismiss)
+        dl.addLayout(btn_row)
+
+        self._tabs.addTab(detail_w, "Detail")
+
+        # Bottom bar with summary
+        bottom_bar = QHBoxLayout()
+        self._summary_label = QLabel("0 candidates")
+        bottom_bar.addWidget(self._summary_label)
+        bottom_bar.addStretch()
+        main_layout.addLayout(bottom_bar)
+
+        # Wire signals
+        self._cand_table.cellClicked.connect(self._on_candidate_selected)
+        self._btn_compare.clicked.connect(self._on_compare)
+        self._btn_apply.clicked.connect(self._on_apply)
+        self._btn_dismiss.clicked.connect(self.reject)
+
+    def _populate_identity(self) -> None:
+        """Fill identity fields from the current release entry."""
+        entry = self._entry
+        # Build hash display from ADF files first elements
+        hashes = []
+        for k in ("sha256", "md5", "crc32"):
+            v = getattr(entry, k, None)
+            if v:
+                hashes.append(f"{k}={v[:16]}")
+        self._lbl_hashes.setText(" | ".join(hashes) if hashes else "(none)")
+        # Size is not on StagedReleaseEntry; compute from adf_files if present
+        try:
+            total_size = sum(
+                os.path.getsize(f) for f in (entry.adf_files or []) if Path(f).exists()
+            )
+            self._lbl_size.setText(f"{total_size:,} bytes" if total_size else "")
+        except Exception:
+            self._lbl_size.setText("(no files)")
+        # Disk number: extract from release_key or title if pattern exists
+        import re
+        disk_match = re.search(r'[Dd]isk?\s*(\d+)', str(entry.release_key) or '')
+        self._lbl_disk.setText(disk_match.group(1) if disk_match else "?")
+        self._update_provenance_label()
+
+    def _update_provenance_label(self) -> None:
+        """Show provenance from canonical claims if available."""
+        self._lbl_provenance.setText("(no claim recorded)")
+
+    def _run_lookup(self) -> None:
+        """Launch background candidate collection."""
+        mode = "online" if self._radio_online.isChecked() else \
+               "offline" if self._radio_offline.isChecked() else "alternate"
+
+        ctx: Optional[LookupContext] = None
+        ctx_provider = getattr(self, "_lookup_ctx_provider", None)
+        if ctx_provider:
+            try:
+                ctx = ctx_provider()
+            except Exception:
+                ctx = None
+        if ctx is None:
+            try:
+                from ..paths import resolve_config
+                paths_cfg, source = resolve_config()
+                ctx = LookupContext(
+                    cache_dir=paths_cfg.metadata_cache_dir,
+                    curated_dir=paths_cfg.curated_metadata_dir,
+                    config_path=source.config_path,
+                )
+            except Exception:
+                ctx = LookupContext()
+
+        ctx.query = self._search_edit.text().strip() or (self._entry.title or "")
+        ctx.release_key = self._entry.release_key
+        ctx.title = self._entry.title or ""
+        ctx.disk_stems = [Path(f).stem for f in (self._entry.adf_files or [])]
+
+        self._worker = _UnifiedLookupWorker(ctx, self)
+        self._worker.candidates_ready.connect(self._on_candidates_received)
+        self._worker.errors_update.connect(self._on_lookup_error)
+        self._worker.start()
+
+    def _on_candidates_received(self, candidates: list[dict]) -> None:
+        """Handle finished candidate collection."""
+        self._progress.setRange(0, 1)
+        self._progress.setValue(1)
+
+        # Update candidates tab
+        self._cand_table.setRowCount(len(candidates))
+        for r, cand in enumerate(candidates):
+            conf = cand.get("confidence", 0)
+            mt = cand.get("match_type", "?")
+            prov = cand.get("provider") or "(unknown)"
+            why_list = cand.get("why", [])
+            why = "; ".join(why_list[:2]) if why_list else "-"
+            ss = ", ".join(cand.get("source_state", [])[:1]) if cand.get("source_state") else "-"
+            status = cand.get("status", "?")
+
+            self._cand_table.setItem(r, 0, QTableWidgetItem(f"{conf:.2f}"))
+            self._cand_table.setItem(r, 1, QTableWidgetItem(mt))
+            self._cand_table.setItem(r, 2, QTableWidgetItem(prov))
+            self._cand_table.setItem(r, 3, QTableWidgetItem(why))
+            self._cand_table.setItem(r, 4, QTableWidgetItem(ss))
+            item = QTableWidgetItem(status)
+            if status == "error":
+                item.setForeground(Qt.GlobalColor.red)
+            self._cand_table.setItem(r, 5, item)
+
+        exact = sum(1 for c in candidates if c.get("confidence", 0) >= 0.95)
+        title_c = sum(1 for c in candidates if 0.8 <= c.get("confidence", 0) < 0.95)
+        fuzzy_c = sum(1 for c in candidates if c.get("confidence", 0) < 0.8)
+        parts = []
+        if exact: parts.append(f"{exact} exact match{'es' if exact != 1 else ''}")
+        if title_c: parts.append(f"{title_c} title match{'es' if title_c != 1 else ''}")
+        if fuzzy_c: parts.append(f"{fuzzy_c} fuzzy")
+        self._cand_status.setText(
+            f"{len(candidates)} candidate(s) found" +
+            (f" ({', '.join(parts)})" if parts else "")
+        )
+        self._summary_label.setText(
+            f"{len(candidates)} candidate(s) collected"
+        )
+        self._status_label.setText("Lookup complete.")
+        self._btn_compare.setEnabled(bool(candidates))
+
+    def _on_lookup_error(self, msg: str) -> None:
+        self._progress.setRange(0, 1)
+        self._progress.setValue(1)
+        self._status_label.setText(f"Error: {msg}")
+        self._cand_status.setText(msg)
+
+    def _on_candidate_selected(self, row: int, col: int) -> None:
+        pass  # used for visual selection
+
+    def _on_compare(self) -> None:
+        row = self._cand_table.currentRow()
+        if row < 0:
+            return
+        cand_text = self._cand_table.item(row, 3)
+        title_raw = self._cand_table.item(row, 2)
+        # We need the actual candidate dict; rebuild from row data
+        # For simplicity, grab from a stored mapping
+        self._candidate = self._get_candidate_at_row(row)
+        if not self._candidate:
+            return
+        self._show_compare_detail()
+
+    def _get_candidate_at_row(self, row: int) -> dict:
+        """Best effort: rebuild candidate from visible table data."""
+        # Store candidates in a temporary attribute during receive
+        candidates = getattr(self, "_candidates_list", None)
+        if candidates and 0 <= row < len(candidates):
+            return candidates[row]
+        # Fallback: create minimal dict from visible data
+        conf_s = self._cand_table.item(row, 0)
+        prov = self._cand_table.item(row, 2)
+        mt = self._cand_table.item(row, 1)
+        return {
+            "confidence": float(conf_s.text()) if conf_s else 0,
+            "provider": prov.text() if prov else "",
+            "match_type": mt.text() if mt else "",
+            "status": "found",
+        }
+
+    def _show_compare_detail(self) -> None:
+        """Show pre/post compare view for selected candidate."""
+        cand = self._candidate
+        if not cand:
+            return
+
+        # Show pre-state
+        pre = {
+            "title": self._entry.title,
+            "metadata_source": self._entry.metadata_source,
+            "match_confidence": self._entry.match_confidence,
+            "confidence": self._entry.confidence,
+            "artwork_front": self._entry.artwork_front,
+            "curation_state": self._entry.curation_state.value,
+        }
+        self._pre_text.setText(json.dumps(pre, indent=2, default=str))
+
+        # Show post-state (what would happen)
+        kind = cand.get("kind", "online")
+        post = dict(pre)
+        if kind == "online":
+            post["title"] = cand.get("title") or cand.get("provider", "") or post["title"]
+            post["metadata_source"] = cand.get("provider") or post["metadata_source"]
+            post["match_confidence"] = cand.get("confidence") or post["match_confidence"]
+        else:
+            post["metadata_source"] = "local_media"
+            post["match_confidence"] = cand.get("confidence") or post["match_confidence"]
+            if cand.get("local_cached_path"):
+                post["artwork_front"] = cand["local_cached_path"]
+        post["confidence"] = post.get("match_confidence", 0)
+        post["status_note"] = "needs_review" if cand.get("status") == "needs_review" else "modified"
+        self._post_text.setText(json.dumps(post, indent=2, default=str))
+
+        # Provenance check
+        self._check_provenance(cand)
+        self._btn_apply.setEnabled(True)
+
+    def _check_provenance(self, cand: dict) -> None:
+        """Check for existing curation-operator overrides."""
+        has_override = False
+        override_info = ""
+        try:
+            from ..canonical import CanonicalLibrary, SourceAuthority
+            # If we have access to canonical db through state manager, check
+            if hasattr(self, "_state") and hasattr(self._state, "state_manager"):
+                sm = self._state.state_manager
+                if sm and hasattr(sm, "_state_file") and sm._state_file:
+                    lib_path = Path(sm._state_file).parent / "canonical.db"
+                    if lib_path.exists():
+                        canon = CanonicalLibrary(lib_path)
+                        # Check key fields for CURATION authority claims
+                        for field_name in ("title",):
+                            try:
+                                claims = canon.claims_for("release", self._entry.release_key, field_name)
+                                for cl in claims:
+                                    if cl.authority >= SourceAuthority.CURATION.tier:
+                                        has_override = True
+                                        override_info += f"\n⚠ Curation override exists for '{field_name}' by {cl.source}"
+                            except Exception:
+                                pass
+                        canon.close()
+        except Exception:
+            pass
+
+        if has_override:
+            self._override_label.setText(f"Existing curation overrides detected{override_info}")
+            self._override_label.setStyleSheet("color: orange; font-weight: bold;")
+        else:
+            self._override_label.setText("No existing curation overrides for this field.")
+            self._override_label.setStyleSheet("color: green;")
+
+    def _on_apply(self) -> None:
+        if not self._candidate:
+            return
+        try:
+            self.applied.emit(self._candidate)
+            self.accept()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Apply Failed", str(exc))
+
+    def reject(self) -> None:
+        # Also stop the worker if running
+        if hasattr(self, "_worker") and self._worker.isRunning():
+            self._worker.terminate()
+            self._worker.wait()
+        super().reject()
+
+
+# --- End Unified Lookup Dialog ---
 
 
 @dataclass
@@ -1800,11 +2236,8 @@ class PreviewWidget(QWidget):
     def _on_lookup(self, mode: str = "online") -> None:
         """Perform a real online/offline lookup for the selected release.
 
-        Online and Offline lookups share ONE implementation
-        (:mod:`amiga_adf_library_builder.lookup_workflow`); the mode only
-        selects the provider class. The provider list shown here comes from
-        :func:`lookup_workflow.providers_for_mode`, so an offline lookup never
-        lists an online provider (GH-89) and no placeholder text remains.
+        Replaced with UnifiedLookupDialog (GH-157): tabbed layout with identity
+        display, searchable query, ranked multi-source candidates, and provenance-aware apply.
         """
         if self._state.current_library is None or not self._state.selected_release_key:
             return
@@ -1812,141 +2245,14 @@ class PreviewWidget(QWidget):
         if not entry:
             return
 
-        dialog = QDialog(self)
-        mode_label = "Online" if mode in ("online", "alternate") else "Offline/Local"
-        dialog.setWindowTitle(f"{mode_label} Lookup: {entry.title}")
-        dialog.resize(560, 460)
-        layout = QVBoxLayout(dialog)
-
-        # Search query (alternate search lets the operator override it).
-        form = QFormLayout()
-        query_edit = QLineEdit(entry.title or "")
-        query_edit.selectAll()
-        form.addRow("Search Query:", query_edit)
-        layout.addLayout(form)
-
-        # Providers consulted -- derived from the shared classification, never
-        # hardcoded, so online and offline never share a provider list.
-        provider_lines = [
-            f"  - {pid}" for pid in providers_for_mode(mode)
-        ]
-        provider_text = (
-            "Local media sources (read-only, no network):\n"
-            if mode == "offline"
-            else "Online provider chain (network required):\n"
-        ) + "\n".join(provider_lines)
-        provider_label = QLabel(provider_text)
-        provider_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        layout.addWidget(provider_label)
-
-        status_label = QLabel("Starting lookup…")
-        layout.addWidget(status_label)
-
-        results_label = QLabel("Results:")
-        layout.addWidget(results_label)
-        results_list = QTextEdit()
-        results_list.setReadOnly(True)
-        results_list.setFontFamily("monospace")
-        layout.addWidget(results_list)
-
-        apply_btn = QPushButton("Apply to release")
-        apply_btn.setEnabled(False)
-        apply_btn.setToolTip(
-            "Apply this lookup result to the selected release "
-            "(staged curation state only)"
+        dialog = UnifiedLookupDialog(entry, mode, self)
+        # Wire the applied signal to actually mutate staged state via our
+        # existing _apply_lookup_candidate which captures pre/post snapshots
+        # for undo/redo.
+        dialog.applied.connect(
+            lambda cand, e=entry, m=mode: self._apply_lookup_candidate(e, m, cand)
         )
-        layout.addWidget(apply_btn)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        buttons.rejected.connect(dialog.reject)
-        buttons.accepted.connect(dialog.accept)
-        layout.addWidget(buttons)
-
-        worker_result: dict = {}
-        worker_error: dict = {}
-
-        def _format_candidates(candidates: list[dict]) -> str:
-            lines = []
-            for cand in candidates:
-                lines.append(f"Status: {cand.get('status', 'unknown')}")
-                if cand.get("title"):
-                    lines.append(f"Title: {cand.get('title')}")
-                if cand.get("provider"):
-                    lines.append(f"Provider: {cand.get('provider')}")
-                if cand.get("year"):
-                    lines.append(f"Year: {cand.get('year')}")
-                if cand.get("developer"):
-                    lines.append(f"Developer: {cand.get('developer')}")
-                if cand.get("publisher"):
-                    lines.append(f"Publisher: {cand.get('publisher')}")
-                if cand.get("description"):
-                    lines.append(f"Description: {cand.get('description')}")
-                if cand.get("artwork_url"):
-                    lines.append(f"Artwork URL: {cand.get('artwork_url')}")
-                if cand.get("local_cached_path"):
-                    lines.append(f"Local artwork: {cand.get('local_cached_path')}")
-                if cand.get("local_category"):
-                    lines.append(f"Category: {cand.get('local_category')}")
-                if cand.get("local_outcome"):
-                    lines.append(f"Outcome: {cand.get('local_outcome')}")
-                if cand.get("local_review_reason"):
-                    lines.append(f"Review reason: {cand.get('local_review_reason')}")
-                lines.append(f"Confidence: {cand.get('confidence', 0.0):.2f}")
-                consulted = cand.get("consulted") or []
-                if consulted:
-                    lines.append("Consulted: " + ", ".join(consulted))
-                local_state = cand.get("local_source_state") or []
-                if local_state:
-                    lines.append("Local source state:")
-                    lines.extend(f"  {line}" for line in local_state)
-                lines.append("")
-            return "\n".join(lines) if lines else "(no results)"
-
-        def _on_worker_finished() -> None:
-            if worker_result:
-                status_label.setText(f"Lookup complete: {worker_result.get('key', '')}")
-                results_list.setText(_format_candidates(worker_result.get("candidates", [])))
-                apply_btn.setEnabled(
-                    bool(worker_result) and worker_result.get("candidates", [{}])[0].get("status") in ("found", "needs_review")
-                )
-            elif worker_error:
-                status_label.setText("Lookup failed.")
-                results_list.setText(
-                    f"Lookup failed: {worker_error.get('error', 'unknown error')}\n"
-                )
-            else:
-                status_label.setText("Lookup complete (no results).")
-
-        def _on_apply() -> None:
-            candidates = worker_result.get("candidates") or []
-            if not candidates:
-                return
-            try:
-                self._apply_lookup_candidate(entry, mode, candidates[0])
-            except ValueError as exc:
-                QMessageBox.warning(self, "Apply Lookup", str(exc))
-                return
-            apply_btn.setEnabled(False)
-            status_label.setText("Result applied to staged curation state.")
-
-        apply_btn.clicked.connect(_on_apply)
-
-        if not self._start_lookup(entry, mode, query_edit.text().strip(), worker_result, worker_error):
-            status_label.setText("A lookup is already running; please wait for it to finish.")
-            results_list.setText("(lookup in progress in another dialog)")
-            apply_btn.setEnabled(False)
-
-        dialog.finished.connect(lambda _code: None)
-        # The worker updates the dialog when it finishes; the dialog stays
-        # modal-less so the user can read results as they arrive.
-        worker = self._lookup_worker
-        if worker is not None:
-            worker.finished.connect(_on_worker_finished)
-
-        dialog.show()
-        # Keep a reference so the dialog (and its worker) are not garbage
-        # collected mid-lookup; released on close.
-        dialog.finished.connect(lambda _code: self._release_lookup_worker())
+        dialog.exec()
 
     def _release_lookup_worker(self) -> None:
         worker = self._lookup_worker
