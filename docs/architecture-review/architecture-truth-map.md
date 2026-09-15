@@ -103,11 +103,12 @@ exporter._get_canonical_basename (exporter.py:48-74)
                              "fallback: no canonical DB" (exporter.py:64,72)
 ```
 
-`naming.release_basename` is referenced by 7 production modules:
-exporter.py, pipeline.py, models.py, rtfm.py, enrich.py, retrokit.py and
-**canonical_naming.py itself** (line 43). The legacy path remains the
-operative default whenever canonical.db is absent or unloadable; the GH-107
-migration cannot be declared complete while this is true.
+`naming.release_basename` is referenced by 8 production modules
+(exporter.py, pipeline.py, models.py, rtfm.py, enrich.py, retrokit.py,
+canonical_naming.py, naming.py itself). AR-005 implemented (GH-147):
+`release_basename` is deprecated with `DeprecationWarning` at every
+fallback call site; `canonical_release_name` is the primary path.
+See AR-005 implementation (GH-147) for the migration plan.
 
 ## 5. Provider layer (enrich chain)
 

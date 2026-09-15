@@ -465,6 +465,34 @@ class TestNoWriteCheckBuildOnly:
         canon.close()
 
 
+def test_canonical_fallback_emits_deprecation_warning(tmp_path):
+    """AR-005: When canonical_naming falls back to release_basename,
+    it must emit a DeprecationWarning."""
+    import warnings
+    from amiga_adf_library_builder.canonical import CanonicalLibrary
+    from amiga_adf_library_builder.canonical_naming import export_name_for_release_group
+    from amiga_adf_library_builder.models import ReleaseGroup
+
+    grp = ReleaseGroup(
+        release_key="x",
+        title="Example Castle Quest",
+        edition=None, group=None,
+        chipset=None, language=None, version=None, alt_marker=None,
+        ext="adf",
+        records=[], disks=[], specials=[],
+        has_main_disk=True, is_complete=True,
+    )
+    canon = CanonicalLibrary(db_path=tmp_path / "empty.db")
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        result = export_name_for_release_group(canon, grp)
+        assert result.basename  # non-empty
+        deprecation_warnings = [x for x in w if issubclass(x.category, DeprecationWarning)]
+        assert len(deprecation_warnings) >= 1
+        assert any("release_basename" in str(x.message) for x in deprecation_warnings)
+    canon.close()
+
+
 # ---------------------------------------------------------------------------
 # 8. Real application/CLI integration path exercised
 # ---------------------------------------------------------------------------

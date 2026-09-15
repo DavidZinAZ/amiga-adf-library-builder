@@ -1,14 +1,17 @@
 """Focused tests for the release-basename collision / silent-overwrite fix.
 
-These cover the mandatory safety defect reproduced in the collision regression:
+These cover the mandatory safety defect reproduced in the collision regression —
 two distinct release groups that differ only in version / language /
 alt_marker (or whose names collide after FAT32 sanitization) must NOT silently
 clobber each other's export folder or .adf file.
 
 Each test fails on the pre-fix implementation (basename ignored those fields;
 export_all had no cross-release folder guard) and passes after remediation.
+
+AR-005: release_basename is deprecated; verify the deprecation warning fires.
 """
 from pathlib import Path
+import warnings
 
 import pytest
 
@@ -217,3 +220,16 @@ def test_release_basename_no_identity_fields_unchanged():
         has_main_disk=True, is_complete=True,
     )
     assert release_basename(g) == "Example Space Tactics"
+
+
+def test_release_basename_emits_deprecation_warning():
+    """AR-005: release_basename must emit a DeprecationWarning."""
+    g = ReleaseGroup(
+        release_key="k", title="Game One", edition=None, group="SKR",
+        chipset="AGA", language="DE", version="v2.0", alt_marker="a2",
+        ext="adf", records=[], disks=[], specials=[],
+        has_main_disk=True, is_complete=True,
+    )
+    with pytest.warns(DeprecationWarning, match="release_basename"):
+        result = release_basename(g)
+    assert result  # still functional

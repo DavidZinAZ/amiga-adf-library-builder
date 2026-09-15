@@ -67,6 +67,7 @@ import json
 import os
 import re
 import stat
+import warnings
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -520,6 +521,12 @@ def _group_identity(group) -> str:
     try:
         from .naming import release_basename
 
+        warnings.warn(
+            "release_basename() called from rtfm._group_identity. "
+            "Use canonical_release_name() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         return release_basename(group)
     except Exception:
         return (getattr(group, "title", None) or "Unknown").strip() or "Unknown"
@@ -1489,6 +1496,12 @@ def build_rtfm_for_group(
     # .rtfm file can be found and copied into the Gotek staging tree.
     from .naming import release_basename
     from .exporter import _sanitize_component
+    warnings.warn(
+        "release_basename() called from rtfm RTFM generation. "
+        "Use canonical_release_name() instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     basename = _sanitize_component(release_basename(group))
     result = RtfmResult(
         release_key=getattr(group, "release_key", "") or "",

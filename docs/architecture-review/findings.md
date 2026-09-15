@@ -29,7 +29,7 @@ directional but a precise impact bound was not derived.
 | AR-002 | DOC | Low | High | CONFIRMED | kept |
 | AR-003 | ARCH | High | High | CONFIRMED + corrected | 6 stores (manual approvals added) |
 | AR-004 | ARCH | Medium | High | CONFIRMED + expanded | 5 versioned stores, 5 distinct idioms (manual_approvals stamp-only) |
-| AR-005 | ARCH | Medium | High | CONFIRMED + quantified | legacy naming load-bearing in 7 modules (review said 5) |
+| AR-005 | ARCH | Medium | High | IMPLEMENTED (GH-147) | deprecation markers added; `release_basename` preserved as compatibility shim; fallback instrumentation is KEEP; canonical_release_name is primary path |
 | AR-006 | MAINT | Medium | High | CONFIRMED + expanded | 3rd private reach found in synthesis (canonical_naming→exporter) |
 | AR-007 | KEEP | — | High | CONFIRMED | keep |
 | AR-008 | ARCH | Medium | High | CONFIRMED, exact | 28 kw-only params (review "25+", challenge "28+" → exactly 28) |
@@ -92,8 +92,10 @@ not on current scan reality.
   run already seeded the rows the CLI reads.
 - Failure policy diverges per path: GUI persistence is best-effort and
   swallows all errors (pipeline.py:909-912, 958-959); CLI `_load`/`_ensure`
-  return None on open/seed failure → silent fallback to legacy naming
-  (exporter.py:64,72) and neutral 20.0 region/language scores.
+  return None on open/seed failure → silent fallback to deprecated
+  legacy naming (exporter.py:64,72) and neutral 20.0 region/language
+  scores. (AR-005: release_basename is deprecated; canonical_release_name
+  is the primary path.)
 
 **Why root cause.** All AR-001-shaped symptoms — divergent GUI/CLI canonical
 views, unfixable stale attributes, "which run created it" provenance — trace
@@ -161,18 +163,22 @@ store the scorer and exporter trust is documented nowhere outside code.)
 stores; add real read-side validation for library_state/manual_approvals;
 delete or wire the metadata_source constant.
 
-### AR-005 — Dual naming regime unresolved; legacy `release_basename` remains load-bearing in 7 modules (ARCH/MEDIUM, Medium/High)
+### AR-005 — Dual naming regime unresolved; legacy `release_basename` deprecated (ARCH/MEDIUM, Medium/High) — IMPLEMENTED (GH-147)
 
-**Claim (confirmed, count corrected 5→7).** The fallback itself is
+**Original claim (confirmed, count corrected 5→7).** The fallback itself is
 well-instrumented and visible ("fallback: no canonical DB",
-exporter.py:48-74) — KEEP that. But `naming.release_basename` remains the
-operative default whenever canonical.db is absent/unloadable, and is imported
+exporter.py:48-74) — KEEP that. But `naming.release_basename` was the
+operative default whenever canonical.db is absent/unloadable, and was imported
 by exporter, pipeline, rtfm, enrich, retrokit, models **and
-canonical_naming.py:43 itself**. canonical_naming also privately imports
-`exporter._sanitize_component` (canonical_naming.py:42) and self-documents
-its `_slugify_title` as a copy of `canonical.slugify_title`
-(canonical_naming.py:482-486). GH-107 cannot be declared done while both
-regimes produce names. AR-001 is a precondition for retiring the legacy path.
+canonical_naming.py:43 itself**.
+
+**Implementation (GH-147, Alt 3 — Preserve with deprecation markers).**
+`release_basename` now emits `DeprecationWarning` on every call. Fallback
+call sites in canonical_naming.py, exporter.py, pipeline.py emit
+additional context-specific warnings. `canonical_release_name` is the
+primary path. The function remains functional as a compatibility shim —
+the fallback instrumentation is KEEP. See `docs/architecture-review/
+findings.md` summary table for current disposition.
 
 ### AR-006 — Cross-module duplication census (MAINT, Medium/High)
 

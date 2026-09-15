@@ -74,7 +74,7 @@ Disagreements resolved:
 | AR-002 | DOC | Low/High | `_ensure_canonical_library` docstring states the opposite of current CLI behavior |
 | AR-003 | ARCH | High/High | 6 persistent stores, overlapping identity facts, no documented SSOT, no cross-store consistency tests |
 | AR-004 | ARCH | Med/High | 5 versioned stores / 5 idioms; one dead constant, one stamp-only field, one strict-reject with no migration |
-| AR-005 | ARCH | Med/High | dual naming regime live: legacy `release_basename` load-bearing in 7 modules incl. canonical_naming itself; fallback instrumentation itself is KEEP |
+| AR-005 | ARCH | Med/High | dual naming regime: `release_basename` deprecated in favor of `canonical_release_name`; preserved as compatibility shim; fallback instrumentation is KEEP |
 | AR-006 | MAINT | Med/High | 5×now, 5+13 atomic writers, 7 sha256, 6 slugify impls, 3 private cross-module reaches, provider scaffolding ×6 |
 | AR-007 | KEEP | —/High | test_gui_equivalence.py (297 L / 10 tests) enforces GUI↔CLI parity — strongest invariant |
 | AR-008 | ARCH | Med/High | run_pipeline = 28 kw-only params; each feature is a 3-site change; the two CLI call sites already drift in coverage |

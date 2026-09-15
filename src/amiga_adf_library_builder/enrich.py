@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import threading
+import warnings
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -1190,6 +1191,12 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                 )
                 Path(artwork_processed_dir).mkdir(parents=True, exist_ok=True)
                 processed = Path(artwork_processed_dir) / f"{release_basename(group)}.jpg"
+                warnings.warn(
+                    "release_basename() called from enrich.process_artwork. "
+                    "Use canonical_release_name() instead.",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
                 if not processed.exists() or processed.read_bytes() != data:
                     processed.write_bytes(data)
                 notes.append(f"processed artwork: {processed}")
@@ -1235,6 +1242,12 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
         ))
 
     Path(nfo_dir).mkdir(parents=True, exist_ok=True)
+    warnings.warn(
+        "release_basename() called from enrich.write_nfo. "
+        "Use canonical_release_name() instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     basename = release_basename(group)
     nfo_path = Path(nfo_dir) / f"{basename}.nfo"
 
