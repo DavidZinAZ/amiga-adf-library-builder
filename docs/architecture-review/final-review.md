@@ -4,7 +4,7 @@
 `9d20b804158f4c5662dffd81bb0307bc2af978ca` (main, v0.2.16, clean tree,
 in sync with origin/main at synthesis time)
 **Date:** 2026-09-14 · **Companion documents:** `architecture-truth-map.md`,
-`findings.md` (same directory)
+`findings.md` (same directory), `remediation-ledger.md`
 
 ## Verdict
 
