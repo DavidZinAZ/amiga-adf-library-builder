@@ -366,7 +366,25 @@ def _gate_run_gate2_online_manual(base_dir: Path, report_dir: Path) -> None:
         run_config, extra = build_pipeline_kwargs(state, cfg, activity=_act)
         gate2_evidence["enabled"] = True
 
+        # The GUI state machine writes [rtfm.online.enabled] but the pipeline
+        # reads [retrokit_manuals]. Patch the resolved config to add the
+        # [retrokit_manuals] table so the provider is actually enabled.
+        if run_config.rtfm_config_path and state.retrokit_manuals_enabled:
+            import tomllib
+            import tomli_w
+
+            rtfm_cfg_path = Path(run_config.rtfm_config_path)
+            if rtfm_cfg_path.is_file():
+                with open(rtfm_cfg_path, "rb") as f:
+                    rk_data = tomllib.load(f)
+                rk_data["retrokit_manuals"] = {"enabled": True}
+                tmp = rtfm_cfg_path.with_suffix(".tmp")
+                with open(tmp, "wb") as f:
+                    tomli_w.dump(rk_data, f)
+                tmp.replace(rtfm_cfg_path)
+
         result = run_pipeline(cfg, run_config, **{k: v for k, v in extra.items() if k != "cfg"})
+
 
         rtfm_info = result.get("rtfm", {})
         gate2_evidence["activity_lines"] = activity_lines
