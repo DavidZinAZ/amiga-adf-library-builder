@@ -476,9 +476,16 @@ class TestCollectCandidates:
 # --- GH-157 DEF-4: match_type from evidence, not confidence thresholds ------
 
 class TestMatchTypeEvidence:
-    """DEF-4: match_type must reflect actual hash/evidence, not just confidence."""
+    """DEF-4: match_type must reflect actual hash/evidence, not just confidence.
 
-    def test_exact_hash_record_gets_exact_match_type(self):
+    GH-157 re-QA (final narrow fix): online provider/title RECORDS carry no
+    hash evidence (``MetadataRecord`` has no hash field), so high provider
+    confidence maps to ``"provider_record"`` — ``"exact_hash"`` is reserved
+    for genuine hash evidence from the offline path.
+    """
+
+    def test_perfect_confidence_online_record_is_provider_record(self):
+        """conf=1.0 online record is still title evidence, never a hash."""
         from amiga_adf_library_builder.lookup_workflow import (
             LookupResult, KIND_ONLINE, MODE_ONLINE, _result_to_candidate,
         )
@@ -493,10 +500,43 @@ class TestMatchTypeEvidence:
         )
         cands = _result_to_candidate(r)
         assert len(cands) == 1
-        assert cands[0]["match_type"] == "exact_hash", \
-            f"Expected exact_hash but got {cands[0]['match_type']!r}"
+        assert cands[0]["match_type"] == "provider_record", \
+            f"Expected provider_record (conf=1.0 record) but got {cands[0]['match_type']!r}"
 
-    def test_high_confidence_record_gets_exact_hash(self):
+    def test_genuine_hash_evidence_still_exact_hash(self):
+        """Offline hash-method evidence must REMAIN exact_hash.
+
+        The engine contract is ``local_result.match_method.value``; the
+        artwork enum's shipped members never carry a hash method, so the
+        shim below pins the exact contract the matcher reads.
+        """
+        from enum import Enum
+
+        from amiga_adf_library_builder.lookup_workflow import (
+            LookupResult, KIND_OFFLINE, MODE_OFFLINE, _result_to_candidate,
+        )
+        from amiga_adf_library_builder.local_media import LocalMediaResult
+
+        class _HashMethod(str, Enum):
+            SHA1 = "sha1"
+
+        lr = LocalMediaResult(
+            group_title="Test Game", group_release_key="rk-hash",
+            outcome="auto_match", category="front",
+        )
+        lr.match_method = _HashMethod.SHA1  # type: ignore[assignment]
+        r = LookupResult(
+            mode=MODE_OFFLINE, kind=KIND_OFFLINE, provider_ids=["local"],
+            status="found", local_result=lr, confidence=0.99,
+            consulted=["local"],
+        )
+        cands = _result_to_candidate(r)
+        assert len(cands) == 1
+        assert cands[0]["match_type"] == "exact_hash", \
+            f"Expected exact_hash for sha1 evidence but got {cands[0]['match_type']!r}"
+
+    def test_high_confidence_record_gets_provider_record(self):
+        """GH-157 re-QA: a 0.97 provider/title record is NOT exact_hash."""
         from amiga_adf_library_builder.lookup_workflow import (
             LookupResult, KIND_ONLINE, MODE_ONLINE, _result_to_candidate,
         )
@@ -511,8 +551,8 @@ class TestMatchTypeEvidence:
         )
         cands = _result_to_candidate(r)
         assert len(cands) == 1
-        assert cands[0]["match_type"] == "exact_hash", \
-            f"Expected exact_hash (conf=0.97) but got {cands[0]['match_type']!r}"
+        assert cands[0]["match_type"] == "provider_record", \
+            f"Expected provider_record (conf=0.97) but got {cands[0]['match_type']!r}"
 
     def test_medium_confidence_gets_normalized_title(self):
         from amiga_adf_library_builder.lookup_workflow import (
@@ -549,6 +589,103 @@ class TestMatchTypeEvidence:
         assert len(cands) == 1
         assert cands[0]["match_type"] == "fuzzy_title", \
             f"Expected fuzzy_title (conf=0.62) but got {cands[0]['match_type']!r}"
+
+
+# --- GH-157 DEF-5R: curation-override detection through the REAL API --------
+
+class TestProvenanceOverrideDetection:
+    """DEF-5R (publication blocker): ``_check_provenance`` compared
+    ``cl.authority >= SourceAuthority.CURATION.tier`` — int-vs-string
+    TypeError silently swallowed by a bare ``except``, so the dialog always
+    rendered "No existing curation overrides" (false negative on every
+    apply). These tests seed a real ``CanonicalLibrary`` with a real
+    ``CURATION`` claim, drive the dialog's production check method, and
+    assert the visible label outcome on a real ``QLabel``.
+    """
+
+    @staticmethod
+    def _make_dialog(tmp_path, claims_authority=None, corrupt=False):
+        from PySide6.QtWidgets import QApplication, QLabel
+
+        from amiga_adf_library_builder.canonical import (
+            CanonicalLibrary, Provenance,
+        )
+        from amiga_adf_library_builder.gui.preview_widget import (
+            UnifiedLookupDialog,
+        )
+        from amiga_adf_library_builder.models import StagedReleaseEntry
+
+        QApplication.instance() or QApplication([])  # noqa: F841
+
+        lib_path = tmp_path / "canonical.db"
+        if corrupt:
+            lib_path.write_bytes(b"definitely-not-a-sqlite-database")
+        elif claims_authority is not None:
+            lib = CanonicalLibrary(lib_path)
+            try:
+                lib.claim_field(
+                    "release", "rk-prov", "title", "Manual Override Title",
+                    Provenance(source="curation-op",
+                               authority=claims_authority),
+                )
+            finally:
+                lib.close()
+        else:
+            CanonicalLibrary(lib_path).close()
+
+        entry = StagedReleaseEntry(
+            release_key="rk-prov", title="Test Game", edition=None,
+            group=None, chipset=None, language=None,
+            adf_files=[str(tmp_path / "discs" / "game.adf")],
+        )
+        dialog = UnifiedLookupDialog.__new__(UnifiedLookupDialog)
+        dialog._entry = entry
+        dialog._override_label = QLabel()
+        return dialog
+
+    def test_module_resolution_is_worktree_local(self):
+        """QA pin: behavior tests must exercise THIS checkout, not another."""
+        import amiga_adf_library_builder.gui.preview_widget as pw
+        repo_root = Path(__file__).resolve().parents[1]
+        assert Path(pw.__file__).resolve().is_relative_to(repo_root / "src"), (
+            f"preview_widget loaded from {pw.__file__}, expected {repo_root}/src"
+        )
+
+    def test_real_curation_claim_visibly_detected_as_override(self, tmp_path):
+        from amiga_adf_library_builder.canonical import SourceAuthority
+        dialog = self._make_dialog(tmp_path, SourceAuthority.CURATION)
+        dialog._check_provenance({"status": "found"})
+        text = dialog._override_label.text()
+        assert "Existing curation overrides detected" in text
+        assert "curation-op" in text
+        assert "No existing curation overrides" not in text
+        assert "orange" in dialog._override_label.styleSheet()
+
+    def test_dat_rank_claim_is_not_an_override(self, tmp_path):
+        """Rank semantics, not mere claim presence: DAT (20) < CURATION (40)."""
+        from amiga_adf_library_builder.canonical import SourceAuthority
+        dialog = self._make_dialog(tmp_path, SourceAuthority.DAT)
+        dialog._check_provenance({"status": "found"})
+        assert dialog._override_label.text() == \
+            "No existing curation overrides for this field."
+
+    def test_curation_memory_rank_is_not_an_operator_override(self, tmp_path):
+        """CURATION_MEMORY (30) < CURATION (40): not an operator override."""
+        from amiga_adf_library_builder.canonical import SourceAuthority
+        dialog = self._make_dialog(tmp_path, SourceAuthority.CURATION_MEMORY)
+        dialog._check_provenance({"status": "found"})
+        assert dialog._override_label.text() == \
+            "No existing curation overrides for this field."
+
+    def test_broken_db_surfaces_visible_unavailable_state(self, tmp_path):
+        """No silent false-green: an unreadable canonical.db must render a
+        distinct unavailable state instead of "No existing overrides"."""
+        dialog = self._make_dialog(tmp_path, corrupt=True)
+        dialog._check_provenance({"status": "found"})
+        text = dialog._override_label.text()
+        assert "unavailable" in text.lower()
+        assert "No existing curation overrides" not in text
+        assert "green" not in dialog._override_label.styleSheet()
 
 
 # --- GH-157 DEF-1 + DEF-2: Candidate storage and validation ------------------

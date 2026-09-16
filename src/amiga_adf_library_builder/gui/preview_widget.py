@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -669,23 +670,34 @@ class UnifiedLookupDialog(QDialog):
 
             if lib_path and lib_path.exists():
                 canon = CanonicalLibrary(lib_path)
-                for field_name in ("title",):
-                    try:
+                try:
+                    for field_name in ("title",):
+                        # GH-157 DEF-5R: ``claims_for`` returns
+                        # ``list[(Provenance, value)]`` and
+                        # ``Provenance.authority`` is a ``SourceAuthority``
+                        # IntEnum member. Compare enum rank directly;
+                        # ``.tier`` is a name string and ``int >= str``
+                        # raised TypeError, previously swallowed silently.
                         claims = canon.claims_for(
                             "release", self._entry.release_key, field_name
                         )
-                        for cl in claims:
-                            if cl.authority >= SourceAuthority.CURATION.tier:
+                        for prov, _value in claims:
+                            if prov.authority >= SourceAuthority.CURATION:
                                 has_override = True
                                 override_info += (
                                     f"\n\u26a0 Curation override exists for "
-                                    f"'{field_name}' by {cl.source}"
+                                    f"'{field_name}' by {prov.source}"
                                 )
-                    except Exception:
-                        pass
-                canon.close()
-        except Exception:
-            pass
+                finally:
+                    canon.close()
+        except (OSError, sqlite3.Error) as exc:
+            # Best-effort pre-check, but never silently false-green:
+            # a failed provenance lookup is surfaced as its own state.
+            self._override_label.setText(
+                f"Curation provenance check unavailable: {exc}"
+            )
+            self._override_label.setStyleSheet("color: gray;")
+            return
 
         if has_override:
             self._override_label.setText(
