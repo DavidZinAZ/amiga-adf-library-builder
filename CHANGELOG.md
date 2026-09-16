@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.21 — 2026-09-16
+
+- GH-170: Unified Lookup + Provider persistence.
+
 ## 0.2.20 — 2026-09-16
 
 - GH-167: Fix four root causes (RC-A, RC-B, RC-C, RC-D).
