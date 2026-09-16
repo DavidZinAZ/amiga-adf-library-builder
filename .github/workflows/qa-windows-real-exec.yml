@@ -57,6 +57,13 @@ jobs:
           QA_REPORT_DIR: "qa-windows-artifacts"
         run: python tools/qa_windows_real_exec.py
 
+      - name: Run GH-78 live-activity GUI qualification driver (QA-only)
+        if: always()
+        env:
+          QT_QPA_PLATFORM: offscreen
+          QA_GH78_BASE: "C:\\Users\\runneradmin\\GH78 Live Activity Dir With Spaces"
+        run: python tools/qa_gh78_live_activity.py
+
       - name: Upload QA artifacts (report + screenshots + logs)
         if: always()
         uses: actions/upload-artifact@v4
@@ -64,5 +71,6 @@ jobs:
           name: qa-windows-real-exec
           path: |
             qa-windows-artifacts/
+            C:\Users\runneradmin\GH78 Live Activity Dir With Spaces\qa-gh78-live-activity\
             C:\Users\runneradmin\Test Dir With Spaces\lib\logs\
           if-no-files-found: warn
