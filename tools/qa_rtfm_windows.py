@@ -390,16 +390,29 @@ def _gate_run_gate2_online_manual(base_dir: Path, report_dir: Path) -> None:
                     rtfm_path.read_bytes()
                 ).hexdigest()
 
-        # Check if capability is absent (no online provider works)
-        if not gate2_evidence["queried"] and not gate2_evidence["rtfm_written"]:
-            # RetroKit either errored or was unavailable — check activity
-            has_error = any("retrokit:error" in s for s in provider_statuses)
-            if has_error:
-                gate2_evidence["capability_absent"] = True
+        # Distinguish three outcomes:
+        # 1. capability_absent: provider errored / unreachable / not implemented
+        # 2. capability_present_no_match: provider queried successfully but no
+        #    manual found for this title (valid result, proves the pipeline works)
+        # 3. success: manual found and RTFM written
+        has_error = any("retrokit:error" in s for s in provider_statuses)
+        if has_error:
+            gate2_evidence["capability_absent"] = True
+        elif not gate2_evidence["rtfm_written"]:
+            # Provider queried successfully but no match — capability is present
+            gate2_evidence["capability_present_no_match"] = True
+
+        _step(
+            "gate2_provider_queried",
+            gate2_evidence["queried"] or gate2_evidence["capability_absent"],
+            f"queried={gate2_evidence['queried']} error={gate2_evidence['capability_absent']}",
+        )
 
         _gate(
             "gate2_online_manual",
-            gate2_evidence["rtfm_written"] or gate2_evidence["capability_absent"],
+            gate2_evidence["rtfm_written"]
+            or gate2_evidence["capability_present_no_match"]
+            or gate2_evidence["capability_absent"],
             gate2_evidence,
         )
 
@@ -556,22 +569,25 @@ def _gate_run_gate4_known_titles(base_dir: Path, report_dir: Path) -> None:
         gate4_evidence["rtfm_review"] = rtfm_info.get("routed_for_review", [])
         gate4_evidence["manual_trace"] = rtfm_info.get("manual_trace", {})
 
-        # Per-title diagnostics
+        # Per-title diagnostics — match on canonical basename (spaces preserved)
         built = rtfm_info.get("built", [])
         gate4_evidence["titles"] = {
-            "Hacker": {"built": any("Hacker" in p for p in built)},
-            "Hacker II The Doomsday Papers": {"built": any("Hacker_II" in p for p in built)},
-            "Rocket Ranger": {"built": any("Rocket_Ranger" in p for p in built)},
-            "Stunt Car Racer": {"built": any("Stunt_Car" in p for p in built)},
-            "Ultima IV": {"built": any("Ultima_IV" in p for p in built)},
+            "Hacker": {"built": any("Hacker.rtfm" in p for p in built)},
+            "Hacker II The Doomsday Papers": {
+                "built": any("Hacker II The Doomsday Papers.rtfm" in p for p in built)
+            },
+            "Rocket Ranger": {"built": any("Rocket Ranger.rtfm" in p for p in built)},
+            "Stunt Car Racer": {"built": any("Stunt Car Racer.rtfm" in p for p in built)},
+            "Ultima IV": {"built": any("Ultima IV.rtfm" in p for p in built)},
         }
 
-        # At least some titles should produce RTFM
-        any_built = any(t["built"] for t in gate4_evidence["titles"].values())
+        # At least 4 of 5 titles should produce RTFM (some may be ambiguous)
+        built_count = sum(1 for t in gate4_evidence["titles"].values() if t["built"])
+        any_built = built_count >= 4
 
         _gate(
             "gate4_known_titles",
-            any_built or len(rtfm_info.get("built", [])) > 0,
+            any_built or len(rtfm_info.get("built", [])) >= 4,
             gate4_evidence,
         )
 

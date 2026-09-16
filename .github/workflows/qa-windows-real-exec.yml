@@ -55,7 +55,7 @@ jobs:
       - name: Install build + QA dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[gui]" pyinstaller pillow
+          python -m pip install -e ".[gui]" pyinstaller pillow pytest
 
       - name: Build onedir portable app (real artifact)
         run: python tools/build_windows.py --target onedir --clean
