@@ -242,6 +242,31 @@ def _text_get(url: str, *, timeout: float = 20.0,
 
 
 @dataclass
+class HallOfLightConfig:
+    """Configuration for the Hall of Light metadata provider.
+
+    Enabled by default; opt-out via the ``[hall-of-light]`` TOML table.
+    Backward compatible: Hall of Light was unconditional before this change.
+    """
+
+    enabled: bool = True
+    timeout_seconds: float = 20.0
+    max_response_bytes: int = 3_000_000
+    cache_ttl: float = 86400.0
+
+    @classmethod
+    def from_dict(cls, data: Optional[dict]) -> "HallOfLightConfig":
+        if not data:
+            return cls()
+        return cls(
+            enabled=bool(data.get("enabled", True)),
+            timeout_seconds=float(data.get("timeout_seconds", 20.0)),
+            max_response_bytes=int(data.get("max_response_bytes", 3_000_000)),
+            cache_ttl=float(data.get("cache_ttl", 86400.0)),
+        )
+
+
+@dataclass
 class LemonAmigaConfig:
     """Configuration for the Lemon Amiga metadata provider.
 
@@ -1237,6 +1262,7 @@ def lookup_metadata(title: str, *, cache_dir: Path, curated_dir: Path,
                     mobygames_enabled: bool = False,
                     mobygames_api_key_env: str = "MOBYGAMES_API_KEY",
                     lemonamiga_enabled: bool = False,
+                    halloflight_enabled: bool = True,
                     activity: Optional[Callable[[str], None]] = None
                     ) -> tuple[Optional[MetadataRecord], str, list[dict]]:
     """Resolve metadata for ``title`` using the shared precedence chain.
@@ -1250,7 +1276,9 @@ def lookup_metadata(title: str, *, cache_dir: Path, curated_dir: Path,
     (``mobygames_enabled=False``), so the base app is unchanged unless an
     operator opts in via the ``[mobygames]`` config table. Lemon Amiga is
     similarly disabled by default (``lemonamiga_enabled=False``) and
-    opt-in via the ``[lemonamiga]`` config table.
+    opt-in via the ``[lemonamiga]`` config table. Hall of Light is
+    ENABLED BY DEFAULT (``halloflight_enabled=True``) for backward
+    compatibility; disable via the ``[hall-of-light]`` config table.
     """
     curated = load_curated(curated_dir, title)
     if curated:
@@ -1328,7 +1356,7 @@ def lookup_metadata(title: str, *, cache_dir: Path, curated_dir: Path,
         if mobygames_key:
             _try_provider("mobygames",
                           lambda: mobygames_lookup(title, api_key=mobygames_key, timeout=timeout, opener=opener))
-    if accepted is None:
+    if accepted is None and halloflight_enabled:
         _try_provider("hall-of-light",
                       lambda: hall_of_light_lookup(title, timeout=timeout, opener=opener))
     if accepted is None:

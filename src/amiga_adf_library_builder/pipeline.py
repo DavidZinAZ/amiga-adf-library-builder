@@ -406,6 +406,19 @@ def run_pipeline(
                     retroachievements_provider = None
         except Exception:  # provider failure must not break the pipeline
             retroachievements_provider = None
+    # Hall of Light optional provider gating. OPTIONAL and ENABLED by
+    # default; disabled via the [hall-of-light] TOML table.
+    halloflight_enabled = True  # backward compatible default
+    if run.hall_of_light_config_path:
+        try:
+            from .paths import load_hall_of_light_config
+            from .metadata import HallOfLightConfig
+            hol_cfg = HallOfLightConfig.from_dict(
+                load_hall_of_light_config(run.hall_of_light_config_path)
+            )
+            halloflight_enabled = hol_cfg.enabled
+        except Exception:  # provider failure must not break the pipeline
+            halloflight_enabled = True  # fail open
     _act(
         f"Filling in missing metadata for {len(groups)} release(s) "
         + ("from online sources (this can take a while)."
@@ -428,6 +441,7 @@ def run_pipeline(
         igdb_provider=igdb_provider,
         screenscraper_provider=screenscraper_provider,
         retroachievements_provider=retroachievements_provider,
+        halloflight_enabled=halloflight_enabled,
         include_artwork=include_artwork,
         activity=activity,
         cancel_event=cancel_event,

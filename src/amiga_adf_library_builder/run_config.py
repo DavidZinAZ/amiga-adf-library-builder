@@ -52,6 +52,7 @@ class RunConfig:
     screenscraper_config_path: Optional[str] = None
     retroachievements_config_path: Optional[str] = None
     retrokit_config_path: Optional[str] = None
+    hall_of_light_config_path: Optional[str] = None
     operator_decisions_path: Optional[str] = None
     selection_manifest_path: Optional[str] = None
     library_state_path: Optional[str] = None
@@ -84,6 +85,7 @@ class RunConfig:
             "playmatch_config_path", "hasheous_config_path",
             "igdb_config_path", "screenscraper_config_path",
             "retroachievements_config_path", "retrokit_config_path",
+            "hall_of_light_config_path",
             "operator_decisions_path", "selection_manifest_path",
             "library_state_path", "include_artwork",
             "include_manuals_rtfm", "one_per_game",

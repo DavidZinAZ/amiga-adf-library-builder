@@ -1203,6 +1203,142 @@ class LemonAmigaProvider(Provider):
         raise NotImplementedError("lemon-amiga has no credentials")
 
 
+# --- Hall of Light provider adapter -------------------------------------
+# Unauthenticated provider. Enabled by default (backward compatible).
+# No credentials required.
+
+
+def _halloflight_field_defaults() -> list[ProviderField]:
+    return [
+        ProviderField(
+            key="enabled",
+            label="Enable Hall of Light provider",
+            default="true",
+            help_text=(
+                "Hall of Light (amiga.abime.net) metadata lookup. "
+                "Enabled by default (backward compatible). "
+                "Metadata only — no images are downloaded."
+            ),
+        ),
+        ProviderField(
+            key="timeout_seconds",
+            label="Time limit per request (seconds)",
+            default="20.0",
+            help_text="How long to wait for the server before giving up.",
+        ),
+        ProviderField(
+            key="max_response_bytes",
+            label="Maximum response size (bytes)",
+            default="3000000",
+            help_text="Refuse to read more than this from the server.",
+        ),
+        ProviderField(
+            key="cache_ttl",
+            label="Cache TTL (seconds)",
+            default="86400",
+            help_text="How long to cache successful lookups (24h default).",
+        ),
+    ]
+
+
+def _build_halloflight_config_dict(*, enabled: bool, timeout_seconds: str,
+                                     max_response_bytes: str, cache_ttl: str) -> dict:
+    """Build a typed ``[hall-of-light]`` TOML table (mirrors HallOfLightConfig)."""
+    return {
+        "enabled": enabled,
+        "timeout_seconds": float(timeout_seconds or 20.0),
+        "max_response_bytes": int(max_response_bytes or 3_000_000),
+        "cache_ttl": float(cache_ttl or 86400.0),
+    }
+
+
+class HallOfLightProvider(Provider):
+    """Generic GUI adapter over the core Hall of Light metadata resolver.
+
+    Enabled by default (backward compatible). The live Hall of Light
+    lookup is unauthenticated (no API key needed), so ``auth_required``
+    is ``none``. Metadata-only: no images are downloaded.
+    """
+
+    def __init__(self) -> None:
+        self.metadata = ProviderMetadata(
+            id="hall-of-light",
+            name="Hall of Light",
+            description=(
+                "Optional Amiga metadata lookup via Hall of Light "
+                "(amiga.abime.net). Unauthenticated; enabled by default. "
+                "Metadata only — no images are downloaded."
+            ),
+            auth_required="none",
+            fields=_halloflight_field_defaults(),
+            capabilities=[
+                ProviderCapability.ONLINE_LOOKUP,
+                ProviderCapability.METADATA,
+            ],
+            requires_secret=False,
+        )
+        self._enabled = True
+        self._timeout_seconds = "20.0"
+        self._max_response_bytes = "3000000"
+        self._cache_ttl = "86400"
+        self._lock = threading.RLock()
+
+    # --- config --------------------------------------------------------------
+    def is_configured(self) -> bool:
+        with self._lock:
+            return True
+
+    def enabled(self) -> bool:
+        with self._lock:
+            return self._enabled
+
+    def set_field(self, key: str, value: str) -> None:
+        with self._lock:
+            if key == "timeout_seconds":
+                self._timeout_seconds = value
+            elif key == "max_response_bytes":
+                self._max_response_bytes = value
+            elif key == "cache_ttl":
+                self._cache_ttl = value
+            elif key == "enabled":
+                self._enabled = (value == "true" or value is True)
+            else:
+                raise KeyError(f"unknown hall-of-light field: {key}")
+
+    def set_enabled(self, enabled: bool) -> None:
+        with self._lock:
+            self._enabled = bool(enabled)
+
+    def to_config_dict(self) -> dict:
+        with self._lock:
+            return _build_halloflight_config_dict(
+                enabled=self._enabled,
+                timeout_seconds=self._timeout_seconds,
+                max_response_bytes=self._max_response_bytes,
+                cache_ttl=self._cache_ttl,
+            )
+
+    # --- status --------------------------------------------------------------
+    def status(self) -> ProviderStatus:
+        with self._lock:
+            if not self._enabled:
+                return ProviderStatus(ok=True, message="Turned off", configured=True)
+            return ProviderStatus(ok=True, message="Ready", configured=True)
+
+    def test_connection(self) -> ProviderStatus:
+        status = self.status()
+        if status.ok and status.message == "Ready":
+            return ProviderStatus(ok=True, message="Connection successful", configured=status.configured)
+        return status
+
+    # --- secrets --------------------------------------------------------------
+    def add_credentials(self, secret_store: Any, **secrets: str) -> None:
+        raise NotImplementedError("hall-of-light has no credentials")
+
+    def remove_credentials(self, secret_store: Any) -> None:
+        raise NotImplementedError("hall-of-light has no credentials")
+
+
 # --- Registry ----------------------------------------------------------------
 
 
@@ -1247,4 +1383,5 @@ def default_registry() -> ProviderRegistry:
     reg.register(ScreenScraperProvider())
     reg.register(RetroAchievementsProvider())
     reg.register(LemonAmigaProvider())
+    reg.register(HallOfLightProvider())
     return reg
