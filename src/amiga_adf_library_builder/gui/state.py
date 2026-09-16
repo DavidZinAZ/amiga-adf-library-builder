@@ -275,7 +275,9 @@ def build_pipeline_kwargs(
         # (GH-33) GUI LaunchBox mappings take precedence for local media;
         # otherwise identical to the CLI's provider-config behavior.
         local_media_config_path=local_media_cfg,
-        rtfm_config_path=provider_cfg,
+        # (GH-167 RC-C) RTFM config must point at the main/operator
+        # config file that may contain [rtfm], not the provider config.
+        rtfm_config_path=str(discover_default_config_path()) if discover_default_config_path() is not None else None,
         playmatch_config_path=provider_cfg,
         hasheous_config_path=provider_cfg,
         retrokit_config_path=provider_cfg,
