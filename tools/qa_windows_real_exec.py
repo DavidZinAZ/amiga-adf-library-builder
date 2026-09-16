@@ -443,8 +443,10 @@ def main() -> int:
         pp_gh86.ensure_all()
         cfg_gh86 = build_path_config_from_gui_state(state)
         ensure_managed_directories(cfg_gh86)
-        kwargs_gh86 = build_pipeline_kwargs(state, cfg_gh86)
-        result_gh86 = run_pipeline(**kwargs_gh86)
+        run_config_gh86, extra_kwargs_gh86 = build_pipeline_kwargs(state, cfg_gh86)
+        # run_pipeline(cfg: PathConfig, run: RunConfig, **kwargs)
+        _gh86_extra = {k: v for k, v in extra_kwargs_gh86.items() if k != "cfg"}
+        result_gh86 = run_pipeline(cfg_gh86, run_config_gh86, **_gh86_extra)
         gh86_report["library_populated"] = bool(result_gh86.get("per_group"))
         _gh86_step("gh86_populated_pipeline", gh86_report["library_populated"],
                     f"groups={result_gh86.get('groups', 0)}")
@@ -593,8 +595,10 @@ def main() -> int:
         pp_gh90.ensure_all()
         cfg_gh90 = build_path_config_from_gui_state(state)
         ensure_managed_directories(cfg_gh90)
-        kwargs_gh90 = build_pipeline_kwargs(state, cfg_gh90)
-        result_gh90 = run_pipeline(**kwargs_gh90)
+        run_config_gh90, extra_kwargs_gh90 = build_pipeline_kwargs(state, cfg_gh90)
+        # run_pipeline(cfg: PathConfig, run: RunConfig, **kwargs)
+        _gh90_extra = {k: v for k, v in extra_kwargs_gh90.items() if k != "cfg"}
+        result_gh90 = run_pipeline(cfg_gh90, run_config_gh90, **_gh90_extra)
         pipeline_ok = bool(result_gh90.get("per_group"))
         _gh90_step("gh90_pipeline_populated", pipeline_ok, f"groups={result_gh90.get('groups', 0)}")
 

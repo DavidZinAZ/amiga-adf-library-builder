@@ -366,6 +366,7 @@ class MainWindow(QMainWindow):
         self._run_in_progress = False
         self._run_mode = "build"
         self._worker = None
+        self._thread = None
         self._cancel_event = None
         self._state = "IDLE"  # IDLE, RUNNING, CANCELLING, JOINING
         # (Issue #18) Re-apply the maximized flag now that the window is fully
