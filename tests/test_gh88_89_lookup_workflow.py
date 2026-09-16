@@ -897,6 +897,110 @@ class TestExplicitStatesPreserved:
         assert merged[0]["confidence"] == 0.93
 
 
+# --- GH-157 DEF-9N: real-construction regression (production dialog-open) ----
+
+
+class TestDialogRealConstruction:
+    """DEF-9N P0: production ``PreviewWidget._on_lookup`` passes a REAL
+    ``StagedReleaseEntry`` into ``UnifiedLookupDialog``. The entry has no
+    ``filename`` attribute, so the old ``_build_ui`` read raised
+    ``AttributeError`` and the dialog could never open on Linux or Windows.
+
+    These tests MUST construct through the real ``__init__`` -> ``_build_ui``
+    -> ``_populate_identity`` -> ``_run_lookup`` path (never ``__new__``).
+    The only things stubbed are ``_UnifiedLookupWorker`` (no background
+    thread / network) and ``resolve_config`` (deterministic DEF-8 fallback
+    LookupContext path).
+    """
+
+    @staticmethod
+    def _construct(monkeypatch, adf_files, mode="online"):
+        from PySide6.QtWidgets import QApplication
+
+        import amiga_adf_library_builder.gui.preview_widget as pw
+        from amiga_adf_library_builder.models import StagedReleaseEntry
+
+        QApplication.instance() or QApplication([])  # noqa: F841
+
+        class _StubWorker:
+            """Interface-compatible stand-in for ``_UnifiedLookupWorker``."""
+
+            class _NullSignal:
+                def connect(self, _cb):
+                    pass
+
+            candidates_ready = _NullSignal()
+            errors_update = _NullSignal()
+
+            def __init__(self, ctx, parent=None):
+                self._ctx = ctx
+
+            def start(self):
+                pass
+
+            def isRunning(self):
+                return False
+
+            def quit(self):
+                pass
+
+            def wait(self):
+                return True
+
+        def _no_config():
+            raise RuntimeError("test: config resolution disabled")
+
+        monkeypatch.setattr(pw, "_UnifiedLookupWorker", _StubWorker)
+        monkeypatch.setattr(
+            "amiga_adf_library_builder.paths.resolve_config", _no_config
+        )
+
+        entry = StagedReleaseEntry(
+            release_key="rk-gh157-def9n",
+            title="Def9n Game",
+            edition=None,
+            group=None,
+            chipset=None,
+            language=None,
+            adf_files=list(adf_files),
+        )
+        return pw.UnifiedLookupDialog(entry, mode)
+
+    def test_single_adf_real_entry_constructs(self, tmp_path, monkeypatch):
+        disc = tmp_path / "discs" / "game.adf"
+        disc.parent.mkdir(parents=True)
+        disc.write_bytes(b"\x00" * 64)
+        dialog = self._construct(monkeypatch, [str(disc)])
+        assert dialog._lbl_filename.text() == "game.adf"
+        assert dialog._lbl_filename.toolTip() == str(disc)
+        assert dialog._lbl_title.text() == "Def9n Game"
+        assert dialog.windowTitle() == "Unified Lookup: Def9n Game"
+
+    def test_multi_adf_deterministic_selection(self, tmp_path, monkeypatch):
+        discs = [
+            tmp_path / "game_disk1.adf",
+            tmp_path / "game_disk2.adf",
+            tmp_path / "game_disk3.adf",
+        ]
+        for d in discs:
+            d.write_bytes(b"\x00" * 8)
+        dialog_a = self._construct(monkeypatch, [str(x) for x in discs])
+        text_a = dialog_a._lbl_filename.text()
+        dialog_b = self._construct(monkeypatch, [str(x) for x in reversed(discs)])
+        text_b = dialog_b._lbl_filename.text()
+        # Same release content, different insertion order => identical display.
+        assert text_a == text_b == "game_disk1.adf (+2 more)"
+        assert dialog_a._lbl_filename.toolTip().splitlines() == [
+            str(x) for x in discs
+        ]
+
+    def test_empty_adf_files_explicit_fallback(self, monkeypatch):
+        dialog = self._construct(monkeypatch, [])
+        text = dialog._lbl_filename.text()
+        assert "rk-gh157-def9n" in text
+        assert "no ADF files staged" in text
+
+
 if __name__ == "__main__":  # pragma: no cover
     import sys
     sys.exit(pytest.main([__file__, "-v"]))

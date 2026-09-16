@@ -203,6 +203,26 @@ class _UnifiedLookupWorker(QThread):
             self.errors_update.emit(f"Lookup failed: {exc}")
 
 
+def _selected_adf_display(entry: "StagedReleaseEntry") -> "tuple[str, str]":
+    """Derive the (text, tooltip) shown for the selected ADF in the dialog.
+
+    DEF-9N (GH-157): ``StagedReleaseEntry`` has no ``filename`` attribute and
+    the dialog must not invent one. The authoritative on-disk identities are
+    ``entry.adf_files``; sorting them makes the display independent of list
+    insertion order. Multi-ADF releases deterministically show the first
+    (sorted) disk's basename plus an explicit remainder count, with the full
+    sorted paths as tooltip. An empty file list falls back to the release key
+    so the dialog still truthfully names the selected release.
+    """
+    files = sorted(entry.adf_files or [])
+    if not files:
+        return f"{entry.release_key} (no ADF files staged)", ""
+    primary_name = Path(files[0]).name
+    remainder = len(files) - 1
+    text = f"{primary_name} (+{remainder} more)" if remainder else primary_name
+    return text, "\n".join(files)
+
+
 class UnifiedLookupDialog(QDialog):
     """Tabbed lookup dialog that ranks all candidates from online + offline sources.
 
@@ -242,7 +262,12 @@ class UnifiedLookupDialog(QDialog):
         # Identity block
         id_box = QGroupBox("Selected Release")
         id_l = QFormLayout(id_box)
-        self._lbl_filename = QLabel(self._entry.filename)
+        # DEF-9N: derive the displayed ADF name from authoritative staged
+        # data (entry.adf_files / release_key); StagedReleaseEntry has no
+        # filename attribute and the real production entry must construct.
+        _file_text, _file_tooltip = _selected_adf_display(self._entry)
+        self._lbl_filename = QLabel(_file_text)
+        self._lbl_filename.setToolTip(_file_tooltip)
         self._lbl_title = QLabel(self._entry.title or "(none)")
         self._lbl_hashes = QLabel("(none)")
         self._lbl_size = QLabel("")
