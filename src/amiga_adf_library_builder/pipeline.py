@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 from . import artwork as artwork_mod
 from . import catalog, enrich, exporter, grouper, quarantine, scanner
 from . import diagnostics
+from .metadata_source import MetadataSourceManager
 from .enrich import VERIFIED_ARTWORK_WIDTH, VERIFIED_ARTWORK_HEIGHT
 from .exporter_guard import export_gate_open
 from .logging_utils import redact
@@ -314,6 +315,15 @@ def run_pipeline(
                 hasheous_provider.discover()
         except Exception:  # provider failure must not break the pipeline
             hasheous_provider = None
+    # (GH-164 RC4) Optional DAT/local metadata source manager.
+    metadata_source_manager = None
+    if metadata_cache_dir:
+        try:
+            metadata_source_manager = MetadataSourceManager(
+                metadata_cache_dir / "metadata_sources.db"
+            )
+        except Exception:
+            metadata_source_manager = None
     # Optional IGDB metadata/artwork provider. OPTIONAL and DISABLED by
     # default; only built when an [igdb] config is present AND enabled.
     # The provider uses title + Amiga platform search (not hash-first).
@@ -445,6 +455,7 @@ def run_pipeline(
         include_artwork=include_artwork,
         activity=activity,
         cancel_event=cancel_event,
+        metadata_source_manager=metadata_source_manager,
     )
     _act("Metadata and artwork preparation complete.")
 
@@ -507,8 +518,14 @@ def run_pipeline(
 
     # Phase 6: quarantine routing for flagged groups.
     _act("Checking for releases that need review…")
+    # (GH-164 RC3) Collect review_items from enrich results so they
+    # persist through to the review/ directory and appear in review_routed.
+    _all_review_items = []
+    for _er in enrich_results:
+        _all_review_items.extend(getattr(_er, "review_items", []))
     quarantine_summary = quarantine.route_quarantine(
-        groups, review_dir=review_dir, unknown_dir=unknown_dir, scans=scan_map
+        groups, review_dir=review_dir, unknown_dir=unknown_dir, scans=scan_map,
+        review_items=_all_review_items,
     )
     _act(
         f"Sent {len(quarantine_summary['review'])} release(s) to review; "
@@ -764,6 +781,36 @@ def run_pipeline(
         ],
         "enrichment_notes": [note for r in enrich_results for note in r.notes],
         "review_routed": quarantine_summary["review"],
+        "review_routed_count": len(quarantine_summary["review"]),
+        "review_items_count": len(_all_review_items),
+        # (GH-164 RC7) Result semantics: split identified vs unresolved
+        "identified": [
+            r.metadata_path or r.nfo_path
+            for r in enrich_results
+            if r.metadata_confidence and r.metadata_confidence >= 0.90
+        ],
+        "unresolved": [
+            str(g.release_key) for g, r in zip(groups, enrich_results)
+            if not r.metadata_path and not r.nfo_path
+            and not r.artwork_master
+        ],
+        "review_required": [
+            str(g.release_key) for g, r in zip(groups, enrich_results)
+            if r.needs_manual_review or r.review_items
+        ],
+        "provider_failures": provider_diagnostics.get("totals", {}).get("error", 0),
+        "dat_failures": len(_all_review_items),
+        # (GH-164 RC7) Split between authoritative and fuzzy matches
+        "exact_or_authoritative": [
+            str(g.release_key) for g, r in zip(groups, enrich_results)
+            if r.metadata_confidence and r.metadata_confidence >= 0.90
+            or r.artwork_master and r.artwork_resized
+        ],
+        "fuzzy_or_manual": [
+            str(g.release_key) for g, r in zip(groups, enrich_results)
+            if r.metadata_confidence and r.metadata_confidence < 0.90
+            or (r.needs_manual_review and not r.metadata_confidence)
+        ],
         "unknown_routed": quarantine_summary["unknown"],
         "applied_approvals": _applied,
         "unmatched_approvals": _unmatched,

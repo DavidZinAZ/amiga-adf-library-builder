@@ -279,6 +279,9 @@ class LocalMediaConfig:
     auto_match_threshold: float = DEFAULT_AUTO_MATCH_THRESHOLD
     review_threshold: float = DEFAULT_REVIEW_THRESHOLD
     near_tie_difference: float = DEFAULT_NEAR_TIE_DIFFERENCE
+    # GH-164 RC6: emit per-candidate audit trail (disabled by default;
+    # group-level summaries used instead to prevent ~9,600 events/run).
+    detailed_diagnostics: bool = False
     media_roots: tuple[MediaRoot, ...] = ()
     manual_roots: tuple[ManualRoot, ...] = ()
 
@@ -322,6 +325,7 @@ class LocalMediaConfig:
             near_tie = float(raw.get("near_tie_difference", DEFAULT_NEAR_TIE_DIFFERENCE))
         except (TypeError, ValueError):
             near_tie = DEFAULT_NEAR_TIE_DIFFERENCE
+        detailed_diagnostics = bool(raw.get("detailed_diagnostics", False))
         # Validate: review_threshold < auto_match_threshold
         if review >= auto_match:
             # Swap to sensible defaults rather than silently accepting invalid config
@@ -337,6 +341,7 @@ class LocalMediaConfig:
             auto_match_threshold=auto_match,
             review_threshold=review,
             near_tie_difference=near_tie,
+            detailed_diagnostics=detailed_diagnostics,
             media_roots=_parse_media_roots(raw.get("media_roots")),
             manual_roots=_parse_manual_roots(raw.get("manual_roots")),
         )
@@ -620,6 +625,18 @@ class ManualReviewItem:
 def _norm_text(text: str) -> str:
     """Lowercased, punctuation/space/underscore stripped form for comparison."""
     return re.sub(r"[^a-z0-9]", "", (text or "").lower())
+
+
+def _canonical_norm(title: str) -> str:
+    """Canonical title normalization including article-movement and
+    disambiguator stripping (GH-164 C1).
+
+    Applies the shared :func:`canonical_title` from title_norm,
+    then reduces to the same alnum-only key as :func:`_norm_text`
+    so results are directly comparable with existing identity keys.
+    """
+    from .title_norm import canonical_title as _ct
+    return _norm_text(_ct(title))
 
 
 # LaunchBox appends a trailing image ordinal to the *filename* (not the game
@@ -1183,6 +1200,38 @@ class LocalMediaProvider:
 
     # -- discovery (read-only) ------------------------------------------------
 
+    def _add_to_index(self, cand: LocalMediaCandidate) -> None:
+        """Populate dict indexes for GH-164 RC6 O(1) candidate lookup."""
+        from .title_norm import canonical_title as _ct
+        ci = self._cand_identities(cand)
+        # Index by norm_stem
+        if ci.get("norm_stem"):
+            self._norm_stem_index.setdefault(ci["norm_stem"], []).append(cand)
+        # Index by norm_folder
+        if ci.get("norm_folder"):
+            self._norm_folder_index.setdefault(ci["norm_folder"], []).append(cand)
+        # Index by norm_ordinal_stem
+        if ci.get("norm_ordinal_stem"):
+            self._norm_ordinal_stem_index.setdefault(ci["norm_ordinal_stem"], []).append(cand)
+        # Index by canonical base stem
+        if ci.get("norm_base_stem"):
+            self._norm_base_stem_index.setdefault(ci["norm_base_stem"], []).append(cand)
+
+    def _lookup_candidates_fast(self, title: str) -> list:
+        """Quick lookup of candidates by canonical norm stem.
+
+        Returns a shortlist for fuzzy fallback or empty list if no index hit.
+        """
+        key = _ct(title) if title else ""
+        if not key:
+            return []
+        for idx_name in ("_norm_stem_index", "_norm_folder_index",
+                         "_norm_ordinal_stem_index", "_norm_base_stem_index"):
+            idx = getattr(self, idx_name, {})
+            if key in idx:
+                return idx[key]
+        return []
+
     def discover(self) -> int:
         """Walk every configured root and build the candidate index.
 
@@ -1197,6 +1246,11 @@ class LocalMediaProvider:
         """
         self._index = []
         self._root_order = {}
+        # GH-164 RC6: dict indexes for O(1) candidate lookup
+        self._norm_stem_index: dict[str, list] = {}
+        self._norm_folder_index: dict[str, list] = {}
+        self._norm_ordinal_stem_index: dict[str, list] = {}
+        self._norm_base_stem_index: dict[str, list] = {}
         for _i, root in enumerate(self.config.roots):
             self._root_order[str(Path(root))] = _i
         for _i, media_root in enumerate(self.config.media_roots):
@@ -1211,6 +1265,7 @@ class LocalMediaProvider:
                     categories=self.config.preferred_image_types,
                 ):
                     self._index.append(cand)
+                    self._add_to_index(cand)
             except OSError:
                 # A single unreadable root must not abort the whole run.
                 continue
@@ -1224,6 +1279,7 @@ class LocalMediaProvider:
                     categories=(media_root.asset_type,),
                 ):
                     self._index.append(cand)
+                    self._add_to_index(cand)
             except OSError:
                 # A single unreadable root must not abort the whole run.
                 continue
@@ -1549,6 +1605,7 @@ class LocalMediaProvider:
         return {
             "title": title,
             "norm_title": _norm_text(title),
+            "canonical_norm_title": _canonical_norm(title),
             "norm_base_title": _norm_text(base_title),
             "disk_stems": [s for s in disk_stems if s],
             "norm_disk_stems": {_norm_text(s) for s in disk_stems if s},
@@ -1576,7 +1633,7 @@ class LocalMediaProvider:
             "norm_base_folder": cand.norm_base_folder,
             "folder_chain": folder_chain,
             "ordinal_chain": ordinal_chain,
-            "norm_base_chain": [_norm_text(_strip_release_tags(n)) for n in folder_chain],
+            "norm_base_chain": [_canonical_norm(n) for n in folder_chain],
         }
 
     def _score(self, cand: LocalMediaCandidate, identities: dict):
@@ -1608,6 +1665,16 @@ class LocalMediaProvider:
             or identities["norm_title"] in chain
         ):
             return MatchMethod.NORMALIZED_TITLE, 0.99
+        # 3b) canonical normalization with article movement and
+        # disambiguator stripping (GH-164 C1).
+        # "The Untouchables" vs "Untouchables, The" now matches at 0.99
+        # via canonical equivalence instead of fuzzy 0.80.
+        if identities["canonical_norm_title"] and (
+            ci.get("norm_stem", "") == identities["canonical_norm_title"]
+            or ci.get("norm_folder", "") == identities["canonical_norm_title"]
+            or identities["canonical_norm_title"] in ci.get("norm_base_chain", [])
+        ):
+            return MatchMethod.NORMALIZED_TITLE, 0.99
         # 3b) normalized title WITH the trailing LaunchBox ordinal stripped
         # (flat / region-nested layouts name the game at the file or folder
         # level as ``Bubble Bobble-01`` / ``Bubble Bobble-01``). Only the
@@ -1619,6 +1686,14 @@ class LocalMediaProvider:
             ci["norm_ordinal_stem"] == identities["norm_title"]
             or ci["norm_ordinal_folder"] == identities["norm_title"]
             or identities["norm_title"] in ci["ordinal_chain"]
+        ):
+            return MatchMethod.NORMALIZED_TITLE, 0.99
+        # 3c) canonical-normalized ordinal-stripped comparison with
+        # article movement (GH-164 C1).
+        if identities["canonical_norm_title"] and (
+            ci.get("norm_ordinal_stem", "") == identities["canonical_norm_title"]
+            or ci.get("norm_ordinal_folder", "") == identities["canonical_norm_title"]
+            or identities["canonical_norm_title"] in ci.get("ordinal_chain", [])
         ):
             return MatchMethod.NORMALIZED_TITLE, 0.99
         # 4) canonical-title reuse across cracks/trainers/alt-dumps/language/

@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from .manual_approvals import validate_source_url
+from .title_norm import canonical_title
 from .utils import now_iso as utc_now
 
 USER_AGENT = f"AmigaADFLibraryBuilder/{__import__('amiga_adf_library_builder._version', fromlist=['__version__']).__version__} (+preservation metadata client)"
@@ -309,9 +310,13 @@ _PERSON_PHRASES = (
     "the son of", "the daughter of", "singer", "filmmaker", "painter",
 )
 # Phrasing that marks a generic series/franchise/disambiguation page.
+# Restricted to true disambiguation markers only (GH-164 RC1).
+# Removed generic franchise phrasing ("franchise", "series of", "series is")
+# which false-fired on legitimate game descriptions (e.g. "in the series of").
+# "this article is about" / "this page is about" fire only when the topic
+# differs from the requested title (checked in validate_metadata_relevance).
 _DISAMBIGUATION_PHRASES = (
-    "may refer to", "can refer to", "refers to", "disambiguation", "franchise",
-    "series of", "series is", "this article is about", "this page is about",
+    "may refer to", "can refer to", "refers to", "disambiguation page",
 )
 
 
@@ -350,7 +355,7 @@ def validate_metadata_relevance(requested_title: str, record: "MetadataRecord",
     """
     evidence: list[str] = []
     target = _norm(requested_title)
-    candidate = _norm(record.canonical_title or requested_title)
+    candidate = _norm(canonical_title(record.canonical_title or requested_title))
     ratio = SequenceMatcher(None, target, candidate).ratio() if (target or candidate) else 0.0
 
     # --- Strong positive: canonical identity (possibly with edition suffix) ---
@@ -1325,11 +1330,29 @@ def lookup_metadata(title: str, *, cache_dir: Path, curated_dir: Path,
         nonlocal accepted
         _log(f"Querying {label}…")
         candidate = None
+        outcome = "not_configured"
         try:
             candidate = lookup()
-        except Exception:
+            outcome = "candidate_returned"
+        except Exception as exc:
+            # Classify the exception type for diagnostics
+            exc_name = type(exc).__name__
+            if "auth" in exc_name.lower() or "credentials" in str(exc).lower():
+                outcome = "auth_error"
+            elif "request" in exc_name.lower() or "connection" in exc_name.lower() or "timeout" in exc_name.lower():
+                outcome = "request_error"
+            else:
+                outcome = "parse_error"
             candidate = None
         if candidate is None:
+            relevance_events.append({
+                "provider": label,
+                "canonical_title": "",
+                "category": "not_found",
+                "confidence": 0.0,
+                "reason": outcome,
+                "evidence": [outcome],
+            })
             return
         decision = validate_metadata_relevance(title, candidate, group=group)
         relevance_events.append({

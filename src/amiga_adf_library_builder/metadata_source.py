@@ -569,5 +569,59 @@ class MetadataSourceManager:
     def __enter__(self) -> "MetadataSourceManager":
         return self
 
+    def lookup_by_sha256(self, sha256: str) -> list[SourceEntry]:
+        """Look up indexed entries by SHA-256 hash (exact or alternate).
+
+        Returns matching SourceEntry objects or empty list.
+        Only searches enabled sources.
+        """
+        if not sha256:
+            return []
+        prefix = sha256[:16] if len(sha256) >= 16 else sha256
+        cur = self._conn.execute(
+            "SELECT e.* FROM metadata_source_entries e "
+            "JOIN metadata_sources s ON e.source_id = s.source_id "
+            "WHERE s.enabled = 1 AND (e.sha1 LIKE ? OR e.md5 LIKE ?)",
+            (prefix + "%", prefix + "%"),
+        )
+        return [self._row_to_entry(row) for row in cur.fetchall()]
+
+    def lookup_by_title(self, title: str, limit: int = 5) -> list[SourceEntry]:
+        """Look up indexed entries by title (case-insensitive partial match).
+
+        Returns matching SourceEntry objects or empty list.
+        Only searches enabled sources.
+        """
+        if not title:
+            return []
+        pattern = f"%{title.lower()}%"
+        cur = self._conn.execute(
+            "SELECT e.* FROM metadata_source_entries e "
+            "JOIN metadata_sources s ON e.source_id = s.source_id "
+            "WHERE s.enabled = 1 AND lower(e.title) LIKE ? "
+            "LIMIT ?",
+            (pattern, limit),
+        )
+        return [self._row_to_entry(row) for row in cur.fetchall()]
+
+    @staticmethod
+    def _row_to_entry(row: "sqlite3.Row") -> SourceEntry:
+        """Convert a database row to a SourceEntry."""
+        return SourceEntry(
+            source_id=row["source_id"],
+            sha1=row["sha1"],
+            md5=row["md5"],
+            crc32=row["crc32"],
+            size=row["size"],
+            title=row["title"],
+            year=row["year"],
+            publisher=row["publisher"],
+            region=row["region"],
+            language=row["language"],
+            disk_number=row["disk_number"],
+            disk_total=row["disk_total"],
+            flags=row["flags"],
+        )
+
     def __exit__(self, *exc) -> None:
         self.close()

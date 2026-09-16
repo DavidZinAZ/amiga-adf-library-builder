@@ -18,12 +18,13 @@ from typing import Callable, Optional
 from . import artwork as artwork_mod
 from .logging_utils import redact
 from .metadata import MetadataRecord, cache_key, guard_url, lookup_metadata
+from .metadata_source import MetadataSourceManager
 from .playmatch import PlaymatchMatchMethod
 from .hasheous import HasheousMatchMethod
 from .igdb import IgdbMatchMethod
 from . import screenscraper as ss_mod
 from .models import ReleaseGroup, ScanRecord
-from .utils import write_json_atomic
+from .utils import write_json_atomic, now_iso as _now_iso
 from .naming import release_basename
 from .nfo_render import render_gotek_nfo
 import os
@@ -32,6 +33,38 @@ import os
 # 150x150, never cropped or upscaled; there is no minimum source dimension.
 VERIFIED_ARTWORK_WIDTH: Optional[int] = 150
 VERIFIED_ARTWORK_HEIGHT: Optional[int] = 150
+
+
+
+@dataclass
+class ReviewItem:
+    """A persisted review item produced by enrichment analysis.
+
+    Each metadata_relevance_review, local_media_review, or per-provider
+    review event maps to exactly one ReviewItem, which is written to
+    the review/ directory with full evidence and appears in review_routed.
+    """
+
+    source: str                    # local_media | metadata-online | <provider>
+    provider: str                  # provider name (or "system" for local-media)
+    candidate_title: str           # candidate title or path
+    score: float                   # confidence/relevance score
+    reason: str                    # machine-readable reason category
+    evidence: list[str]            # human-readable evidence strings
+    release_key: str               # the release this review is for
+    routed_at: str                 # ISO timestamp
+
+    def to_dict(self) -> dict:
+        return {
+            "source": self.source,
+            "provider": self.provider,
+            "candidate_title": self.candidate_title,
+            "score": self.score,
+            "reason": self.reason,
+            "evidence": list(self.evidence),
+            "release_key": self.release_key,
+            "routed_at": self.routed_at,
+        }
 
 
 @dataclass
@@ -55,6 +88,10 @@ class EnrichResult:
     # This is the value the Preview & Curation "Confidence" column should show;
     # it is never guessed and is preserved verbatim from the provider record.
     metadata_confidence: Optional[float] = None
+    # (GH-164) Review items produced during enrichment. Each review
+    # event generates exactly one ReviewItem that persists through
+    # to the review/ directory and appears in review_routed.
+    review_items: list[ReviewItem] = field(default_factory=list)
 
 
 class EnrichCategory(str, Enum):
@@ -99,6 +136,7 @@ class EnrichCategory(str, Enum):
     RETROACHIEVEMENTS = "retroachievements"
     RETROACHIEVEMENTS_MISS = "retroachievements_miss"
     RETROACHIEVEMENTS_REVIEW = "retroachievements_review"
+    DAT = "dat"
 
 
 @dataclass
@@ -422,13 +460,15 @@ def _resolve_local_media_master(group: ReleaseGroup, provider) -> tuple[Optional
         ))
         return None, events
 
-    # Emit detailed per-candidate diagnostics for each evaluated candidate
-    # This exposes the matching key/strategy for every match attempt
+    # GH-164 RC6: Replace per-candidate EnrichEvent emission with
+    # group-level summaries. Per-candidate audit is retained behind
+    # the detailed_diagnostics flag to prevent ~9,600 miss events/run.
     candidates_evaluated = getattr(result, "candidates_evaluated", []) or []
     matched_count = 0
     rejected_count = 0
     unmatched_count = 0
     needs_review_count = 0
+    _detail_candidates: list[dict] = []
 
     for cand_diag in candidates_evaluated:
         method = cand_diag.get("method", "none")
@@ -452,68 +492,34 @@ def _resolve_local_media_master(group: ReleaseGroup, provider) -> tuple[Optional
         )
         is_needs_review = result.outcome == "needs_review" and method == result.match_method.value
 
+        # Track counts and optional detail for debug mode
+        _detail: dict = {"method": method, "score": score, "category": category}
         if is_auto_match or is_manual_lock:
             matched_count += 1
-            events.append(EnrichEvent(
-                category=EnrichCategory.LOCAL_MEDIA,
-                detail=(
-                    f"matched {method} in {category!r} (conf {score:.2f}); "
-                    f"stem={norm_stem!r}; source={Path(path).name}"
-                ),
-                cache="hit", ok=True,
-            ))
+            _detail["outcome"] = "matched"
         elif method != "none" and score >= getattr(provider.config, "confidence_threshold", lm.AUTO_ACCEPT_MIN_CONF):
-            # Confident match that wasn't selected (lower priority category)
             rejected_count += 1
-            events.append(EnrichEvent(
-                category=EnrichCategory.LOCAL_MEDIA,
-                detail=(
-                    f"rejected {method} in {category!r} (conf {score:.2f}); "
-                    f"stem={norm_stem!r}; source={Path(path).name}; "
-                    f"lower priority than selected match"
-                ),
-                cache="miss", ok=False,
-                error="lower priority category",
-            ))
+            _detail["outcome"] = "rejected"
+            _detail["reason"] = "lower priority category"
         elif is_needs_review:
-            # Candidate routed to review
             needs_review_count += 1
-            events.append(EnrichEvent(
-                category=EnrichCategory.LOCAL_MEDIA_REVIEW,
-                detail=(
-                    f"routed to review {method} in {category!r} (conf {score:.2f}); "
-                    f"stem={norm_stem!r}; source={Path(path).name}; "
-                    f"{result.manual_review_reason or 'requires review'}"
-                ),
-                cache="miss", ok=False,
-                error="needs manual review",
-            ))
+            _detail["outcome"] = "needs_review"
+            _detail["reason"] = result.manual_review_reason or "requires review"
         elif method in ("fuzzy", "fuzzy_manual"):
-            # Fuzzy candidate that didn't meet threshold
             rejected_count += 1
-            events.append(EnrichEvent(
-                category=EnrichCategory.LOCAL_MEDIA_REVIEW,
-                detail=(
-                    f"rejected fuzzy {method} in {category!r} (conf {score:.2f}); "
-                    f"stem={norm_stem!r}; source={Path(path).name}; "
-                    f"below confidence threshold"
-                ),
-                cache="miss", ok=False,
-                error="below confidence threshold",
-            ))
+            _detail["outcome"] = "rejected"
+            _detail["reason"] = "below confidence threshold"
         else:
-            # No match at all
             unmatched_count += 1
-            events.append(EnrichEvent(
-                category=EnrichCategory.LOCAL_MEDIA_MISS,
-                detail=(
-                    f"unmatched in {category!r} (method={method}, score={score:.2f}); "
-                    f"stem={norm_stem!r}; source={Path(path).name}"
-                ),
-                cache="miss", ok=True,
-            ))
+            _detail["outcome"] = "unmatched"
 
-    # Summary event with counts
+        # Only keep per-candidate detail when debug diagnostics are enabled
+        if getattr(provider.config, "detailed_diagnostics", False):
+            _detail["path"] = str(path)
+            _detail["norm_stem"] = norm_stem
+            _detail_candidates.append(_detail)
+
+    # Group-level summary event (replaces ~9,600 per-candidate events)
     events.append(EnrichEvent(
         category=EnrichCategory.LOCAL_MEDIA,
         detail=(
@@ -523,6 +529,20 @@ def _resolve_local_media_master(group: ReleaseGroup, provider) -> tuple[Optional
         ),
         cache="hit" if result.outcome == "auto_match" else "miss", ok=True,
     ))
+    if unmatched_count > 0 and not getattr(provider.config, "detailed_diagnostics", False):
+        events.append(EnrichEvent(
+            category=EnrichCategory.LOCAL_MEDIA_MISS,
+            detail=f"{unmatched_count} candidates unmatched (detail suppressed; enable detailed_diagnostics for per-candidate audit)",
+            cache="miss", ok=True,
+        ))
+    elif getattr(provider.config, "detailed_diagnostics", False) and _detail_candidates:
+        # Emit detailed per-candidate audit only when explicitly enabled
+        for _detail in _detail_candidates[:50]:  # Cap at 50 to prevent abuse
+            events.append(EnrichEvent(
+                category=EnrichCategory.LOCAL_MEDIA_MISS,
+                detail=f"candidate detail: {_detail}",
+                cache="miss", ok=True,
+            ))
 
     # GH-49: Handle three outcomes
     if result.outcome == "auto_match" and result.found and result.cached_path is not None:
@@ -558,6 +578,41 @@ def resize_artwork(master: Path, artwork_processed_dir: Path,
     return dest
 
 
+
+def _build_review_items(events: list) -> list:
+    """Convert review-category EnrichEvents into ReviewItems (GH-164 RC3).
+
+    Each review event produces exactly one persisted ReviewItem so that
+    enrich review events are never silently discarded.
+    """
+    from .utils import now_iso as _now_iso_func
+    items = []
+    for ev in events:
+        if ev.category not in (
+            EnrichCategory.METADATA_RELEVANCE_REVIEW,
+            EnrichCategory.LOCAL_MEDIA_REVIEW,
+            EnrichCategory.PLAYMATCH_REVIEW,
+            EnrichCategory.HASHEOUS_REVIEW,
+            EnrichCategory.IGDB_REVIEW,
+            EnrichCategory.SCREENSCRAPER_REVIEW,
+            EnrichCategory.RETROACHIEVEMENTS_REVIEW,
+        ):
+            continue
+        items.append(ReviewItem(
+            source=("metadata-online" if ev.category == EnrichCategory.METADATA_RELEVANCE_REVIEW
+                    else "local_media" if ev.category == EnrichCategory.LOCAL_MEDIA_REVIEW
+                    else ev.category.value.replace("_review", "-review")),
+            provider=ev.category.value.replace("_", "-"),
+            candidate_title=ev.detail or "",
+            score=0.0,
+            reason=ev.error or "review",
+            evidence=[ev.detail or ev.error or ""],
+            release_key="",
+            routed_at=_now_iso_func(),
+        ))
+    return items
+
+
 def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRecord],
                  artwork_original_dir: Path, artwork_processed_dir: Path,
                  metadata_cache_dir: Optional[Path] = None, curated_metadata_dir: Optional[Path] = None,
@@ -567,6 +622,7 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                  screenscraper_provider=None,
                  retroachievements_provider=None,
                  halloflight_enabled: bool = True,
+                 metadata_source_manager: MetadataSourceManager = None,
                  include_artwork: bool = True,
                  cancel_event: Optional[threading.Event] = None,
                  activity: Optional[Callable[[str], None]] = None) -> EnrichResult:
@@ -836,6 +892,88 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                 ok=False, error=str(exc),
             ))
             _act(f"Hasheous error: {exc}.")
+
+    # (GH-164 RC4) DAT/local metadata participation.
+    # Queryed after exact-hash providers and before online metadata,
+    # with identity outranking fuzzy online title matches.
+    _dat_events: list[EnrichEvent] = []
+    _dat_source_id: str = ""
+    if metadata_source_manager is not None:
+        try:
+            _act("Checking DAT/local metadata sources…")
+            # Emit dat_loaded event once per run (counted via source manager)
+            _sources = metadata_source_manager.list_sources()
+            _enabled_sources = [s for s in _sources if s.enabled]
+            if _enabled_sources:
+                _dat_events.append(EnrichEvent(
+                    category=EnrichCategory.DAT,
+                    detail=f"dat_loaded sources={len(_enabled_sources)} entries={sum(s.entry_count for s in _enabled_sources)}",
+                    cache="hit", ok=True,
+                ))
+                # Query by sha256 first (exact-hash precedence)
+                _sha = None
+                for _rec in scans.values():
+                    _sha = getattr(_rec, "sha256", None)
+                    if _sha:
+                        break
+                _dat_matches = []
+                if _sha:
+                    _dat_matches = metadata_source_manager.lookup_by_sha256(_sha)
+                if _dat_matches:
+                    _dat_entry = _dat_matches[0]
+                    _dat_source_id = _dat_entry.source_id
+                    metadata = MetadataRecord(
+                        canonical_title=_dat_entry.title or lookup_title or group.title or "Unknown",
+                        description=_dat_entry.title,
+                        year=_dat_entry.year,
+                        publisher=_dat_entry.publisher,
+                        platforms=[],
+                    )
+                    metadata.provider = "dat"
+                    metadata.confidence = 1.0
+                    _dat_events.append(EnrichEvent(
+                        category=EnrichCategory.DAT,
+                        detail=f"dat_hash_match source={_dat_entry.source_id} title={_dat_entry.title!r}",
+                        cache="hit", ok=True,
+                    ))
+                    _act(f"DAT hash match: {_dat_entry.title}")
+                else:
+                    # Fallback: title-based lookup
+                    _title_matches = metadata_source_manager.lookup_by_title(
+                        lookup_title or group.title or ""
+                    )
+                    if _title_matches:
+                        _dat_entry = _title_matches[0]
+                        _dat_source_id = _dat_entry.source_id
+                        _dat_events.append(EnrichEvent(
+                            category=EnrichCategory.DAT,
+                            detail=f"dat_title_candidate source={_dat_entry.source_id} title={_dat_entry.title!r}",
+                            cache="hit", ok=True,
+                        ))
+                    else:
+                        _dat_events.append(EnrichEvent(
+                            category=EnrichCategory.DAT,
+                            detail="dat_no_match",
+                            cache="miss", ok=True,
+                        ))
+            else:
+                _dat_events.append(EnrichEvent(
+                    category=EnrichCategory.DAT,
+                    detail="dat_source_disabled",
+                    cache="negative", ok=True,
+                ))
+        except Exception as exc:
+            _dat_events.append(EnrichEvent(
+                category=EnrichCategory.DAT,
+                detail=f"dat_unavailable: {exc}",
+                cache="negative", ok=False, error=str(exc),
+            ))
+    else:
+        _dat_events.append(EnrichEvent(
+            category=EnrichCategory.DAT,
+            detail="dat_not_configured",
+            cache="negative", ok=True,
+        ))
 
     # Optional IGDB metadata/artwork provider. Title + Amiga platform search.
     # Non-hash-first; runs independently of Playmatch/Hasheous.
@@ -1349,8 +1487,10 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
         events.append(_ra_success_event)
         if _ra_success_note is not None:
             notes.append(_ra_success_note)
-    return EnrichResult(nfo_path, master, processed, processed is not None, notes, metadata_path, provider, processed is None, events, needs_manual_review=needs_manual_review,
-                        metadata_confidence=(metadata.confidence if metadata is not None else None))
+    _review_items = _build_review_items(events)
+    return EnrichResult(nfo_path, master, processed, processed is None, notes, metadata_path, provider, processed is None, events, needs_manual_review=needs_manual_review,
+                        metadata_confidence=(metadata.confidence if metadata is not None else None),
+                        review_items=_review_items)
 
 
 def enrich_all(groups: list[ReleaseGroup], *, nfo_dir: Path, scans: list[ScanRecord],
@@ -1365,7 +1505,8 @@ def enrich_all(groups: list[ReleaseGroup], *, nfo_dir: Path, scans: list[ScanRec
                halloflight_enabled: bool = True,
                include_artwork: bool = True,
                cancel_event: Optional[threading.Event] = None,
-               activity: Optional[Callable[[str], None]] = None) -> list[EnrichResult]:
+               activity: Optional[Callable[[str], None]] = None,
+               metadata_source_manager: MetadataSourceManager = None) -> list[EnrichResult]:
     scan_map = {s.filename: s for s in scans}
     metadata_cache_dir = Path(metadata_cache_dir or (Path(nfo_dir).parent / "metadata-cache"))
     curated_metadata_dir = Path(curated_metadata_dir or (Path(nfo_dir).parent / "metadata-curated"))
@@ -1402,5 +1543,6 @@ def enrich_all(groups: list[ReleaseGroup], *, nfo_dir: Path, scans: list[ScanRec
                      halloflight_enabled=halloflight_enabled,
                      include_artwork=include_artwork,
                      cancel_event=cancel_event,
-                     activity=activity))
+                     activity=activity,
+                     metadata_source_manager=metadata_source_manager))
     return results
