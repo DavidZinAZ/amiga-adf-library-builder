@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.19 — 2026-09-16
+
+- GH-164: Canonical title normalization, provider diagnostics, DAT/local metadata, review persistence.
+
 ## 0.2.18 — 2026-09-15
 
 ## 0.2.17 — 2026-09-15
