@@ -227,6 +227,32 @@ def _selected_adf_display(entry: "StagedReleaseEntry") -> "tuple[str, str]":
     return text, "\n".join(files)
 
 
+# (GH-170) Helper functions for artwork/NFO path extraction.
+
+import re as _re
+
+_ARTWORK_PROCESSED_RE = _re.compile(r"processed artwork:\s*(\S+)")
+_NFO_WROTE_RE = _re.compile(r"NFO written:\s*(\S+)")
+
+def _extract_processed_artwork(notes: str) -> str:
+    """Extract processed artwork path from Notes text."""
+    if not notes:
+        return ""
+    m = _ARTWORK_PROCESSED_RE.search(notes)
+    if m:
+        return m.group(1)
+    return ""
+
+def _extract_nfo_path(notes: str) -> str:
+    """Extract NFO path from Notes text."""
+    if not notes:
+        return ""
+    m = _NFO_WROTE_RE.search(notes)
+    if m:
+        return m.group(1)
+    return ""
+
+
 class UnifiedLookupDialog(QDialog):
     """Tabbed lookup dialog that ranks all candidates from online + offline sources.
 
@@ -1601,6 +1627,33 @@ class PreviewWidget(QWidget):
 
         menu.addSeparator()
 
+        # (GH-170 RC-E) Open actions for artwork, NFO, RTFM.
+        _artwork_path = getattr(self, "_artwork_path_for_open", None)
+        if _artwork_path and Path(_artwork_path).exists():
+            open_artwork = QAction("Open Artwork", self)
+            open_artwork.triggered.connect(
+                lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(_artwork_path)))
+            )
+            menu.addAction(open_artwork)
+
+        _nfo_path = getattr(self, "_nfo_path", None)
+        if _nfo_path and Path(_nfo_path).exists():
+            open_nfo = QAction("Open NFO", self)
+            open_nfo.triggered.connect(
+                lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(_nfo_path)))
+            )
+            menu.addAction(open_nfo)
+
+        _rtfm_paths = getattr(self, "_rtfm_paths", [])
+        if _rtfm_paths:
+            _first_rtfm = next((p for p in _rtfm_paths if Path(p).exists()), None)
+            if _first_rtfm:
+                open_rtfm = QAction("Open RTFM", self)
+                open_rtfm.triggered.connect(
+                    lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(_first_rtfm)))
+                )
+                menu.addAction(open_rtfm)
+
         # Show source
         show_source = QAction("Show Source", self)
         show_source.triggered.connect(self._on_show_source)
@@ -1645,7 +1698,19 @@ class PreviewWidget(QWidget):
             if artwork_str:
                 artwork_str += "; "
             artwork_str += f"Other: {', '.join(entry.artwork_other)}"
+        # (GH-170 RC-E) Fallback: check Notes for processed artwork path
+        # when the artwork field is empty but Notes records a processed path.
+        if not artwork_str:
+            _processed = _extract_processed_artwork(entry.notes)
+            if _processed:
+                artwork_str = f"Processed: {_processed}"
         self._detail_artwork.setText(artwork_str or "(none)")
+
+        # (GH-170 RC-E) Store extracted paths for Open actions.
+        self._artwork_path_for_open = _extract_processed_artwork(entry.notes) if not entry.artwork_front else entry.artwork_front
+        self._rtfm_paths = list(entry.rtfm_files) if entry.rtfm_files else []
+        # Also try to find NFO path from Notes.
+        self._nfo_path = _extract_nfo_path(entry.notes)
 
         rtfm_str = ""
         if entry.rtfm_files:
