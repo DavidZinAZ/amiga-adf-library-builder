@@ -1,0 +1,55 @@
+name: QA RTFM Windows qualification (GH-173)
+
+# Independent QA real-Windows qualification for the GH-173 manual/RTFM
+# pipeline. Builds the onedir artifact on windows-latest, then EXECUTES the
+# RTFM qualification driver to produce the operator's non-negotiable real-Windows
+# evidence: local manual end-to-end, online manual (RetroKit), restart
+# persistence, known titles, diagnostics, and automated regressions.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  qa-rtfm-windows:
+    name: Real Windows RTFM qualification (GH-173)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build + QA dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[gui]" pyinstaller pillow
+
+      - name: Build onedir portable app (real artifact)
+        run: python tools/build_windows.py --target onedir --clean
+
+      - name: Run real-Windows RTFM qualification driver
+        env:
+          QT_QPA_PLATFORM: offscreen
+          QA_GUI_BASE: "C:\\Users\\runneradmin\\Test Dir With Spaces\\lib"
+          QA_EXE: "dist/AmigaADFLibraryBuilder/AmigaADFLibraryBuilder.exe"
+          QA_REPORT_DIR: "qa-rtfm-windows-artifacts"
+        run: python tools/qa_rtfm_windows.py
+
+      - name: Upload RTFM QA artifacts (report + logs)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-rtfm-windows
+          path: |
+            qa-rtfm-windows-artifacts/
+            C:\Users\runneradmin\Test Dir With Spaces\lib\logs\
+          if-no-files-found: warn
