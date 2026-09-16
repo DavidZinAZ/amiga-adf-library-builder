@@ -214,6 +214,18 @@ def main() -> int:
 
     # ---- 3. Screenshot of the real window with the live log ----
     try:
+        # Select the real Diagnostics tab so the live log is visible in the capture.
+        from PySide6.QtWidgets import QTabWidget
+        diag_index = None
+        for tabs in win.findChildren(QTabWidget):
+            for i in range(tabs.count()):
+                if tabs.tabText(i) == "Diagnostics":
+                    diag_index = i
+        if diag_index is not None:
+            for tabs in win.findChildren(QTabWidget):
+                tabs.setCurrentIndex(diag_index)
+            app.processEvents()
+        _step("diagnostics_tab_selected", diag_index is not None, f"index={diag_index}")
         shots = base / "qa-gh78-live-activity"
         shots.mkdir(parents=True, exist_ok=True)
         p = shots / "gh78_diag.png"
