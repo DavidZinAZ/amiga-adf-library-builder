@@ -71,6 +71,5 @@ jobs:
           name: qa-windows-real-exec
           path: |
             qa-windows-artifacts/
-            C:\Users\runneradmin\GH78 Live Activity Dir With Spaces\qa-gh78-live-activity\
             C:\Users\runneradmin\Test Dir With Spaces\lib\logs\
           if-no-files-found: warn

@@ -232,6 +232,18 @@ def main() -> int:
     out.mkdir(parents=True, exist_ok=True)
     (out / "report.json").write_text(json.dumps(REPORT, indent=2))
     print("report:", out / "report.json", flush=True)
+    # upload-artifact@v4 rejects paths outside the workspace root: stage a
+    # copy into the checkout's qa-windows-artifacts/ for the upload step.
+    try:
+        stage = Path.cwd() / "qa-windows-artifacts" / "gh78"
+        stage.mkdir(parents=True, exist_ok=True)
+        (stage / "report.json").write_text(json.dumps(REPORT, indent=2))
+        src_png = out / "gh78_diag.png"
+        if src_png.exists():
+            (stage / "gh78_diag.png").write_bytes(src_png.read_bytes())
+        print("staged:", stage, flush=True)
+    except Exception as exc:
+        print("stage failed:", repr(exc), flush=True)
     all_ok = all(s["ok"] for s in REPORT["steps"]) and not REPORT["errors"]
     print("OVERALL:", "PASS" if all_ok else "FAIL", flush=True)
     return 0 if all_ok else 1
