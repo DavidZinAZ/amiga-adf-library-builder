@@ -1236,7 +1236,8 @@ def lookup_metadata(title: str, *, cache_dir: Path, curated_dir: Path,
                     opener: Optional[Callable[..., Any]] = None,
                     mobygames_enabled: bool = False,
                     mobygames_api_key_env: str = "MOBYGAMES_API_KEY",
-                    lemonamiga_enabled: bool = False
+                    lemonamiga_enabled: bool = False,
+                    activity: Optional[Callable[[str], None]] = None
                     ) -> tuple[Optional[MetadataRecord], str, list[dict]]:
     """Resolve metadata for ``title`` using the shared precedence chain.
 
@@ -1280,9 +1281,21 @@ def lookup_metadata(title: str, *, cache_dir: Path, curated_dir: Path,
     relevance_events: list[dict] = []
     accepted: Optional[MetadataRecord] = None
 
+    # Live activity hook for on-screen diagnostics. Matches the pattern used
+    # elsewhere in enrich_group(): an optional callable wrapped in try/except so
+    # logging failures never break metadata resolution.
+    def _log(msg: str) -> None:
+        if activity is None:
+            return
+        try:
+            activity(str(msg))
+        except Exception:
+            pass
+
     def _try_provider(label: str,
                       lookup) -> None:
         nonlocal accepted
+        _log(f"Querying {label}…")
         candidate = None
         try:
             candidate = lookup()
@@ -1300,6 +1313,7 @@ def lookup_metadata(title: str, *, cache_dir: Path, curated_dir: Path,
             "evidence": list(decision.evidence),
         })
         if decision.category == "accepted":
+            _log(f"{label}: accepted.")
             candidate.relevance_category = "accepted"
             candidate.relevance_confidence = decision.confidence
             candidate.relevance_evidence = list(decision.evidence)
