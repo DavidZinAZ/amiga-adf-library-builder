@@ -392,20 +392,24 @@ def _result_to_candidate(result: "LookupResult") -> list[dict]:
                     return "exact_hash"
                 return "normalized_title"
             if record is not None:
-                # Online: use actual provider/record evidence
+                # Online: use actual provider/record evidence.
+                # GH-157 re-QA: ``exact_hash`` is reserved for ACTUAL hash
+                # evidence. A ``MetadataRecord`` carries no hash, so a high
+                # provider confidence is a title-record match, never a hash
+                # match.
                 conf = record.confidence if record.confidence is not None else confidence
-                # Confidence of 1.0 with exact provider hit = exact
+                # High-confidence exact provider record hit
                 if conf >= 0.99:
-                    return "exact_hash"
+                    return "provider_record"
                 # Provider-specific confidence tiers
                 if conf >= 0.95:
-                    return "exact_hash"
+                    return "provider_record"
                 if conf >= 0.80:
                     return "normalized_title"
                 return "fuzzy_title"
             # Pure fallback (shouldn't happen for found/needs_review)
             if confidence >= 0.95:
-                return "exact_hash"
+                return "provider_record"
             if confidence >= 0.80:
                 return "normalized_title"
             return "fuzzy_title"
