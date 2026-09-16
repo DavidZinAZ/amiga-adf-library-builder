@@ -612,6 +612,7 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
             metadata, provider, relevance_events = lookup_metadata(
                 lookup_title, cache_dir=metadata_cache_dir,
                 curated_dir=curated_metadata_dir, refresh=refresh, group=group,
+                activity=activity,
             )
             # Surface online relevance fall-through decisions as structured
             # diagnostics (bounded: one event per rejected/reviewed candidate).
@@ -726,6 +727,7 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
     playmatch_result = None
     if playmatch_provider is not None:
         try:
+            _act("Trying playmatch identity resolver…")
             playmatch_result = playmatch_provider.resolve(group, scans=scans)
             if playmatch_result is not None:
                 if playmatch_result.found:
@@ -736,6 +738,7 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                                 f"provider_id={playmatch_result.provider_id}"),
                         ok=True,
                     )
+                    _act(f"Playmatch resolved identity (provider_id: {playmatch_result.provider_id}).")
                     if playmatch_result.provider_id:
                         _pm_success_note = (
                             f"playmatch provider_id: {playmatch_result.provider_id}"
@@ -748,8 +751,11 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                         ok=False, error=playmatch_result.manual_review_reason,
                     ))
                     notes.append("playmatch: routed to manual review")
+                    _act("Playmatch: routed to manual review.")
                 else:
                     _pm_te = getattr(playmatch_result, "transport_error", None)
+                    reason = f"transport error: {_pm_te}" if _pm_te else "no hash match"
+                    _act(f"Playmatch: no match ({reason}).")
                     events.append(EnrichEvent(
                         category=EnrichCategory.PLAYMATCH_MISS,
                         detail="playmatch: no identity match"
@@ -764,6 +770,7 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                 detail=f"playmatch resolve raised: {exc}",
                 ok=False, error=str(exc),
             ))
+            _act(f"Playmatch error: {exc}.")
 
     # Optional Hasheous ROM-hash identity resolver. Hash-first; reuses the
     # scanner-computed sha256 (passed via `scans`) and never refetches. A
@@ -777,6 +784,7 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
     hasheous_result = None
     if hasheous_provider is not None:
         try:
+            _act("Trying hasheous identity resolver…")
             hasheous_result = hasheous_provider.resolve(group, scans=scans)
             if hasheous_result is not None:
                 if hasheous_result.found:
@@ -791,6 +799,7 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                         ),
                         ok=True,
                     )
+                    _act(f"Hasheous resolved identity (provider_id: {hasheous_result.provider_id}).")
                     if hasheous_result.provider_id:
                         _hs_success_note = (
                             f"hasheous provider_id: {hasheous_result.provider_id}"
@@ -805,8 +814,11 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                         ok=False, error=hasheous_result.manual_review_reason,
                     ))
                     notes.append("hasheous: routed to manual review")
+                    _act("Hasheous: routed to manual review.")
                 else:
                     _hs_te = getattr(hasheous_result, "transport_error", None)
+                    reason = f"transport error: {_hs_te}" if _hs_te else "no hash match"
+                    _act(f"Hasheous: no match ({reason}).")
                     events.append(EnrichEvent(
                         category=EnrichCategory.HASHEOUS_MISS,
                         detail="hasheous: no identity match"
@@ -821,6 +833,7 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                 detail=f"hasheous resolve raised: {exc}",
                 ok=False, error=str(exc),
             ))
+            _act(f"Hasheous error: {exc}.")
 
     # Optional IGDB metadata/artwork provider. Title + Amiga platform search.
     # Non-hash-first; runs independently of Playmatch/Hasheous.
@@ -829,6 +842,7 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
     igdb_result = None
     if igdb_provider is not None:
         try:
+            _act("Trying igdb metadata lookup…")
             igdb_result = igdb_provider.resolve(group)
             if igdb_result is not None:
                 if igdb_result.found:
@@ -839,6 +853,7 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                                 f"provider_id={igdb_result.provider_id}"),
                         ok=True,
                     )
+                    _act(f"Igdb resolved identity (provider_id: {igdb_result.provider_id}).")
                     if igdb_result.provider_id:
                         _igdb_success_note = (
                             f"igdb provider_id: {igdb_result.provider_id}"
@@ -882,8 +897,11 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                         ok=False, error=igdb_result.manual_review_reason,
                     ))
                     notes.append("igdb: routed to manual review")
+                    _act("Igdb: routed to manual review.")
                 else:
                     _igdb_te = getattr(igdb_result, "transport_error", None)
+                    reason = f"transport error: {_igdb_te}" if _igdb_te else "no title match"
+                    _act(f"Igdb: no match ({reason}).")
                     events.append(EnrichEvent(
                         category=EnrichCategory.IGDB_MISS,
                         detail="igdb: no identity match"
@@ -898,6 +916,7 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                 detail=f"igdb resolve raised: {exc}",
                 ok=False, error=str(exc),
             ))
+            _act(f"Igdb error: {exc}.")
 
     # Optional ScreenScraper metadata/artwork/manual provider. Hash-first (CRC/MD5/SHA1),
     # then cached provider ID reuse, then title + system search.
@@ -908,6 +927,7 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
     if screenscraper_provider is not None:
         try:
             # Use the enrich_group_with_screenscraper high-level function
+            _act("Trying screenscraper metadata lookup…")
             screenscraper_result = ss_mod.enrich_group_with_screenscraper(
                 group, scans, ss_mod.ScreenScraperConfig.from_dict({}),
                 metadata_cache_dir,
@@ -929,6 +949,7 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                                 f"provider_id={screenscraper_result.provider_id}"),
                         ok=True,
                     )
+                    _act(f"ScreenScraper resolved identity (provider_id: {screenscraper_result.provider_id}).")
                     if screenscraper_result.provider_id:
                         _ss_success_note = (
                             f"screenscraper provider_id: {screenscraper_result.provider_id}"
@@ -972,8 +993,11 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                         ok=False, error=screenscraper_result.relevance_category or "ambiguous match",
                     ))
                     notes.append("screenscraper: routed to manual review")
+                    _act("ScreenScraper: routed to manual review.")
                 else:
                     _ss_te = getattr(screenscraper_result, "transport_error", None)
+                    reason = f"transport error: {_ss_te}" if _ss_te else "no identity match"
+                    _act(f"ScreenScraper: no match ({reason}).")
                     events.append(EnrichEvent(
                         category=EnrichCategory.SCREENSCRAPER_MISS,
                         detail="screenscraper: no identity match"
@@ -988,6 +1012,7 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                 detail=f"screenscraper resolve raised: {exc}",
                 ok=False, error=str(exc),
             ))
+            _act(f"ScreenScraper error: {exc}.")
 
     # Optional RetroAchievements metadata/artwork provider. Exact-MD5 hash-first
     # identity (first non-special disk), with the game list fetched (and cached)
@@ -1000,6 +1025,7 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
     ra_result = None
     if retroachievements_provider is not None:
         try:
+            _act("Trying retroachievements metadata lookup…")
             ra_result = retroachievements_provider.resolve(group, scans=scans, online=online)
             if ra_result is not None:
                 if ra_result.found:
@@ -1010,6 +1036,7 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                                 f"provider_id={ra_result.provider_id}"),
                         ok=True,
                     )
+                    _act(f"RetroAchievements resolved identity (provider_id: {ra_result.provider_id}).")
                     if ra_result.provider_id:
                         _ra_success_note = (
                             f"retroachievements provider_id: {ra_result.provider_id}"
@@ -1044,8 +1071,11 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                         ok=False, error=ra_result.manual_review_reason,
                     ))
                     notes.append("retroachievements: routed to manual review")
+                    _act("RetroAchievements: routed to manual review.")
                 else:
                     _ra_te = getattr(ra_result, "transport_error", None)
+                    reason = f"transport error: {_ra_te}" if _ra_te else f"no match ({ra_result.match_method.value})"
+                    _act(f"RetroAchievements: no match ({reason}).")
                     events.append(EnrichEvent(
                         category=EnrichCategory.RETROACHIEVEMENTS_MISS,
                         detail=(f"retroachievements: no identity match "
@@ -1060,6 +1090,7 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                 detail=f"retroachievements resolve raised: {exc}",
                 ok=False, error=str(exc),
             ))
+            _act(f"RetroAchievements error: {exc}.")
 
     # --- Cross-provider exact-hash fail-safe (issue #11/#12 hash-first posture) ---
     # When BOTH hash-first providers are enabled and each resolves the SAME
