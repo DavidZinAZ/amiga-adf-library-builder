@@ -193,18 +193,26 @@ def list_library_entities(canon: CanonicalLibrary) -> dict:
 
 def _game_label(canon: CanonicalLibrary, game_id: str) -> str:
     value, _ = canon.resolve_field("game", game_id, "title")
-    return value if value else game_id
+    title = value if value else game_id
+    # (GH-170 RC-D) Make game labels distinguishable with entity_id.
+    return f"{title} [{game_id}]"
 
 
 def releases_for(canon: CanonicalLibrary, game_id: str) -> list:
     out = []
     for release_id in canon.releases_for_game(game_id):
         value, _ = canon.resolve_field("release", release_id, "title")
+        title = value if value else release_id
+        # (GH-170 RC-D) Make duplicate release labels distinguishable.
+        # Append entity_id and edition so operators can tell releases apart.
+        edition, _ = canon.resolve_field("release", release_id, "edition")
+        edition_str = f" — {edition}" if edition else ""
+        label = f"{title}{edition_str} [{release_id}]"
         out.append(
             {
                 "entity_type": "release",
                 "entity_id": release_id,
-                "label": value if value else release_id,
+                "label": label,
             }
         )
     return out
@@ -216,6 +224,8 @@ def disks_for(canon: CanonicalLibrary, release_id: str) -> list:
         row = canon.disk_row(disk_id, release_id) or {}
         value, _ = canon.resolve_field("disk", disk_id, "filename")
         label = value or row.get("filename") or disk_id
+        # (GH-170 RC-D) Make disk labels distinguishable with entity_id.
+        label = f"{label} [{disk_id}]"
         out.append(
             {
                 "entity_type": "disk",
