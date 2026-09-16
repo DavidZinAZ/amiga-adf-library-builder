@@ -16,6 +16,8 @@ and ``exporter`` both import it to stay consistent.
 from __future__ import annotations
 
 import warnings
+from pathlib import Path
+from typing import Optional
 
 from .models import ReleaseGroup
 
@@ -85,3 +87,27 @@ def release_basename(group: ReleaseGroup) -> str:
         ch if ch.isalnum() or ch in " .-[]()" else "_" for ch in raw
     )
     return out.strip().replace("  ", " ")
+
+
+def canonical_release_name(
+    group: ReleaseGroup,
+    library_root: Optional[Path] = None,
+) -> tuple[str, str]:
+    """Return (canonical_basename, provenance) using canonical DB when available.
+
+    Falls back to :func:`release_basename` when the canonical DB is absent.
+    ``library_root`` is the explicit library root that hosts
+    ``<library_root>/curation/canonical.db``. When ``None``, falls back
+    without inferring a wrong path. Provenance is a human-readable string.
+    """
+    from .canonical_naming import export_name_for_release_group, _load_canonical_library
+    if library_root is not None:
+        _canon = _load_canonical_library(library_root)
+        if _canon is not None:
+            try:
+                _cn = export_name_for_release_group(_canon, group)
+                return _cn.basename, _cn.provenance_text
+            finally:
+                _canon.close()
+    # Fallback to release_basename (preserves existing behavior).
+    return release_basename(group), "fallback: no canonical DB"

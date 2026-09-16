@@ -93,6 +93,17 @@ class GuiState:
     # (CLI<->GUI equivalence preserved).
     launchbox_media_roots: list[dict] = field(default_factory=list)
     launchbox_manual_roots: list[str] = field(default_factory=list)
+    # --- (GH-173) RTFM control plane -------------------------------------
+    # GUI-authored RTFM settings materialized to gui-rtfm.toml by
+    # resolve_rtfm_config_path(). Mirrors Settings fields for the
+    # same settings.
+    rtfm_enabled: bool = False
+    rtfm_template: str = "controls-first"
+    rtfm_manual_roots: list[str] = field(default_factory=list)
+    rtfm_instruction_roots: list[str] = field(default_factory=list)
+    rtfm_cheat_roots: list[str] = field(default_factory=list)
+    rtfm_max_bytes: int = 15360
+    retrokit_manuals_enabled: bool = False
 
     # --- (GH-107 Slice 6) 1G1R selection controls -----------------------------
     one_per_game: bool = True
@@ -222,6 +233,81 @@ def resolve_local_media_config_path(
     return str(target)
 
 
+def _rtfm_settings_materialized(state: GuiState) -> bool:
+    """Return True when any RTFM control-plane setting is non-default."""
+    if state.rtfm_enabled or state.rtfm_manual_roots or state.rtfm_instruction_roots or state.rtfm_cheat_roots:
+        return True
+    if state.rtfm_template != "controls-first" or state.rtfm_max_bytes != 15360 or state.retrokit_manuals_enabled:
+        return True
+    return False
+
+
+def resolve_rtfm_config_path(
+    state: GuiState,
+    *,
+    cache_dir: Optional[os.PathLike] = None,
+) -> Optional[str]:
+    """Resolve the RTFM config path the pipeline should use.
+
+    (GH-173) When the GUI holds RTFM control-plane settings, they are
+    materialized into a DETERMINISTIC GUI-managed file
+    (default: ``<cache_dir>/gui-rtfm.toml``). The managed file holds a
+    ``[rtfm]`` table mirroring the operator's GUI choices, including
+    roots, template, and RetroKit manual enablement. Without RTFM
+    settings this returns ``None``, preserving the existing CLI-only
+    ``[rtfm]`` semantics exactly.
+
+    No secrets, no network: the managed file holds only operator
+    preferences and local path roots.
+    """
+    if not _rtfm_settings_materialized(state):
+        return None
+    import tomli_w
+
+    cache_dir = Path(cache_dir) if cache_dir else Path(tempfile.gettempdir())
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    target = cache_dir / "gui-rtfm.toml"
+    data: dict = {}
+    # Read existing provider config for [rtfm] defaults if present.
+    base_cfg = state.provider_config_path
+    if base_cfg:
+        try:
+            import tomllib
+            p = Path(base_cfg)
+            if p.is_file():
+                with open(p, "rb") as fh:
+                    data = tomllib.load(fh)
+        except Exception:
+            data = {}
+    rtfm_table = data.get("rtfm")
+    if not isinstance(rtfm_table, dict):
+        rtfm_table = {}
+    rtfm_table["enabled"] = bool(state.rtfm_enabled)
+    rtfm_table["template"] = str(state.rtfm_template)
+    # Merge GUI manual roots (launchbox + explicit RTFM roots)
+    # into the single canonical store, mirroring resolve_local_media_config_path.
+    all_manual_roots = list(state.launchbox_manual_roots) + list(state.rtfm_manual_roots)
+    all_instruction_roots = list(state.rtfm_instruction_roots)
+    all_cheat_roots = list(state.rtfm_cheat_roots)
+    if all_manual_roots:
+        rtfm_table["local"] = {"manuals": all_manual_roots}
+    if all_instruction_roots:
+        rtfm_table.setdefault("local", {})["instructions"] = all_instruction_roots
+    if all_cheat_roots:
+        rtfm_table.setdefault("local", {})["cheats"] = all_cheat_roots
+    rtfm_table["max_bytes"] = int(state.rtfm_max_bytes)
+    online_table = rtfm_table.get("online") or {}
+    online_table["enabled"] = bool(state.retrokit_manuals_enabled)
+    rtfm_table["online"] = online_table
+    data["rtfm"] = rtfm_table
+
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    with open(tmp, "wb") as fh:
+        tomli_w.dump(data, fh)
+    tmp.replace(target)
+    return str(target)
+
+
 def build_pipeline_kwargs(
     state: GuiState,
     cfg: PathConfig,
@@ -252,6 +338,21 @@ def build_pipeline_kwargs(
     local_media_cfg = resolve_local_media_config_path(
         state, config_path=config_path, cache_dir=cache_dir
     )
+    # (GH-173) Resolve the RTFM config path: when the GUI holds
+    # RTFM control-plane settings they are materialized to
+    # gui-rtfm.toml; otherwise fall back to the discovered default
+    # config (preserving CLI-only [rtfm] semantics).
+    rtfm_config_path = resolve_rtfm_config_path(
+        state, cache_dir=cache_dir
+    )
+    if rtfm_config_path is None:
+        discovered = discover_default_config_path()
+        if discovered is not None:
+            rtfm_config_path = str(discovered)
+    # (GH-173) When RetroKit manuals are enabled via GUI, the
+    # retrokit_config_path must point at the resolved RTFM config
+    # so the [retrokit_manuals] table is accessible.
+    rk_config_path = rtfm_config_path if state.retrokit_manuals_enabled else provider_cfg
     run_config = RunConfig(
         online=bool(state.online),
         refresh_metadata=bool(state.refresh_metadata),
@@ -275,12 +376,12 @@ def build_pipeline_kwargs(
         # (GH-33) GUI LaunchBox mappings take precedence for local media;
         # otherwise identical to the CLI's provider-config behavior.
         local_media_config_path=local_media_cfg,
-        # (GH-167 RC-C) RTFM config must point at the main/operator
-        # config file that may contain [rtfm], not the provider config.
-        rtfm_config_path=str(discover_default_config_path()) if discover_default_config_path() is not None else None,
+        # (GH-173) RTFM config path resolved from GUI settings;
+        # falls back to discovered default config (CLI-only [rtfm]).
+        rtfm_config_path=rtfm_config_path,
         playmatch_config_path=provider_cfg,
         hasheous_config_path=provider_cfg,
-        retrokit_config_path=provider_cfg,
+        retrokit_config_path=rk_config_path,
         # (GH-102) Progressive JPEG conversion policy.
         convert_progressive_jpeg=str(getattr(state, "convert_progressive_jpeg", "never")),
         # (GH-102) Per-image progressive-conversion prompt callback.
