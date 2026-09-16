@@ -30,12 +30,18 @@ def route_quarantine(
     review_dir: Path,
     unknown_dir: Path,
     scans: dict[str, ScanRecord] | None = None,
+    review_items: list = None,
 ) -> dict[str, list[str]]:
     """Write quarantine/review records for flagged groups.
+
+    (GH-164 RC3) review_items from enrich review events are persisted
+    alongside quarantine records so that review_routed is non-empty
+    whenever enrichment identifies a review-worthy candidate.
 
     Returns a summary dict: {'review': [...filenames...], 'unknown': [...]}.
     """
     scans = scans or {}
+    review_items = review_items or []
     review = _route_dir(Path(review_dir), ".")
     unk = _route_dir(Path(unknown_dir), ".")
 
@@ -70,5 +76,22 @@ def route_quarantine(
         out = target_dir / f"{safe_name[:120] or g.release_key[:120]}.json"
         out.write_text(json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8")
         bucket.append(str(out))
+
+    # (GH-164 RC3) Persist enrich review_items as separate review
+    # records so review_routed is non-empty when enrichment identifies
+    # review-worthy candidates that grouper did not flag.
+    for item in review_items:
+        item_dict = item.to_dict() if hasattr(item, "to_dict") else dict(item)
+        release_key = item_dict.get("release_key", "")
+        if not release_key:
+            continue
+        safe_name = "".join(
+            ch if ch.isalnum() or ch in " .-[]()" else "_"
+            for ch in (item_dict.get("candidate_title", "") or release_key)
+        ).strip().replace("  ", " ")
+        item_out = review_dir / f"review_{release_key}_{item_dict.get('reason', 'unknown')}.json"
+        item_out.write_text(json.dumps(item_dict, indent=2, ensure_ascii=False), encoding="utf-8")
+        if str(item_out) not in review_files:
+            review_files.append(str(item_out))
 
     return {"review": review_files, "unknown": unknown_files}

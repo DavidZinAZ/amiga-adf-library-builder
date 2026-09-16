@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from .manual_approvals import validate_source_url
+from .title_norm import canonical_title
 from .utils import now_iso as utc_now
 
 USER_AGENT = f"AmigaADFLibraryBuilder/{__import__('amiga_adf_library_builder._version', fromlist=['__version__']).__version__} (+preservation metadata client)"
@@ -309,9 +310,13 @@ _PERSON_PHRASES = (
     "the son of", "the daughter of", "singer", "filmmaker", "painter",
 )
 # Phrasing that marks a generic series/franchise/disambiguation page.
+# Restricted to true disambiguation markers only (GH-164 RC1).
+# Removed generic franchise phrasing ("franchise", "series of", "series is")
+# which false-fired on legitimate game descriptions (e.g. "in the series of").
+# "this article is about" / "this page is about" fire only when the topic
+# differs from the requested title (checked in validate_metadata_relevance).
 _DISAMBIGUATION_PHRASES = (
-    "may refer to", "can refer to", "refers to", "disambiguation", "franchise",
-    "series of", "series is", "this article is about", "this page is about",
+    "may refer to", "can refer to", "refers to", "disambiguation page",
 )
 
 
@@ -350,7 +355,7 @@ def validate_metadata_relevance(requested_title: str, record: "MetadataRecord",
     """
     evidence: list[str] = []
     target = _norm(requested_title)
-    candidate = _norm(record.canonical_title or requested_title)
+    candidate = _norm(canonical_title(record.canonical_title or requested_title))
     ratio = SequenceMatcher(None, target, candidate).ratio() if (target or candidate) else 0.0
 
     # --- Strong positive: canonical identity (possibly with edition suffix) ---

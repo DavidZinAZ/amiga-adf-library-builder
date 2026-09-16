@@ -23,7 +23,7 @@ from .hasheous import HasheousMatchMethod
 from .igdb import IgdbMatchMethod
 from . import screenscraper as ss_mod
 from .models import ReleaseGroup, ScanRecord
-from .utils import write_json_atomic
+from .utils import write_json_atomic, now_iso as _now_iso
 from .naming import release_basename
 from .nfo_render import render_gotek_nfo
 import os
@@ -32,6 +32,38 @@ import os
 # 150x150, never cropped or upscaled; there is no minimum source dimension.
 VERIFIED_ARTWORK_WIDTH: Optional[int] = 150
 VERIFIED_ARTWORK_HEIGHT: Optional[int] = 150
+
+
+
+@dataclass
+class ReviewItem:
+    """A persisted review item produced by enrichment analysis.
+
+    Each metadata_relevance_review, local_media_review, or per-provider
+    review event maps to exactly one ReviewItem, which is written to
+    the review/ directory with full evidence and appears in review_routed.
+    """
+
+    source: str                    # local_media | metadata-online | <provider>
+    provider: str                  # provider name (or "system" for local-media)
+    candidate_title: str           # candidate title or path
+    score: float                   # confidence/relevance score
+    reason: str                    # machine-readable reason category
+    evidence: list[str]            # human-readable evidence strings
+    release_key: str               # the release this review is for
+    routed_at: str                 # ISO timestamp
+
+    def to_dict(self) -> dict:
+        return {
+            "source": self.source,
+            "provider": self.provider,
+            "candidate_title": self.candidate_title,
+            "score": self.score,
+            "reason": self.reason,
+            "evidence": list(self.evidence),
+            "release_key": self.release_key,
+            "routed_at": self.routed_at,
+        }
 
 
 @dataclass
@@ -55,6 +87,10 @@ class EnrichResult:
     # This is the value the Preview & Curation "Confidence" column should show;
     # it is never guessed and is preserved verbatim from the provider record.
     metadata_confidence: Optional[float] = None
+    # (GH-164) Review items produced during enrichment. Each review
+    # event generates exactly one ReviewItem that persists through
+    # to the review/ directory and appears in review_routed.
+    review_items: list[ReviewItem] = field(default_factory=list)
 
 
 class EnrichCategory(str, Enum):
@@ -556,6 +592,41 @@ def resize_artwork(master: Path, artwork_processed_dir: Path,
     dest = out_dir / f"{Path(master).stem}-gotek.jpg"
     dest.write_bytes(data)
     return dest
+
+
+
+def _build_review_items(events: list) -> list:
+    """Convert review-category EnrichEvents into ReviewItems (GH-164 RC3).
+
+    Each review event produces exactly one persisted ReviewItem so that
+    enrich review events are never silently discarded.
+    """
+    from .utils import now_iso as _now_iso_func
+    items = []
+    for ev in events:
+        if ev.category not in (
+            EnrichCategory.METADATA_RELEVANCE_REVIEW,
+            EnrichCategory.LOCAL_MEDIA_REVIEW,
+            EnrichCategory.PLAYMATCH_REVIEW,
+            EnrichCategory.HASHEOUS_REVIEW,
+            EnrichCategory.IGDB_REVIEW,
+            EnrichCategory.SCREENSCRAPER_REVIEW,
+            EnrichCategory.RETROACHIEVEMENTS_REVIEW,
+        ):
+            continue
+        items.append(ReviewItem(
+            source=("metadata-online" if ev.category == EnrichCategory.METADATA_RELEVANCE_REVIEW
+                    else "local_media" if ev.category == EnrichCategory.LOCAL_MEDIA_REVIEW
+                    else ev.category.value.replace("_review", "-review")),
+            provider=ev.category.value.replace("_", "-"),
+            candidate_title=ev.detail or "",
+            score=0.0,
+            reason=ev.error or "review",
+            evidence=[ev.detail or ev.error or ""],
+            release_key="",
+            routed_at=_now_iso_func(),
+        ))
+    return items
 
 
 def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRecord],
@@ -1349,8 +1420,10 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
         events.append(_ra_success_event)
         if _ra_success_note is not None:
             notes.append(_ra_success_note)
-    return EnrichResult(nfo_path, master, processed, processed is not None, notes, metadata_path, provider, processed is None, events, needs_manual_review=needs_manual_review,
-                        metadata_confidence=(metadata.confidence if metadata is not None else None))
+    _review_items = _build_review_items(events)
+    return EnrichResult(nfo_path, master, processed, processed is None, notes, metadata_path, provider, processed is None, events, needs_manual_review=needs_manual_review,
+                        metadata_confidence=(metadata.confidence if metadata is not None else None),
+                        review_items=_review_items)
 
 
 def enrich_all(groups: list[ReleaseGroup], *, nfo_dir: Path, scans: list[ScanRecord],

@@ -622,6 +622,18 @@ def _norm_text(text: str) -> str:
     return re.sub(r"[^a-z0-9]", "", (text or "").lower())
 
 
+def _canonical_norm(title: str) -> str:
+    """Canonical title normalization including article-movement and
+    disambiguator stripping (GH-164 C1).
+
+    Applies the shared :func:`canonical_title` from title_norm,
+    then reduces to the same alnum-only key as :func:`_norm_text`
+    so results are directly comparable with existing identity keys.
+    """
+    from .title_norm import canonical_title as _ct
+    return _norm_text(_ct(title))
+
+
 # LaunchBox appends a trailing image ordinal to the *filename* (not the game
 # title) in flat and region-nested layouts, e.g. ``Bubble Bobble-01.png``,
 # ``Bubble Bobble-02.png``. The ordinal is a pure ``-<digits>`` suffix. We
@@ -1549,6 +1561,7 @@ class LocalMediaProvider:
         return {
             "title": title,
             "norm_title": _norm_text(title),
+            "canonical_norm_title": _canonical_norm(title),
             "norm_base_title": _norm_text(base_title),
             "disk_stems": [s for s in disk_stems if s],
             "norm_disk_stems": {_norm_text(s) for s in disk_stems if s},
@@ -1576,7 +1589,7 @@ class LocalMediaProvider:
             "norm_base_folder": cand.norm_base_folder,
             "folder_chain": folder_chain,
             "ordinal_chain": ordinal_chain,
-            "norm_base_chain": [_norm_text(_strip_release_tags(n)) for n in folder_chain],
+            "norm_base_chain": [_canonical_norm(n) for n in folder_chain],
         }
 
     def _score(self, cand: LocalMediaCandidate, identities: dict):
@@ -1608,6 +1621,16 @@ class LocalMediaProvider:
             or identities["norm_title"] in chain
         ):
             return MatchMethod.NORMALIZED_TITLE, 0.99
+        # 3b) canonical normalization with article movement and
+        # disambiguator stripping (GH-164 C1).
+        # "The Untouchables" vs "Untouchables, The" now matches at 0.99
+        # via canonical equivalence instead of fuzzy 0.80.
+        if identities["canonical_norm_title"] and (
+            ci.get("norm_stem", "") == identities["canonical_norm_title"]
+            or ci.get("norm_folder", "") == identities["canonical_norm_title"]
+            or identities["canonical_norm_title"] in ci.get("norm_base_chain", [])
+        ):
+            return MatchMethod.NORMALIZED_TITLE, 0.99
         # 3b) normalized title WITH the trailing LaunchBox ordinal stripped
         # (flat / region-nested layouts name the game at the file or folder
         # level as ``Bubble Bobble-01`` / ``Bubble Bobble-01``). Only the
@@ -1619,6 +1642,14 @@ class LocalMediaProvider:
             ci["norm_ordinal_stem"] == identities["norm_title"]
             or ci["norm_ordinal_folder"] == identities["norm_title"]
             or identities["norm_title"] in ci["ordinal_chain"]
+        ):
+            return MatchMethod.NORMALIZED_TITLE, 0.99
+        # 3c) canonical-normalized ordinal-stripped comparison with
+        # article movement (GH-164 C1).
+        if identities["canonical_norm_title"] and (
+            ci.get("norm_ordinal_stem", "") == identities["canonical_norm_title"]
+            or ci.get("norm_ordinal_folder", "") == identities["canonical_norm_title"]
+            or identities["canonical_norm_title"] in ci.get("ordinal_chain", [])
         ):
             return MatchMethod.NORMALIZED_TITLE, 0.99
         # 4) canonical-title reuse across cracks/trainers/alt-dumps/language/

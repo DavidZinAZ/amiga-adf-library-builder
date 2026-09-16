@@ -507,8 +507,14 @@ def run_pipeline(
 
     # Phase 6: quarantine routing for flagged groups.
     _act("Checking for releases that need review…")
+    # (GH-164 RC3) Collect review_items from enrich results so they
+    # persist through to the review/ directory and appear in review_routed.
+    _all_review_items = []
+    for _er in enrich_results:
+        _all_review_items.extend(getattr(_er, "review_items", []))
     quarantine_summary = quarantine.route_quarantine(
-        groups, review_dir=review_dir, unknown_dir=unknown_dir, scans=scan_map
+        groups, review_dir=review_dir, unknown_dir=unknown_dir, scans=scan_map,
+        review_items=_all_review_items,
     )
     _act(
         f"Sent {len(quarantine_summary['review'])} release(s) to review; "
@@ -764,6 +770,8 @@ def run_pipeline(
         ],
         "enrichment_notes": [note for r in enrich_results for note in r.notes],
         "review_routed": quarantine_summary["review"],
+        "review_routed_count": len(quarantine_summary["review"]),
+        "review_items_count": len(_all_review_items),
         "unknown_routed": quarantine_summary["unknown"],
         "applied_approvals": _applied,
         "unmatched_approvals": _unmatched,
