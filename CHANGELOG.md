@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.20 — 2026-09-16
+
+- GH-167: Fix four root causes (RC-A, RC-B, RC-C, RC-D).
+
 ## 0.2.19 — 2026-09-16
 
 - GH-164: Canonical title normalization, provider diagnostics, DAT/local metadata, review persistence.
