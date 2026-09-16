@@ -49,6 +49,12 @@ jobs:
       - name: Build onedir portable app (real artifact)
         run: python tools/build_windows.py --target onedir --clean
 
+      - name: Capture packaged app version (QA evidence)
+        run: |
+          mkdir -p qa-windows-artifacts
+          powershell -NoProfile -Command "(Get-Item 'dist/AmigaADFLibraryBuilder/AmigaADFLibraryBuilder.exe').VersionInfo | Format-List * | Out-File -Encoding utf8 qa-windows-artifacts/exe-version-info.txt"
+          cat qa-windows-artifacts/exe-version-info.txt
+
       - name: Run real-Windows qualification driver
         env:
           QT_QPA_PLATFORM: offscreen
