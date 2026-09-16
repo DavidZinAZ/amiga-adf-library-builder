@@ -783,6 +783,34 @@ def run_pipeline(
         "review_routed": quarantine_summary["review"],
         "review_routed_count": len(quarantine_summary["review"]),
         "review_items_count": len(_all_review_items),
+        # (GH-164 RC7) Result semantics: split identified vs unresolved
+        "identified": [
+            r.metadata_path or r.nfo_path
+            for r in enrich_results
+            if r.metadata_confidence and r.metadata_confidence >= 0.90
+        ],
+        "unresolved": [
+            str(g.release_key) for g, r in zip(groups, enrich_results)
+            if not r.metadata_path and not r.nfo_path
+            and not r.artwork_master
+        ],
+        "review_required": [
+            str(g.release_key) for g, r in zip(groups, enrich_results)
+            if r.needs_manual_review or r.review_items
+        ],
+        "provider_failures": provider_diagnostics.get("totals", {}).get("error", 0),
+        "dat_failures": len(_all_review_items),
+        # (GH-164 RC7) Split between authoritative and fuzzy matches
+        "exact_or_authoritative": [
+            str(g.release_key) for g, r in zip(groups, enrich_results)
+            if r.metadata_confidence and r.metadata_confidence >= 0.90
+            or r.artwork_master and r.artwork_resized
+        ],
+        "fuzzy_or_manual": [
+            str(g.release_key) for g, r in zip(groups, enrich_results)
+            if r.metadata_confidence and r.metadata_confidence < 0.90
+            or (r.needs_manual_review and not r.metadata_confidence)
+        ],
         "unknown_routed": quarantine_summary["unknown"],
         "applied_approvals": _applied,
         "unmatched_approvals": _unmatched,

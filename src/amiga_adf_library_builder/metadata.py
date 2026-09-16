@@ -1330,11 +1330,29 @@ def lookup_metadata(title: str, *, cache_dir: Path, curated_dir: Path,
         nonlocal accepted
         _log(f"Querying {label}…")
         candidate = None
+        outcome = "not_configured"
         try:
             candidate = lookup()
-        except Exception:
+            outcome = "candidate_returned"
+        except Exception as exc:
+            # Classify the exception type for diagnostics
+            exc_name = type(exc).__name__
+            if "auth" in exc_name.lower() or "credentials" in str(exc).lower():
+                outcome = "auth_error"
+            elif "request" in exc_name.lower() or "connection" in exc_name.lower() or "timeout" in exc_name.lower():
+                outcome = "request_error"
+            else:
+                outcome = "parse_error"
             candidate = None
         if candidate is None:
+            relevance_events.append({
+                "provider": label,
+                "canonical_title": "",
+                "category": "not_found",
+                "confidence": 0.0,
+                "reason": outcome,
+                "evidence": [outcome],
+            })
             return
         decision = validate_metadata_relevance(title, candidate, group=group)
         relevance_events.append({
