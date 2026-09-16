@@ -71,6 +71,12 @@ class LookupContext:
     #: Injectable fetch function for offline testing of the online chain.
     opener: Optional[Callable[..., Any]] = None
     timeout: float = 20.0
+    #: Path to the metadata_sources SQLite DB for DAT candidate collection.
+    db_path: Optional[Path] = None
+    #: Per-provider enabled state (id -> bool) for runtime bridge.
+    provider_enabled: dict[str, bool] = field(default_factory=dict)
+    #: Per-provider field overrides (id -> {key: value}).
+    provider_fields: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -260,6 +266,26 @@ def _online_lookup(mode: str, ctx: LookupContext) -> LookupResult:
         result.status = "error"
         result.error = "no search query supplied"
         return result
+    # Build provider kwargs from ctx.provider_enabled so the runtime
+    # chain respects GUI-set enablement state (GH-170 RC-C bridge).
+    provider_kwargs: dict[str, bool] = {}
+    for pid, enabled in ctx.provider_enabled.items():
+        if not enabled:
+            # Map provider IDs to the keyword arguments used by
+            # lookup_metadata. Only pass disabled providers; defaults
+            # handle the rest (enabled=True for Hall of Light etc.).
+            if pid == "playmatch":
+                provider_kwargs["playmatch_enabled"] = False
+            elif pid == "lemonamiga":
+                provider_kwargs["lemonamiga_enabled"] = False
+            elif pid == "hall-of-light":
+                provider_kwargs["halloflight_enabled"] = False
+            elif pid == "igdb":
+                provider_kwargs["igdb_enabled"] = False
+            elif pid == "mobygames":
+                provider_kwargs["mobygames_enabled"] = False
+            elif pid == "wikipedia":
+                provider_kwargs["wikipedia_enabled"] = False
     try:
         record, source, events = lookup_metadata(
             title,
@@ -268,6 +294,7 @@ def _online_lookup(mode: str, ctx: LookupContext) -> LookupResult:
             group=_group_for_lookup(ctx),
             opener=ctx.opener,
             timeout=ctx.timeout,
+            **provider_kwargs,
         )
     except Exception as exc:
         result.status = "error"
@@ -306,13 +333,6 @@ def run_lookup(mode: str, ctx: LookupContext, *, collect_candidates: bool = Fals
     return _online_lookup(mode, ctx)
 
 
-# --- DAT index candidate collection (future) ---------------------------------
-# TODO(GH-157 follow-up): Restore DAT index as a parallel candidate source.
-# Requires passing a DB path to _collect_all_candidates so we can construct
-# MetadataSourceManager(db_path) properly instead of the current __new__() stub
-# which never runs __init__ and crashes silently inside candidates_from_sources.
-
-
 # --- Multi-candidate collection helpers --------------------------------------
 
 
@@ -324,6 +344,8 @@ class LookupResultCollection:
     online_ok: bool = False
     offline_ok: bool = False
     errors: list[str] = field(default_factory=list)
+    #: Per-provider diagnostic status bands (no_match, error, etc.).
+    provider_diagnostics: list[dict] = field(default_factory=list)
 
     @property
     def has_candidates(self) -> bool:
@@ -354,35 +376,35 @@ def _normalize_for_dedup(title: str) -> str:
 def _merge_candidates(existing: list[dict], new_candidates: list[dict]) -> list[dict]:
     """Merge new candidates into existing, deduplicating by normalized title.
 
-    --- P2 FIX: rows with no title (error / no_match sentinel rows) are kept
-    as-is rather than being collapsed into a single merged row.
+    Only real candidates (with a title) are merged. Status bands
+    (no_match/error diagnostics) are kept separately in
+    LookupResultCollection and are NOT selectable candidate rows.
     """
     seen: dict[str, dict] = {}
     for c in existing:
         title = c.get("title")
-        if not title:
-            # No identity key available; use status+provider as fallback so
-            # non-title rows (errors, no-match sentinels) stay distinct.
-            key = f"{c.get('status', '?')}:{c.get('provider', '?')}"
-        else:
+        if title:
             key = _normalize_for_dedup(title)
-        seen[key] = c
+            if key not in seen or c.get("confidence", 0) > seen[key].get("confidence", 0):
+                seen[key] = c
     for nc in new_candidates:
         title = nc.get("title")
-        if not title:
-            key = f"{nc.get('status', '?')}:{nc.get('provider', '?')}"
-        else:
+        if title:
             key = _normalize_for_dedup(title)
-        if key not in seen or nc.get("confidence", 0) > seen[key].get("confidence", 0):
-            seen[key] = nc
+            if key not in seen or nc.get("confidence", 0) > seen[key].get("confidence", 0):
+                seen[key] = nc
     result = sorted(seen.values(), key=lambda c: (-c.get("confidence", 0), c.get("provider", "")))
     return result
 
 
 def _result_to_candidate(result: "LookupResult") -> list[dict]:
-    """Convert a LookupResult to one or more candidate dicts."""
+    """Convert a LookupResult to one or more candidate dicts.
+
+    no_match/error results do NOT produce selectable candidate rows;
+    they are surfaced as status bands via LookupResultCollection.
+    """
     candidates = []
-    if result.status in ("found", "needs_review", "no_match"):
+    if result.status in ("found", "needs_review"):
         # --- DEF-4 FIX: compute match_type from actual evidence -------------
         def _compute_match_type(record=None, local_result=None, confidence=0.0):
             if local_result is not None:
@@ -457,17 +479,6 @@ def _result_to_candidate(result: "LookupResult") -> list[dict]:
         if result.error:
             c["error"] = result.error
         candidates.append(c)
-    elif result.status == "error":
-        candidates.append({
-            "status": "error",
-            "provider": "lookup_workflow",
-            "error": result.error,
-            "confidence": 0.0,
-            "match_type": "none",
-            "mode": result.mode,
-            "kind": result.kind,
-            "why": [f"error: {result.error}"],
-        })
     return candidates
 
 
@@ -484,6 +495,11 @@ def _run_online_once(ctx: LookupContext) -> "LookupResult":
             cache_dir=paths_cfg.metadata_cache_dir,
             curated_dir=paths_cfg.curated_metadata_dir,
             config_path=source.config_path,
+            opener=ctx.opener,
+            timeout=ctx.timeout,
+            db_path=ctx.db_path,
+            provider_enabled=ctx.provider_enabled,
+            provider_fields=ctx.provider_fields,
         )
     except Exception:
         ctx_resolved = ctx
@@ -495,8 +511,26 @@ def _run_offline_once(ctx: LookupContext) -> "LookupResult":
     return _offline_lookup(MODE_OFFLINE, ctx)
 
 
-# NOTE: _run_dat_once removed — it used MetadataSourceManager.__new__() which
-# never runs __init__, guaranteeing silent failure. See TODO above for re-add plan.
+def _run_dat_once(ctx: LookupContext) -> list[dict]:
+    """Collect candidates from the DAT metadata source index.
+
+    Returns a list of candidate dicts or empty list if unavailable.
+    """
+    candidates: list[dict] = []
+    db_path = ctx.db_path
+    if db_path is None:
+        return candidates
+    try:
+        from .metadata_source import MetadataSourceManager
+        from .manual_lookup import candidates_from_sources
+        manager = MetadataSourceManager(db_path)
+        # Use the query/title for source search.
+        query = ctx.query or ctx.title or ""
+        if query:
+            candidates = candidates_from_sources(manager, title=query)
+    except Exception:
+        pass
+    return candidates
 
 
 def _collect_all_candidates(ctx: LookupContext) -> LookupResultCollection:
@@ -504,14 +538,20 @@ def _collect_all_candidates(ctx: LookupContext) -> LookupResultCollection:
 
     Online, offline, and DAT index are launched concurrently. Results are
     deduplicated by normalized title and ranked by confidence.
+    Per-provider diagnostics are included in the result for display.
     """
     online_fut = None
     offline_fut = None
+    dat_fut = None
     errors: list[str] = []
+    provider_diagnostics: list[dict] = []
+    online_r: LookupResult = LookupResult(mode="online", kind=KIND_ONLINE, provider_ids=[])
+    offline_r: LookupResult = LookupResult(mode="offline", kind=KIND_OFFLINE, provider_ids=[])
 
-    with ThreadPoolExecutor(max_workers=3) as pool:
+    with ThreadPoolExecutor(max_workers=4) as pool:
         online_fut = pool.submit(_run_online_once, ctx)
         offline_fut = pool.submit(_run_offline_once, ctx)
+        dat_fut = pool.submit(_run_dat_once, ctx)
 
     # Process online result
     online_candidates: list[dict] = []
@@ -519,6 +559,10 @@ def _collect_all_candidates(ctx: LookupContext) -> LookupResultCollection:
         online_r = online_fut.result(timeout=60)
         online_ok = True
         online_candidates = _result_to_candidate(online_r)
+        # Collect provider diagnostics from events.
+        for ev in online_r.consulted:
+            if isinstance(ev, dict):
+                provider_diagnostics.append(ev)
     except Exception as exc:
         online_ok = False
         errors.append(f"Online lookup failed: {exc}")
@@ -533,11 +577,41 @@ def _collect_all_candidates(ctx: LookupContext) -> LookupResultCollection:
         offline_ok = False
         errors.append(f"Offline lookup failed: {exc}")
 
-    # Merge and rank
+    # Process DAT candidates
+    dat_candidates: list[dict] = []
+    try:
+        dat_candidates = dat_fut.result(timeout=60) if dat_fut else []
+    except Exception as exc:
+        errors.append(f"DAT lookup failed: {exc}")
+
+    # Merge and rank all candidates.
     all_candidates = _merge_candidates(online_candidates, offline_candidates)
+    all_candidates = _merge_candidates(all_candidates, dat_candidates)
+
+    # Append status bands for any no_match/error results as diagnostics.
+    if online_r.status == "no_match":
+        provider_diagnostics.append({
+            "provider": "online",
+            "status": "no_match",
+            "message": online_r.error or "no online provider matched",
+        })
+    if offline_r.status == "no_match":
+        provider_diagnostics.append({
+            "provider": "offline",
+            "status": "no_match",
+            "message": offline_r.error or "no offline source matched",
+        })
+    if not online_ok:
+        provider_diagnostics.append({
+            "provider": "online",
+            "status": "error",
+            "message": f"Online lookup failed: {errors[-1]}" if errors else "unknown",
+        })
+
     return LookupResultCollection(
         candidates=all_candidates,
         online_ok=online_ok,
         offline_ok=offline_ok,
         errors=errors,
+        provider_diagnostics=provider_diagnostics,
     )

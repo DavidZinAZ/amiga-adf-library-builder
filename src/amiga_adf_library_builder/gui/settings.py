@@ -59,6 +59,9 @@ SETTINGS_KEYS = (
     "one_per_game",
     "operator_decisions_path",
     "selection_manifest_path",
+    # (GH-170) Provider enablement and field persistence.
+    "provider_enabled",
+    "provider_fields",
 )
 
 
@@ -152,6 +155,9 @@ class Settings:
     one_per_game: bool = True
     operator_decisions_path: str = ""
     selection_manifest_path: str = ""
+    # (GH-170) Provider enablement and field persistence.
+    provider_enabled: dict[str, bool] = field(default_factory=dict)
+    provider_fields: dict[str, dict[str, str]] = field(default_factory=dict)
     presets: dict[str, "Preset"] = field(default_factory=dict)
 
     def as_dict(self) -> dict:
@@ -188,6 +194,9 @@ class Settings:
             "one_per_game": self.one_per_game,
             "operator_decisions_path": self.operator_decisions_path,
             "selection_manifest_path": self.selection_manifest_path,
+            # (GH-170) Provider enablement and field persistence.
+            "provider_enabled": self.provider_enabled,
+            "provider_fields": self.provider_fields,
         }
         if self.presets:
             out["presets"] = {name: p.as_dict() for name, p in self.presets.items()}
@@ -232,6 +241,13 @@ class Settings:
         s.one_per_game = bool(gui.get("one_per_game", True))
         s.operator_decisions_path = str(gui.get("operator_decisions_path", ""))
         s.selection_manifest_path = str(gui.get("selection_manifest_path", ""))
+        # (GH-170) Provider enablement and field persistence.
+        s.provider_enabled = gui.get("provider_enabled", {})
+        if not isinstance(s.provider_enabled, dict):
+            s.provider_enabled = {}
+        s.provider_fields = gui.get("provider_fields", {})
+        if not isinstance(s.provider_fields, dict):
+            s.provider_fields = {}
         raw_presets = gui.get("presets")
         if isinstance(raw_presets, dict):
             for name, val in raw_presets.items():
