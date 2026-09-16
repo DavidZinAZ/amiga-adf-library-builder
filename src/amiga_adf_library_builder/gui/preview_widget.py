@@ -189,10 +189,14 @@ class _UnifiedLookupWorker(QThread):
     def __init__(self, ctx: LookupContext, parent=None) -> None:
         super().__init__(parent)
         self._ctx = ctx
+        self._query = ""
 
     def run(self) -> None:
         try:
             collection = _collect_all_candidates(self._ctx)
+            # Discard stale emissions: only emit if query matches.
+            if self._query and self._query != self._ctx.query:
+                return
             self.candidates_ready.emit(collection.candidates)
             if not collection.online_ok and not collection.offline_ok:
                 errs = "; ".join(collection.errors) if collection.errors else "No providers available"
@@ -288,6 +292,11 @@ class UnifiedLookupDialog(QDialog):
         self._search_edit.selectAll()
         form2.addRow("", self._search_edit)
 
+        # (GH-167 RC-B) Search button triggers exactly one lookup.
+        self._search_button = QPushButton("Search")
+        self._search_button.setDefault(True)
+        form2.addRow("", self._search_button)
+
         mode_box = QGroupBox("Source / Mode")
         ml = QVBoxLayout(mode_box)
         self._radio_online = QRadioButton("Online (Hall of Light, curated, cache)")
@@ -337,6 +346,17 @@ class UnifiedLookupDialog(QDialog):
 
         self._cand_status = QLabel("Waiting…")
         cl.addWidget(self._cand_status)
+
+        # (GH-167 RC-B) Candidate artwork preview panel.
+        self._cand_artwork_group = QGroupBox("Candidate Artwork")
+        self._cand_artwork_layout = QVBoxLayout(self._cand_artwork_group)
+        self._cand_artwork_label = QLabel("Select a candidate to preview artwork.")
+        self._cand_artwork_label.setWordWrap(True)
+        self._cand_artwork_pixmap = QLabel()
+        self._cand_artwork_pixmap.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._cand_artwork_layout.addWidget(self._cand_artwork_label)
+        self._cand_artwork_layout.addWidget(self._cand_artwork_pixmap)
+        cl.addWidget(self._cand_artwork_group)
 
         self._tabs.addTab(cand_w, "Candidates")
 
@@ -397,6 +417,19 @@ class UnifiedLookupDialog(QDialog):
         self._btn_compare.clicked.connect(self._on_compare)
         self._btn_apply.clicked.connect(self._on_apply)
         self._btn_dismiss.clicked.connect(self.reject)
+        # (GH-167 RC-B) Search button and Enter trigger exactly one lookup.
+        self._search_button.clicked.connect(self._run_lookup)
+        self._search_edit.returnPressed.connect(self._run_lookup)
+        # (GH-167 RC-B) Mode radios trigger rerun once (checked only).
+        self._radio_online.toggled.connect(
+            lambda checked: self._run_lookup() if checked else None
+        )
+        self._radio_offline.toggled.connect(
+            lambda checked: self._run_lookup() if checked else None
+        )
+        self._radio_alternate.toggled.connect(
+            lambda checked: self._run_lookup() if checked else None
+        )
 
     def _populate_identity(self) -> None:
         """Fill identity fields from the current release entry."""
@@ -427,46 +460,22 @@ class UnifiedLookupDialog(QDialog):
         self._lbl_provenance.setText("(no claim recorded)")
 
     def _run_lookup(self) -> None:
-        """Launch background candidate collection."""
+        """Launch background candidate collection.
+
+        Guard against overlapping workers: if a previous
+        _UnifiedLookupWorker is still running, it is gracefully
+        stopped before starting a new one. Results are tagged with
+        the current query so stale emissions are discarded.
+        """
         mode = "online" if self._radio_online.isChecked() else \
                "offline" if self._radio_offline.isChecked() else "alternate"
 
         search_query = self._search_edit.text().strip() or (self._entry.title or "")
 
-        # --- DEF-3 FIX: wire mode selector and search edit to re-run lookup --
-        # Build reverse lookup: radio -> mode string
-        _RADIO_MODE = {
-            self._radio_online: "online",
-            self._radio_offline: "offline",
-            self._radio_alternate: "alternate",
-        }
-        self._current_mode = "online"
-
-        def _on_radio_toggled(checked: bool, target_radioButton: QRadioButton) -> None:
-            if not checked:
-                return
-            for r in _RADIO_MODE:
-                r.blockSignals(True)
-                r.setChecked(r is target_radioButton)
-                r.blockSignals(False)
-            self._current_mode = _RADIO_MODE[target_radioButton]
-            self._run_lookup()
-
-        self._radio_online.toggled.connect(
-            lambda c: _on_radio_toggled(c, self._radio_online)
-        )
-        self._radio_offline.toggled.connect(
-            lambda c: _on_radio_toggled(c, self._radio_offline)
-        )
-        self._radio_alternate.toggled.connect(
-            lambda c: _on_radio_toggled(c, self._radio_alternate)
-        )
-
-        # --- DEF-3 FIX: connect search edit text changes to re-search --------
-        self._search_edit.textChanged.connect(
-            lambda: self._run_lookup()
-        )
-        # ---------------------------------------------------------------------
+        # Guard against overlapping workers: stop/await previous.
+        if hasattr(self, "_worker") and self._worker is not None and self._worker.isRunning():
+            self._worker.quit()
+            self._worker.wait()
 
         ctx: Optional[LookupContext] = None
         ctx_provider = getattr(self, "_lookup_ctx_provider", None)
@@ -479,7 +488,6 @@ class UnifiedLookupDialog(QDialog):
             try:
                 from ..paths import resolve_config
                 paths_cfg, source = resolve_config()
-                # --- DEF-8 FIX: pass ALL required LookupContext fields -------
                 ctx = LookupContext(
                     query=search_query,
                     release_key=self._entry.release_key,
@@ -490,7 +498,6 @@ class UnifiedLookupDialog(QDialog):
                     config_path=source.config_path,
                 )
             except Exception:
-                # --- DEF-8 FIX: fallback still provides query + release_key -
                 ctx = LookupContext(
                     query=search_query,
                     release_key=self._entry.release_key,
@@ -503,7 +510,9 @@ class UnifiedLookupDialog(QDialog):
         ctx.title = self._entry.title or ""
         ctx.disk_stems = [Path(f).stem for f in (self._entry.adf_files or [])]
 
+        # Tag the worker with the query so stale emissions are discarded.
         self._worker = _UnifiedLookupWorker(ctx, self)
+        self._worker._query = search_query
         self._worker.candidates_ready.connect(self._on_candidates_received)
         self._worker.errors_update.connect(self._on_lookup_error)
         self._worker.start()
@@ -555,6 +564,12 @@ class UnifiedLookupDialog(QDialog):
         )
         self._status_label.setText("Lookup complete.")
         self._btn_compare.setEnabled(bool(candidates))
+        # Clear candidate artwork preview on new lookup results.
+        if hasattr(self, "_cand_artwork_label"):
+            self._cand_artwork_label.setText("Select a candidate to preview artwork.")
+        if hasattr(self, "_cand_artwork_pixmap"):
+            self._cand_artwork_pixmap.clear()
+            self._cand_artwork_pixmap.setText("")
 
     def _on_lookup_error(self, msg: str) -> None:
         self._progress.setRange(0, 1)
@@ -563,7 +578,62 @@ class UnifiedLookupDialog(QDialog):
         self._cand_status.setText(msg)
 
     def _on_candidate_selected(self, row: int, col: int) -> None:
-        pass  # used for visual selection
+        """Populate candidate artwork preview panel."""
+        candidate = self._get_candidate_at_row(row)
+        if not candidate or not self._candidates_list:
+            if hasattr(self, "_cand_artwork_label"):
+                self._cand_artwork_label.setText("No candidate selected.")
+            if hasattr(self, "_cand_artwork_pixmap"):
+                self._cand_artwork_pixmap.clear()
+                self._cand_artwork_pixmap.setText("")
+            return
+
+        artwork_url = candidate.get("artwork_url")
+        local_path = candidate.get("local_cached_path")
+        artwork_source = artwork_url or local_path
+
+        if not artwork_source:
+            if hasattr(self, "_cand_artwork_label"):
+                self._cand_artwork_label.setText("No artwork available for this candidate.")
+            if hasattr(self, "_cand_artwork_pixmap"):
+                self._cand_artwork_pixmap.clear()
+                self._cand_artwork_pixmap.setText("")
+            return
+
+        # Try to render the artwork.
+        pixmap = QPixmap()
+        if local_path and Path(local_path).exists():
+            pixmap = QPixmap(local_path)
+        elif artwork_url:
+            # Online artwork URL — show URL text since we can't
+            # fetch without a network access manager in this context.
+            if hasattr(self, "_cand_artwork_label"):
+                self._cand_artwork_label.setText(f"Artwork URL: {artwork_url}")
+            if hasattr(self, "_cand_artwork_pixmap"):
+                self._cand_artwork_pixmap.clear()
+                self._cand_artwork_pixmap.setText("")
+            return
+
+        if not pixmap.isNull():
+            scaled = pixmap.scaled(
+                200, 200,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            if hasattr(self, "_cand_artwork_pixmap"):
+                self._cand_artwork_pixmap.setPixmap(scaled)
+            if hasattr(self, "_cand_artwork_label"):
+                self._cand_artwork_label.setText(
+                    f"Artwork ({scaled.width()}×{scaled.height()})"
+                )
+        else:
+            if hasattr(self, "_cand_artwork_label"):
+                self._cand_artwork_label.setText(
+                    f"Unable to load artwork: {artwork_source}"
+                )
+            if hasattr(self, "_cand_artwork_pixmap"):
+                self._cand_artwork_pixmap.clear()
+                self._cand_artwork_pixmap.setText("")
 
     def _on_compare(self) -> None:
         row = self._cand_table.currentRow()
@@ -1605,7 +1675,11 @@ class PreviewWidget(QWidget):
         self._load_artwork_preview(entry)
 
     def _load_artwork_preview(self, entry: StagedReleaseEntry) -> None:
-        """Load artwork preview, defaulting to active screenshot."""
+        """Load artwork preview, defaulting to active screenshot.
+
+        Shows explicit failure state (path + reason) instead of a
+        silent blank panel.
+        """
         # Try front artwork first (active screenshot), then others
         artwork_path = entry.artwork_front or (entry.artwork_other[0] if entry.artwork_other else None)
 
@@ -1621,7 +1695,20 @@ class PreviewWidget(QWidget):
                 self._artwork_preview.setPixmap(scaled)
                 return
 
-        self._artwork_preview.setText("No artwork available")
+        # Explicit failure state: show path and reason
+        if not artwork_path:
+            self._artwork_preview.setText("No artwork selected")
+        elif not Path(artwork_path).exists():
+            self._artwork_preview.setText(f"Artwork not found: {artwork_path}")
+        else:
+            try:
+                pixmap = QPixmap(artwork_path)
+                if pixmap.isNull():
+                    self._artwork_preview.setText(f"Artwork unreadable: {artwork_path}")
+                else:
+                    self._artwork_preview.setText(f"Artwork load failed: {artwork_path}")
+            except Exception:
+                self._artwork_preview.setText(f"Artwork error: {artwork_path}")
         self._artwork_preview.setPixmap(QPixmap())
 
     def _set_selected_state(self, state: StagedState) -> None:
@@ -2431,6 +2518,7 @@ class PreviewWidget(QWidget):
             "confidence": entry.confidence,
             "artwork_front": entry.artwork_front,
             "curation_state": entry.curation_state.value,
+            "notes": entry.notes,
         }
 
     @staticmethod
@@ -2445,6 +2533,7 @@ class PreviewWidget(QWidget):
             entry.curation_state = StagedState(snap.get("curation_state") or "pending")
         except (TypeError, ValueError):
             pass
+        entry.notes = snap.get("notes")
 
     def _apply_lookup_candidate(
         self, entry: "StagedReleaseEntry", mode: str, candidate: dict
@@ -2478,6 +2567,23 @@ class PreviewWidget(QWidget):
                 f"(provider: {entry.metadata_source}, "
                 f"conf {entry.match_confidence:.2f})"
             )
+            # Refresh stale notes: supersede "metadata lookup: not-found"
+            # with the accepted decision; preserve all other note lines.
+            new_note = (
+                f"metadata lookup: accepted (provider {entry.metadata_source}, "
+                f"conf {entry.match_confidence:.2f})"
+            )
+            old_notes = entry.notes or ""
+            note_lines = old_notes.splitlines()
+            new_lines = [
+                new_note if ln.startswith("metadata lookup:") else ln
+                for ln in note_lines
+            ]
+            if not any(
+                ln.startswith("metadata lookup: accepted") for ln in new_lines
+            ):
+                new_lines.append(new_note)
+            entry.notes = "\n".join(new_lines)
         else:
             # Offline: local LaunchBox media source. Never references an
             # online provider. auto_match has already cached the artwork
@@ -2510,6 +2616,7 @@ class PreviewWidget(QWidget):
         self._refresh_table()
         self._update_summary()
         self.state_changed.emit()
+        self._show_detail(entry)
 
     def _on_alternate_lookup(self) -> None:
         """Perform alternate search with custom query."""

@@ -513,8 +513,37 @@ def run_pipeline(
                     rtfm_dir=rtfm_dir,
                     extra_sources=retrokit_sources,
                 )
-        except Exception:  # RTFM build failure must not break the pipeline
+        except Exception as exc:
+            # (GH-167 RC-C) Categorized failure records instead of
+            # silently collapsing everything into []. Each group gets
+            # a RtfmResult with an explicit reason so the operator
+            # can distinguish no-config, disabled, generation-failed,
+            # etc.
+            from .rtfm import RtfmResult
             rtfm_results = []
+            _cfg_template = globals().get("rtfm_cfg")
+            if _cfg_template is not None:
+                _cfg_template = getattr(_cfg_template, "template", "")
+            else:
+                _cfg_template = ""
+            for _g in groups:
+                _rk = getattr(_g, "release_key", "")
+                _reason = str(exc)
+                _category = "generation-failed"
+                _lower = _reason.lower()
+                if "config" in _lower or isinstance(exc, (KeyError, TypeError)):
+                    _category = "no-config"
+                elif "disabled" in _lower:
+                    _category = "disabled"
+                elif "source" in _lower or "discover" in _lower:
+                    _category = "no-source-found"
+                rtfm_results.append(RtfmResult(
+                    release_key=_rk,
+                    basename=getattr(_g, "title", _rk),
+                    routed_for_review=True,
+                    review_reason=f"{_category}: {_reason}",
+                    template_used=_cfg_template,
+                ))
 
     # Phase 6: quarantine routing for flagged groups.
     _act("Checking for releases that need review…")
@@ -703,6 +732,16 @@ def run_pipeline(
                 "provider": r.provider,
                 "artwork_missing": (not g.quarantine_reason) and bool(r.artwork_missing),
                 "notes": list(r.notes),
+                # (GH-167 RC-A) Processed artwork path: used to set
+                # entry.artwork_front at staging so the Preview Curation
+                # artwork preview renders the actual artifact instead of
+                # a silent blank panel.
+                "artwork_processed": r.artwork_resized,
+                # (GH-167 RC-C) RTFM results for this release group:
+                # mapped to entry.rtfm_files at staging so the Preview
+                # Curation RTFM panel shows the artifact path instead
+                # of "(none)".
+                "rtfm_results": [],
                 "events": events,
                 # (GH-86) Full discovered source inventory for this release
                 # (ordered main disks followed by special disks) so the curation
@@ -722,6 +761,16 @@ def run_pipeline(
                 },
             }
         )
+
+    # (GH-167 RC-C) Map rtfm_results to per_group entries
+    # so staging can populate entry.rtfm_files.
+    _rtfm_by_key: dict[str, list] = {}
+    for _r in rtfm_results:
+        _rk = getattr(_r, "release_key", "")
+        if _rk:
+            _rtfm_by_key.setdefault(_rk, []).append(_r)
+    for _pg in per_group:
+        _pg["rtfm_results"] = _rtfm_by_key.get(_pg["release_key"], [])
 
     # (GH-44) Run-level provider-attempt diagnostics: derive one structured
     # attempt per (provider, release) from the events above, then roll the
@@ -965,6 +1014,25 @@ def build_staged_library_from_result(
                 note_lines.append(text)
         if note_lines:
             entry.notes = "\n".join(note_lines)
+
+        # (GH-167 RC-A) Reconcile processed artwork path into
+        # entry.artwork_front so the Preview Curation artwork preview
+        # renders the actual artifact instead of a silent blank panel.
+        # Only set when no curation-operator artwork choice exists
+        # (CURATION-authority claims are preserved by carry_over).
+        artwork_processed = pg.get("artwork_processed")
+        if artwork_processed and not entry.artwork_front:
+            entry.artwork_front = str(artwork_processed)
+
+        # (GH-167 RC-C) Populate entry.rtfm_files from rtfm_results
+        # so the Preview Curation RTFM panel shows the artifact path
+        # instead of "(none)". Also categorizes failures via
+        # RtfmResult.routed_for_review/review_reason.
+        for _r in pg.get("rtfm_results", []):
+            if getattr(_r, "written", False) and getattr(_r, "rtfm_path", None):
+                rtfm_path = str(_r.rtfm_path)
+                if rtfm_path and rtfm_path not in entry.rtfm_files:
+                    entry.rtfm_files.append(rtfm_path)
 
         # Add initial state change action
         entry.actions.append(StagedChange(
