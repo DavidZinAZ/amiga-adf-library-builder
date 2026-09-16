@@ -772,23 +772,27 @@ class MainWindow(QMainWindow):
         box.setToolTip(provider.metadata.description)
         form = QFormLayout(box)
         enabled = QCheckBox("Enabled")
-        enabled.setChecked(provider.enabled())
+        # Restore persisted enablement state from Settings.
+        provider_enabled = self._settings.provider_enabled.get(provider.metadata.id, provider.enabled())
+        enabled.setChecked(provider_enabled)
         enabled.setToolTip(
             "Turn this metadata source on. A source only activates once it "
             "has been set up below."
         )
         enabled.stateChanged.connect(
-            lambda state, p=provider: p.set_enabled(state == Qt.CheckState.Checked.value)
+            lambda state, p=provider: self._on_provider_toggle(state, p)
         )
         form.addRow("", enabled)
         cfg = provider.to_config_dict()
         for field in provider.metadata.fields:
+            # Restore persisted field values from Settings.
+            field_val = self._settings.provider_fields.get(provider.metadata.id, {}).get(field.key, cfg.get(field.key, field.default))
             le = QLineEdit(self)
-            le.setText(str(cfg.get(field.key, field.default)))
+            le.setText(str(field_val))
             le.setPlaceholderText(field.placeholder)
             le.setToolTip(field.help_text)
             le.textChanged.connect(
-                lambda text, p=provider, k=field.key: p.set_field(k, text)
+                lambda text, p=provider, k=field.key: self._on_provider_field_change(p, k, text)
             )
             form.addRow(field.label, le)
         if provider.metadata.requires_secret or provider.metadata.auth_required != "none":
@@ -1591,6 +1595,42 @@ class MainWindow(QMainWindow):
             f"Status: {status.message}",
         )
 
+    def _restore_provider_state(self) -> None:
+        """Restore provider enablement and field state from Settings."""
+        for provider in self._registry.all():
+            pid = provider.metadata.id
+            if pid in self._settings.provider_enabled:
+                provider.set_enabled(self._settings.provider_enabled[pid])
+            if pid in self._settings.provider_fields:
+                for key, val in self._settings.provider_fields[pid].items():
+                    provider.set_field(key, val)
+
+    def _on_provider_toggle(self, state: int, provider: Provider) -> None:
+        """Handle provider enabled checkbox toggle: persist to Settings."""
+        enabled = state == Qt.CheckState.Checked.value
+        provider.set_enabled(enabled)
+        self._settings.provider_enabled[provider.metadata.id] = enabled
+        self._save_provider_settings()
+
+    def _on_provider_field_change(self, provider: Provider, key: str, text: str) -> None:
+        """Handle provider field change: persist to Settings."""
+        provider.set_field(key, text)
+        if provider.metadata.id not in self._settings.provider_fields:
+            self._settings.provider_fields[provider.metadata.id] = {}
+        self._settings.provider_fields[provider.metadata.id][key] = text
+        self._save_provider_settings()
+
+    def _save_provider_settings(self) -> None:
+        """Persist current provider state to the settings store."""
+        if self._settings_store is not None:
+            try:
+                self._settings_store.update(
+                    provider_enabled=self._settings.provider_enabled,
+                    provider_fields=self._settings.provider_fields,
+                )
+            except Exception:
+                logger.debug("could not save provider settings", exc_info=True)
+
     def _set_theme(self, name: str) -> None:
         apply_theme(name, themes_dir=self._paths.themes_dir)
         if self._settings_store is not None:
@@ -1838,6 +1878,8 @@ class MainWindow(QMainWindow):
         self._cb_one_per_game.setChecked(getattr(s, "one_per_game", True))
         self._le_operator_decisions.setText(getattr(s, "operator_decisions_path", ""))
         self._le_selection_manifest.setText(getattr(s, "selection_manifest_path", ""))
+        # (GH-170) Restore provider enablement and field state.
+        self._restore_provider_state()
         self._lb_restore_mappings(s)
         apply_theme(s.theme or "system", themes_dir=self._paths.themes_dir)
         self._update_export_state_display()

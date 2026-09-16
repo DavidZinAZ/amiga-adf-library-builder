@@ -287,10 +287,9 @@ class UnifiedLookupDialog(QDialog):
 
         # Query + mode
         form2 = QFormLayout()
-        form2.addRow("Search As:", QLineEdit())  # placeholder, filled next
         self._search_edit = QLineEdit(self._entry.title or "")
         self._search_edit.selectAll()
-        form2.addRow("", self._search_edit)
+        form2.addRow("Search", self._search_edit)
 
         # (GH-167 RC-B) Search button triggers exactly one lookup.
         self._search_button = QPushButton("Search")
