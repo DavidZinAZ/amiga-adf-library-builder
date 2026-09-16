@@ -7,7 +7,7 @@ module only renders and forwards operator actions.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any
 
 from PySide6.QtWidgets import (
     QComboBox,
@@ -125,7 +125,7 @@ class ManualLookupPanel(QWidget):
         ov.addWidget(self._revert_btn)
         layout.addLayout(ov)
 
-        # Row 4: DAT source browser (read-only).
+        # Row 4: DAT source browser (read-only) with lookup integration.
         src_box = QGroupBox("Metadata source browser (read-only DAT index)")
         sl = QVBoxLayout(src_box)
         brow = QHBoxLayout()
@@ -136,6 +136,11 @@ class ManualLookupPanel(QWidget):
         brow.addWidget(self._query_edit, 1)
         self._search_btn = QPushButton("Search Sources")
         brow.addWidget(self._search_btn)
+        self._lookup_btn = QPushButton("Unified Lookup…")
+        self._lookup_btn.setToolTip(
+            "Open unified lookup dialog for this entity with online + offline candidates"
+        )
+        brow.addWidget(self._lookup_btn)
         self._use_query_btn = QPushButton("Use For Override")
         self._use_query_btn.setToolTip(
             "Copy the selected source row's title into the override value box"
@@ -160,6 +165,7 @@ class ManualLookupPanel(QWidget):
         self._revert_btn.clicked.connect(self._on_revert_override)
         self._search_btn.clicked.connect(self._on_search_sources)
         self._use_query_btn.clicked.connect(self._on_use_query_value)
+        self._lookup_btn.clicked.connect(self._on_unified_lookup)
 
     # --- entity selection ------------------------------------------------------
 
@@ -344,6 +350,155 @@ class ManualLookupPanel(QWidget):
         if item is None:
             return
         self._value_edit.setText(item.text())
+
+    # --- unified lookup integration (GH-157) -----------------------------------
+
+    def _on_unified_lookup(self) -> None:
+        """Open a quick query dialog and run candidates_from_sources + online lookup.
+
+        This connects the previously siloed ManualLookupPanel into the shared
+        unified lookup workflow. If a query is already entered in the source
+        browser, it reuses that; otherwise prompts for a new one.
+        """
+        from PySide6.QtWidgets import QDialog, QDialogButtonBox, QVBoxLayout, QLabel
+
+        query = self._query_edit.text().strip()
+        if not query:
+            # Quick prompt
+            dlg = QDialog(self)
+            dlg.setWindowTitle("Unified Lookup Query")
+            layout = QVBoxLayout(dlg)
+            lbl = QLabel("Enter search query:")
+            edit = QLineEdit()
+            edit.setPlaceholderText("Title, hash, or keyword…")
+            layout.addWidget(lbl)
+            layout.addWidget(edit)
+            btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+            layout.addWidget(btns)
+            btns.accepted.connect(dlg.accept)
+            btns.rejected.connect(dlg.reject)
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                return
+            query = edit.text().strip()
+
+        if not query:
+            return
+
+        # Run DAT index search immediately (offline, fast)
+        kwargs = {}
+        def _hex(s: str) -> bool:
+            return all(c in "0123456789abcdefABCDEF" for c in s)
+
+        if _hex(query):
+            if len(query) == 40:
+                kwargs["sha1"] = query
+            elif len(query) == 32:
+                kwargs["md5"] = query
+            elif len(query) == 8:
+                kwargs["crc32"] = query
+        else:
+            kwargs["title"] = query
+
+        dat_error: Optional[str] = None
+        try:
+            cands = candidates_from_sources(self._manager, **kwargs) if kwargs else []
+        except Exception as exc:
+            dat_error = f"DAT search error: {exc}"
+            cands = []
+
+        # Update candidate table with DAT results
+        self._candidates_table.setRowCount(0)
+        self._candidates_table.setRowCount(len(cands))
+        for r, cand in enumerate(cands):
+            values = [
+                cand.get("source_name", ""),
+                cand.get("title") or "",
+                cand.get("year") or "",
+                cand.get("publisher") or "",
+                cand.get("region") or "",
+                cand.get("sha1") or "",
+                cand.get("record_key", ""),
+            ]
+            for col, val in enumerate(values):
+                self._candidates_table.setItem(r, col, QTableWidgetItem(str(val)))
+
+        # --- DEF-6 FIX: surface online candidates in the status / table ------
+        online_ok = False
+        online_result = None
+        online_candidates: list[dict] = []
+        try:
+            ctx_provider = getattr(self, "_lookup_ctx_provider", None)
+            if ctx_provider:
+                ctx = ctx_provider()
+                if ctx:
+                    from ..lookup_workflow import run_lookup, MODE_ONLINE
+                    ctx.query = query
+                    online_result = run_lookup(MODE_ONLINE, ctx, collect_candidates=True)
+                    online_ok = True
+                    if hasattr(online_result, "candidates"):
+                        online_candidates = online_result.candidates
+        except Exception as online_exc:
+            online_ok = False
+            dat_error = dat_error or ""
+            dat_error += f"; online lookup failed: {online_exc}"
+
+        if online_ok and online_result:
+            # Merge online candidates into the visible candidate table (after
+            # any DAT rows).  This prevents the unified lookup from fetching
+            # online results and silently throwing them away.
+            if hasattr(online_result, "candidates") and online_result.candidates:
+                all_cands = cands + online_result.candidates
+                self._candidates_table.setRowCount(len(all_cands))
+                for r, cand in enumerate(cands):
+                    values = [
+                        cand.get("source_name", ""),
+                        cand.get("title") or "",
+                        cand.get("year") or "",
+                        cand.get("publisher") or "",
+                        cand.get("region") or "",
+                        cand.get("sha1") or "",
+                        cand.get("record_key", ""),
+                    ]
+                    for col, val in enumerate(values):
+                        self._candidates_table.setItem(r, col, QTableWidgetItem(str(val)))
+                n_dat = len(cands)
+                for idx, oc in enumerate(online_result.candidates):
+                    values = [
+                        oc.get("provider") or "online",
+                        oc.get("title") or "",
+                        str(oc.get("year") or ""),
+                        oc.get("publisher") or "",
+                        oc.get("region") or "",
+                        oc.get("sha1") or "",
+                        oc.get("record_key") or "",
+                    ]
+                    for col, val in enumerate(values):
+                        self._candidates_table.setItem(n_dat + idx, col, QTableWidgetItem(str(val)))
+            else:
+                self._candidates_table.setRowCount(len(cands))
+                for r, cand in enumerate(cands):
+                    values = [
+                        cand.get("source_name", ""),
+                        cand.get("title") or "",
+                        cand.get("year") or "",
+                        cand.get("publisher") or "",
+                        cand.get("region") or "",
+                        cand.get("sha1") or "",
+                        cand.get("record_key", ""),
+                    ]
+                    for col, val in enumerate(values):
+                        self._candidates_table.setItem(r, col, QTableWidgetItem(str(val)))
+
+        if dat_error:
+            self._status_label.setText(dat_error)
+        elif online_ok and online_result:
+            n_on = len(online_candidates)
+            self._status_label.setText(
+                f"DAT results: {len(cands)} | Online: {n_on} candidate(s)"
+            )
+        else:
+            self._status_label.setText(f"DAT results: {len(cands)}")
+        # ---------------------------------------------------------------------
 
     def closeEvent(self, event) -> None:  # release the canonical DB promptly
         try:
