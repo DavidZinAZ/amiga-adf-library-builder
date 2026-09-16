@@ -566,6 +566,7 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                  hasheous_provider=None, igdb_provider=None,
                  screenscraper_provider=None,
                  retroachievements_provider=None,
+                 halloflight_enabled: bool = True,
                  include_artwork: bool = True,
                  cancel_event: Optional[threading.Event] = None,
                  activity: Optional[Callable[[str], None]] = None) -> EnrichResult:
@@ -613,6 +614,7 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                 lookup_title, cache_dir=metadata_cache_dir,
                 curated_dir=curated_metadata_dir, refresh=refresh, group=group,
                 activity=activity,
+                halloflight_enabled=halloflight_enabled,
             )
             # Surface online relevance fall-through decisions as structured
             # diagnostics (bounded: one event per rejected/reviewed candidate).
@@ -1360,6 +1362,7 @@ def enrich_all(groups: list[ReleaseGroup], *, nfo_dir: Path, scans: list[ScanRec
                hasheous_provider=None, igdb_provider=None,
                screenscraper_provider=None,
                retroachievements_provider=None,
+               halloflight_enabled: bool = True,
                include_artwork: bool = True,
                cancel_event: Optional[threading.Event] = None,
                activity: Optional[Callable[[str], None]] = None) -> list[EnrichResult]:
@@ -1396,6 +1399,7 @@ def enrich_all(groups: list[ReleaseGroup], *, nfo_dir: Path, scans: list[ScanRec
                      igdb_provider=igdb_provider,
                      screenscraper_provider=screenscraper_provider,
                      retroachievements_provider=retroachievements_provider,
+                     halloflight_enabled=halloflight_enabled,
                      include_artwork=include_artwork,
                      cancel_event=cancel_event,
                      activity=activity))

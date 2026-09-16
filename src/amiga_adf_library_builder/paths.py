@@ -526,6 +526,28 @@ def load_retrokit_config(config: Optional[str] = None) -> dict:
     return dict(rk)
 
 
+def load_hall_of_light_config(config: Optional[str] = None) -> dict:
+    """Return the ``[hall-of-light]`` TOML table from the resolved config file.
+
+    Mirrors :func:`load_playmatch_config` EXACTLY: same precedence chain
+    (explicit ``config`` > env > XDG > system), returns ``{}`` when no config
+    file is found or no ``[hall-of-light]`` table is present.
+    ``metadata.py`` provides the typed :class:`~amiga_adf_library_builder.metadata.HallOfLightConfig`;
+    this helper is the paths-layer entry point so the precedence logic stays in one module.
+
+    The Hall of Light provider is OPTIONAL and ENABLED by default;
+    ``{}`` (no table) means enabled with default settings (backward compatible).
+    """
+    path = _discover_config_file(config)
+    if path is None:
+        return {}
+    data = _read_config_file(path)
+    hol = data.get("hall-of-light")
+    if not isinstance(hol, dict):
+        return {}
+    return dict(hol)
+
+
 # --- Discovery + precedence ---------------------------------------------------
 
 
