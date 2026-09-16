@@ -279,6 +279,9 @@ class LocalMediaConfig:
     auto_match_threshold: float = DEFAULT_AUTO_MATCH_THRESHOLD
     review_threshold: float = DEFAULT_REVIEW_THRESHOLD
     near_tie_difference: float = DEFAULT_NEAR_TIE_DIFFERENCE
+    # GH-164 RC6: emit per-candidate audit trail (disabled by default;
+    # group-level summaries used instead to prevent ~9,600 events/run).
+    detailed_diagnostics: bool = False
     media_roots: tuple[MediaRoot, ...] = ()
     manual_roots: tuple[ManualRoot, ...] = ()
 
@@ -322,6 +325,7 @@ class LocalMediaConfig:
             near_tie = float(raw.get("near_tie_difference", DEFAULT_NEAR_TIE_DIFFERENCE))
         except (TypeError, ValueError):
             near_tie = DEFAULT_NEAR_TIE_DIFFERENCE
+        detailed_diagnostics = bool(raw.get("detailed_diagnostics", False))
         # Validate: review_threshold < auto_match_threshold
         if review >= auto_match:
             # Swap to sensible defaults rather than silently accepting invalid config
@@ -337,6 +341,7 @@ class LocalMediaConfig:
             auto_match_threshold=auto_match,
             review_threshold=review,
             near_tie_difference=near_tie,
+            detailed_diagnostics=detailed_diagnostics,
             media_roots=_parse_media_roots(raw.get("media_roots")),
             manual_roots=_parse_manual_roots(raw.get("manual_roots")),
         )
@@ -1195,6 +1200,38 @@ class LocalMediaProvider:
 
     # -- discovery (read-only) ------------------------------------------------
 
+    def _add_to_index(self, cand: LocalMediaCandidate) -> None:
+        """Populate dict indexes for GH-164 RC6 O(1) candidate lookup."""
+        from .title_norm import canonical_title as _ct
+        ci = self._cand_identities(cand)
+        # Index by norm_stem
+        if ci.get("norm_stem"):
+            self._norm_stem_index.setdefault(ci["norm_stem"], []).append(cand)
+        # Index by norm_folder
+        if ci.get("norm_folder"):
+            self._norm_folder_index.setdefault(ci["norm_folder"], []).append(cand)
+        # Index by norm_ordinal_stem
+        if ci.get("norm_ordinal_stem"):
+            self._norm_ordinal_stem_index.setdefault(ci["norm_ordinal_stem"], []).append(cand)
+        # Index by canonical base stem
+        if ci.get("norm_base_stem"):
+            self._norm_base_stem_index.setdefault(ci["norm_base_stem"], []).append(cand)
+
+    def _lookup_candidates_fast(self, title: str) -> list:
+        """Quick lookup of candidates by canonical norm stem.
+
+        Returns a shortlist for fuzzy fallback or empty list if no index hit.
+        """
+        key = _ct(title) if title else ""
+        if not key:
+            return []
+        for idx_name in ("_norm_stem_index", "_norm_folder_index",
+                         "_norm_ordinal_stem_index", "_norm_base_stem_index"):
+            idx = getattr(self, idx_name, {})
+            if key in idx:
+                return idx[key]
+        return []
+
     def discover(self) -> int:
         """Walk every configured root and build the candidate index.
 
@@ -1209,6 +1246,11 @@ class LocalMediaProvider:
         """
         self._index = []
         self._root_order = {}
+        # GH-164 RC6: dict indexes for O(1) candidate lookup
+        self._norm_stem_index: dict[str, list] = {}
+        self._norm_folder_index: dict[str, list] = {}
+        self._norm_ordinal_stem_index: dict[str, list] = {}
+        self._norm_base_stem_index: dict[str, list] = {}
         for _i, root in enumerate(self.config.roots):
             self._root_order[str(Path(root))] = _i
         for _i, media_root in enumerate(self.config.media_roots):
@@ -1223,6 +1265,7 @@ class LocalMediaProvider:
                     categories=self.config.preferred_image_types,
                 ):
                     self._index.append(cand)
+                    self._add_to_index(cand)
             except OSError:
                 # A single unreadable root must not abort the whole run.
                 continue
@@ -1236,6 +1279,7 @@ class LocalMediaProvider:
                     categories=(media_root.asset_type,),
                 ):
                     self._index.append(cand)
+                    self._add_to_index(cand)
             except OSError:
                 # A single unreadable root must not abort the whole run.
                 continue

@@ -460,13 +460,15 @@ def _resolve_local_media_master(group: ReleaseGroup, provider) -> tuple[Optional
         ))
         return None, events
 
-    # Emit detailed per-candidate diagnostics for each evaluated candidate
-    # This exposes the matching key/strategy for every match attempt
+    # GH-164 RC6: Replace per-candidate EnrichEvent emission with
+    # group-level summaries. Per-candidate audit is retained behind
+    # the detailed_diagnostics flag to prevent ~9,600 miss events/run.
     candidates_evaluated = getattr(result, "candidates_evaluated", []) or []
     matched_count = 0
     rejected_count = 0
     unmatched_count = 0
     needs_review_count = 0
+    _detail_candidates: list[dict] = []
 
     for cand_diag in candidates_evaluated:
         method = cand_diag.get("method", "none")
@@ -490,68 +492,34 @@ def _resolve_local_media_master(group: ReleaseGroup, provider) -> tuple[Optional
         )
         is_needs_review = result.outcome == "needs_review" and method == result.match_method.value
 
+        # Track counts and optional detail for debug mode
+        _detail: dict = {"method": method, "score": score, "category": category}
         if is_auto_match or is_manual_lock:
             matched_count += 1
-            events.append(EnrichEvent(
-                category=EnrichCategory.LOCAL_MEDIA,
-                detail=(
-                    f"matched {method} in {category!r} (conf {score:.2f}); "
-                    f"stem={norm_stem!r}; source={Path(path).name}"
-                ),
-                cache="hit", ok=True,
-            ))
+            _detail["outcome"] = "matched"
         elif method != "none" and score >= getattr(provider.config, "confidence_threshold", lm.AUTO_ACCEPT_MIN_CONF):
-            # Confident match that wasn't selected (lower priority category)
             rejected_count += 1
-            events.append(EnrichEvent(
-                category=EnrichCategory.LOCAL_MEDIA,
-                detail=(
-                    f"rejected {method} in {category!r} (conf {score:.2f}); "
-                    f"stem={norm_stem!r}; source={Path(path).name}; "
-                    f"lower priority than selected match"
-                ),
-                cache="miss", ok=False,
-                error="lower priority category",
-            ))
+            _detail["outcome"] = "rejected"
+            _detail["reason"] = "lower priority category"
         elif is_needs_review:
-            # Candidate routed to review
             needs_review_count += 1
-            events.append(EnrichEvent(
-                category=EnrichCategory.LOCAL_MEDIA_REVIEW,
-                detail=(
-                    f"routed to review {method} in {category!r} (conf {score:.2f}); "
-                    f"stem={norm_stem!r}; source={Path(path).name}; "
-                    f"{result.manual_review_reason or 'requires review'}"
-                ),
-                cache="miss", ok=False,
-                error="needs manual review",
-            ))
+            _detail["outcome"] = "needs_review"
+            _detail["reason"] = result.manual_review_reason or "requires review"
         elif method in ("fuzzy", "fuzzy_manual"):
-            # Fuzzy candidate that didn't meet threshold
             rejected_count += 1
-            events.append(EnrichEvent(
-                category=EnrichCategory.LOCAL_MEDIA_REVIEW,
-                detail=(
-                    f"rejected fuzzy {method} in {category!r} (conf {score:.2f}); "
-                    f"stem={norm_stem!r}; source={Path(path).name}; "
-                    f"below confidence threshold"
-                ),
-                cache="miss", ok=False,
-                error="below confidence threshold",
-            ))
+            _detail["outcome"] = "rejected"
+            _detail["reason"] = "below confidence threshold"
         else:
-            # No match at all
             unmatched_count += 1
-            events.append(EnrichEvent(
-                category=EnrichCategory.LOCAL_MEDIA_MISS,
-                detail=(
-                    f"unmatched in {category!r} (method={method}, score={score:.2f}); "
-                    f"stem={norm_stem!r}; source={Path(path).name}"
-                ),
-                cache="miss", ok=True,
-            ))
+            _detail["outcome"] = "unmatched"
 
-    # Summary event with counts
+        # Only keep per-candidate detail when debug diagnostics are enabled
+        if getattr(provider.config, "detailed_diagnostics", False):
+            _detail["path"] = str(path)
+            _detail["norm_stem"] = norm_stem
+            _detail_candidates.append(_detail)
+
+    # Group-level summary event (replaces ~9,600 per-candidate events)
     events.append(EnrichEvent(
         category=EnrichCategory.LOCAL_MEDIA,
         detail=(
@@ -561,6 +529,20 @@ def _resolve_local_media_master(group: ReleaseGroup, provider) -> tuple[Optional
         ),
         cache="hit" if result.outcome == "auto_match" else "miss", ok=True,
     ))
+    if unmatched_count > 0 and not getattr(provider.config, "detailed_diagnostics", False):
+        events.append(EnrichEvent(
+            category=EnrichCategory.LOCAL_MEDIA_MISS,
+            detail=f"{unmatched_count} candidates unmatched (detail suppressed; enable detailed_diagnostics for per-candidate audit)",
+            cache="miss", ok=True,
+        ))
+    elif getattr(provider.config, "detailed_diagnostics", False) and _detail_candidates:
+        # Emit detailed per-candidate audit only when explicitly enabled
+        for _detail in _detail_candidates[:50]:  # Cap at 50 to prevent abuse
+            events.append(EnrichEvent(
+                category=EnrichCategory.LOCAL_MEDIA_MISS,
+                detail=f"candidate detail: {_detail}",
+                cache="miss", ok=True,
+            ))
 
     # GH-49: Handle three outcomes
     if result.outcome == "auto_match" and result.found and result.cached_path is not None:
