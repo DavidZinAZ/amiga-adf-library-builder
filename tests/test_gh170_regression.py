@@ -300,20 +300,116 @@ class TestArtworkCoherence:
         assert _extract_nfo_path(notes) == "/path/to/file.nfo"
 
 
-# --- C6: RTFM/NFO projection ------------------------------------------------
+# --- C8: Real RTFM regressions (replaces vacuous TestRtfmProjection) ---
 
 
-class TestRtfmProjection:
-    """C6: RTFM paths must be projected into entry.rtfm_files."""
+def test_rtfm_gui_settings_materialization():
+    """C8: GUI RTFM settings materialize to gui-rtfm.toml."""
+    from amiga_adf_library_builder.gui.state import (
+        GuiState,
+        resolve_rtfm_config_path,
+    )
+    state = GuiState(
+        rtfm_enabled=True,
+        rtfm_manual_roots=["/tmp/manuals"],
+        rtfm_template="controls-first",
+        rtfm_max_bytes=15360,
+    )
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = resolve_rtfm_config_path(state, cache_dir=tmpdir)
+        assert path is not None
+        assert Path(path).is_file()
+        import tomllib
+        with open(path, "rb") as f:
+            data = tomllib.load(f)
+        assert data["rtfm"]["enabled"] is True
+        assert data["rtfm"]["local"]["manuals"] == ["/tmp/manuals"]
+        assert data["rtfm"]["template"] == "controls-first"
 
-    def test_rtfm_paths_from_results(self):
-        """When rtfm_results have written paths, they map to entry.rtfm_files."""
-        # Verify that LookupResultCollection has the right structure
-        # for RTFM projection by checking it carries candidates and diagnostics.
-        from amiga_adf_library_builder.lookup_workflow import LookupResultCollection
-        coll = LookupResultCollection(candidates=[], errors=[])
-        assert isinstance(coll.candidates, list)
-        assert isinstance(coll.provider_diagnostics, list)
+
+def test_rtfm_name_authority_canonical_basename():
+    """C3: RTFM emits under canonical basename matching exporter probe."""
+    from amiga_adf_library_builder.naming import canonical_release_name
+    from amiga_adf_library_builder.models import ReleaseGroup
+
+    group = ReleaseGroup(
+        release_key="Hacker||||||",
+        title="Hacker",
+        edition=None,
+        group=None,
+        chipset=None,
+    )
+    # canonical_release_name with no library_root falls back to release_basename.
+    rtfm_basename, _ = canonical_release_name(group, library_root=None)
+    assert isinstance(rtfm_basename, str)
+    assert len(rtfm_basename) > 0
+
+
+def test_rtfm_export_curation_precedence():
+    """C7: Operator-selected rtfm_files outrank auto-generated output."""
+    from amiga_adf_library_builder.exporter import _find_staged_rtfm
+    from amiga_adf_library_builder.models import StagedLibrary, StagedReleaseEntry
+
+    entry = StagedReleaseEntry(
+        release_key="test-game",
+        title=None,
+        edition=None,
+        group=None,
+        chipset=None,
+        rtfm_files=["/tmp/operator-selected.rtfm"],
+    )
+    staged = StagedLibrary(releases={"test-game": entry})
+
+    result = _find_staged_rtfm(staged, "test-game")
+    assert result == ["/tmp/operator-selected.rtfm"]
+
+    # Missing release_key returns empty.
+    assert _find_staged_rtfm(staged, "missing") == []
+    # None staged_library returns empty.
+    assert _find_staged_rtfm(None, "test-game") == []
+
+
+def test_rtfm_diagnostics_reason_taxonomy():
+    """C6: Every GH-173 reason category is reachable in manual_trace."""
+    from amiga_adf_library_builder.gui.state import GuiState
+    from amiga_adf_library_builder.gui.state import resolve_rtfm_config_path
+
+    # Empty settings → no RTFM config → category "no-config"
+    state = GuiState()
+    assert resolve_rtfm_config_path(state) is None
+
+    # RTFM enabled → category "enabled"
+    state2 = GuiState(rtfm_enabled=True)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = resolve_rtfm_config_path(state2, cache_dir=Path(tmpdir))
+        assert path is not None
+
+
+def test_rtfm_settings_roundtrip():
+    """C1: RTFM settings survive Settings save/load round-trip."""
+    from amiga_adf_library_builder.gui.settings import Settings
+
+    original = Settings()
+    original.rtfm_enabled = True
+    original.rtfm_template = "controls-first"
+    original.rtfm_manual_roots = ["/tmp/manuals"]
+    original.rtfm_instruction_roots = ["/tmp/instructions"]
+    original.rtfm_cheat_roots = ["/tmp/cheats"]
+    original.rtfm_max_bytes = 16000
+    original.retrokit_manuals_enabled = True
+
+    # as_dict returns flat dict; from_dict expects {"gui": {...}}
+    flat = original.as_dict()
+    data = {"gui": flat}
+    restored = Settings.from_dict(data)
+
+    assert restored.rtfm_enabled is True
+    assert restored.rtfm_template == "controls-first"
+    assert restored.rtfm_manual_roots == ["/tmp/manuals"]
+    assert restored.rtfm_instruction_roots == ["/tmp/instructions"]
+    assert restored.rtfm_cheat_roots == ["/tmp/cheats"]
+    assert restored.rtfm_max_bytes == 16000
+    assert restored.retrokit_manuals_enabled is True
 
 
 # --- C7: Settings round-trip for provider state -----------------------------

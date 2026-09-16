@@ -466,6 +466,18 @@ def run_pipeline(
     # unchanged. A failure must never break the run (degrade to no .rtfm).
     rtfm_results: list = []
     rtfm_dir = cfg.rtfm_dir
+    manual_trace: dict[str, Any] = {
+        "roots_searched": [],
+        "files_indexed": 0,
+        "candidates": [],
+        "provider_statuses": [],
+        "extraction_method": None,
+        "output_path": None,
+        "output_size": None,
+        "export_status": "skipped",
+        "category": "no-config",
+        "detail": "",
+    }
     # (GH-24) Manuals/RTFM selection is independent of artwork. When the
     # operator turns it off, the deterministic RTFM build is skipped entirely
     # (zero provider work) even if an [rtfm] config is present and enabled.
@@ -476,6 +488,9 @@ def run_pipeline(
 
             rtfm_cfg = rtfm_mod.RtfmConfig.from_dict(load_rtfm_config(rtfm_config_path))
             if rtfm_cfg.enabled:
+                _act("RTFM phase: enabled, building manual sidecars…")
+                manual_trace["category"] = "enabled"
+                manual_trace["roots_searched"] = list(rtfm_cfg.manuals_roots)
                 # Optional RetroKit / Archive.org manual provider (GH-10).
                 # OPTIONAL and DISABLED by default; only built when a
                 # [retrokit_manuals] config is present AND enabled AND the run
@@ -491,6 +506,7 @@ def run_pipeline(
                 retrokit_sources = None
                 if online and retrokit_config_path:
                     try:
+                        _act("RTFM phase: querying RetroKit manual provider…")
                         from . import retrokit as rk_mod
                         from .paths import load_retrokit_config
 
@@ -505,14 +521,34 @@ def run_pipeline(
                                 rk_provider.resolve_and_acquire(g) for g in groups
                             ]
                             retrokit_sources = rk_mod.to_rtfm_sources(rk_results)
+                            _act(f"RTFM phase: RetroKit returned {len(rk_results)} candidate(s)")
+                            manual_trace["provider_statuses"].append("retrokit:queried")
                     except Exception:  # provider failure must not break the pipeline
                         retrokit_sources = None
+                        manual_trace["provider_statuses"].append("retrokit:error")
                 rtfm_results = rtfm_mod.build_rtfm_all(
                     groups,
                     cfg=rtfm_cfg,
                     rtfm_dir=rtfm_dir,
                     extra_sources=retrokit_sources,
                 )
+                _act(f"RTFM phase: built {len(rtfm_results)} sidecar(s)")
+                manual_trace["category"] = "built"
+                manual_trace["files_indexed"] = len(rtfm_results)
+                manual_trace["candidates"] = [
+                    {"release_key": r.release_key, "basename": r.basename, "written": r.written}
+                    for r in rtfm_results
+                ]
+                for _r in rtfm_results:
+                    if _r.written and _r.rtfm_path:
+                        manual_trace["output_path"] = str(_r.rtfm_path)
+                        manual_trace["output_size"] = _r.rtfm_path.stat().st_size if _r.rtfm_path.is_file() else None
+                        manual_trace["extraction_method"] = "text"
+                        break
+            else:
+                _act("RTFM phase: config present but disabled — skipping")
+                manual_trace["category"] = "disabled"
+                manual_trace["detail"] = "[rtfm] enabled=false in config"
         except Exception as exc:
             # (GH-167 RC-C) Categorized failure records instead of
             # silently collapsing everything into []. Each group gets
@@ -526,6 +562,9 @@ def run_pipeline(
                 _cfg_template = getattr(_cfg_template, "template", "")
             else:
                 _cfg_template = ""
+            _act(f"RTFM phase: error — {exc}")
+            manual_trace["category"] = "generation-failed"
+            manual_trace["detail"] = str(exc)
             for _g in groups:
                 _rk = getattr(_g, "release_key", "")
                 _reason = str(exc)
@@ -544,6 +583,11 @@ def run_pipeline(
                     review_reason=f"{_category}: {_reason}",
                     template_used=_cfg_template,
                 ))
+                manual_trace["candidates"].append({
+                    "release_key": _rk,
+                    "category": _category,
+                    "reason": _reason,
+                })
 
     # Phase 6: quarantine routing for flagged groups.
     _act("Checking for releases that need review…")
@@ -905,7 +949,17 @@ def run_pipeline(
             if r.routed_for_review
         ],
         "provenance_written": [str(r.provenance_path) for r in rtfm_results if r.provenance_path],
+        # (GH-173 C6) Per-release manual acquisition diagnostics
+        # with full reason taxonomy. Never empty — always reports
+        # why RTFM produced (or did not produce) output.
+        "manual_trace": manual_trace,
     }
+    # Update export_status in manual_trace based on whether
+    # RTFM output was actually copied to the export.
+    if export_result is not None:
+        manual_trace["export_status"] = (
+            "completed" if export_result.files_written else "skipped"
+        )
     return result
 
 
