@@ -562,6 +562,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 screenscraper_config_path=getattr(args, "config", None),
                 retroachievements_config_path=getattr(args, "config", None),
                 retrokit_config_path=getattr(args, "config", None),
+                hall_of_light_config_path=getattr(args, "config", None),
                 library_state_path=getattr(args, "library_state_path", None),
             ),
         )
@@ -604,6 +605,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     screenscraper_config_path=getattr(args, "config", None),
                     retroachievements_config_path=getattr(args, "config", None),
                     retrokit_config_path=getattr(args, "config", None),
+                    hall_of_light_config_path=getattr(args, "config", None),
                     library_state_path=getattr(args, "library_state_path", None),
                 ),
             )

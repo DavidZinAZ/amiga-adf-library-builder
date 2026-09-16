@@ -631,3 +631,112 @@ def test_hall_of_light_detail_parser_extracts_fields():
     assert parser.genres == ["Action", "Strategy"]
     assert parser.platforms == ["Amiga", "Amiga AGA"]
     assert parser.game_id == "444"
+
+
+# --- gating regression tests (GH-83) -------------------------------------
+
+def test_hall_of_light_skipped_when_disabled(monkeypatch):
+    """halloflight_enabled=False must NOT call hall_of_light_lookup."""
+    from amiga_adf_library_builder.metadata import lookup_metadata, HallOfLightConfig
+    from pathlib import Path
+
+    calls = []
+    def fake_hol_lookup(*args, **kwargs):
+        calls.append(True)
+        return None
+
+    monkeypatch.setattr("amiga_adf_library_builder.metadata.hall_of_light_lookup", fake_hol_lookup)
+
+    result = lookup_metadata(
+        "Test Game",
+        cache_dir=Path("/tmp/cache"),
+        curated_dir=Path("/tmp/curated"),
+        halloflight_enabled=False,
+    )
+    assert result is not None  # falls through to Wikipedia
+    assert len(calls) == 0
+
+
+def test_hall_of_light_runs_when_enabled(monkeypatch):
+    """halloflight_enabled=True (or default) MUST call hall_of_light_lookup."""
+    from amiga_adf_library_builder.metadata import lookup_metadata, HallOfLightConfig
+    from pathlib import Path
+
+    calls = []
+    def fake_hol_lookup(*args, **kwargs):
+        calls.append(True)
+        return None
+
+    monkeypatch.setattr("amiga_adf_library_builder.metadata.hall_of_light_lookup", fake_hol_lookup)
+
+    result = lookup_metadata(
+        "Test Game",
+        cache_dir=Path("/tmp/cache"),
+        curated_dir=Path("/tmp/curated"),
+        halloflight_enabled=True,
+    )
+    assert len(calls) == 1
+
+
+def test_hall_of_light_default_enabled(monkeypatch):
+    """Default behavior (no halloflight_enabled arg) must still call hall_of_light_lookup
+    for backward compatibility."""
+    from amiga_adf_library_builder.metadata import lookup_metadata
+    from pathlib import Path
+
+    calls = []
+    def fake_hol_lookup(*args, **kwargs):
+        calls.append(True)
+        return None
+
+    monkeypatch.setattr("amiga_adf_library_builder.metadata.hall_of_light_lookup", fake_hol_lookup)
+
+    result = lookup_metadata(
+        "Test Game",
+        cache_dir=Path("/tmp/cache"),
+        curated_dir=Path("/tmp/curated"),
+    )
+    assert len(calls) == 1
+
+
+def test_hall_of_light_config_default():
+    """HallOfLightConfig.from_dict(None) must default to enabled=True."""
+    from amiga_adf_library_builder.metadata import HallOfLightConfig
+
+    cfg = HallOfLightConfig.from_dict(None)
+    assert cfg.enabled is True
+    assert cfg.timeout_seconds == 20.0
+    assert cfg.max_response_bytes == 3_000_000
+    assert cfg.cache_ttl == 86400.0
+
+
+def test_hall_of_light_config_from_dict():
+    """HallOfLightConfig.from_dict must parse enabled=False correctly."""
+    from amiga_adf_library_builder.metadata import HallOfLightConfig
+
+    cfg = HallOfLightConfig.from_dict({"enabled": False, "timeout_seconds": 10.0})
+    assert cfg.enabled is False
+    assert cfg.timeout_seconds == 10.0
+
+
+def test_registry_contains_hall_of_light():
+    """default_registry MUST include hall-of-light."""
+    from amiga_adf_library_builder.gui.providers import default_registry
+
+    reg = default_registry()
+    assert reg.get("hall-of-light") is not None
+
+
+def test_hall_of_light_provider_toggle():
+    """HallOfLightProvider must support set_enabled / enabled correctly."""
+    from amiga_adf_library_builder.gui.providers import HallOfLightProvider
+
+    provider = HallOfLightProvider()
+    assert provider.enabled() is True  # default enabled
+    provider.set_enabled(False)
+    assert provider.enabled() is False
+    provider.set_enabled(True)
+    assert provider.enabled() is True
+    assert provider.to_config_dict()["enabled"] is True
+    provider.set_enabled(False)
+    assert provider.to_config_dict()["enabled"] is False
