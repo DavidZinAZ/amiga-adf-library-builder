@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..canonical import CanonicalLibrary
+from ..canonical import CanonicalLibrary, SourceAuthority, Provenance
 from ..metadata_source import MetadataSourceManager
 from ..manual_lookup import (
     apply_manual_override,
@@ -123,6 +123,13 @@ class ManualLookupPanel(QWidget):
             "Remove only the manual claims for this field; automated claims remain"
         )
         ov.addWidget(self._revert_btn)
+        # (GH-170 RC-D) Record as authoritative identity button.
+        self._claim_btn = QPushButton("Record as Authoritative Identity")
+        self._claim_btn.setToolTip(
+            "Write the selected DAT record's game/release/disk identity "
+            "as a CURATION-authority claim into canonical.db"
+        )
+        ov.addWidget(self._claim_btn)
         layout.addLayout(ov)
 
         # Row 4: DAT source browser (read-only) with lookup integration.
@@ -163,6 +170,7 @@ class ManualLookupPanel(QWidget):
         self._disk_combo.currentIndexChanged.connect(self._on_disk_selected)
         self._apply_btn.clicked.connect(self._on_apply_override)
         self._revert_btn.clicked.connect(self._on_revert_override)
+        self._claim_btn.clicked.connect(self._on_claim_authoritative)
         self._search_btn.clicked.connect(self._on_search_sources)
         self._use_query_btn.clicked.connect(self._on_use_query_value)
         self._lookup_btn.clicked.connect(self._on_unified_lookup)
@@ -301,12 +309,77 @@ class ManualLookupPanel(QWidget):
         revert_manual_override(self._canon, etype, eid, field_name)
         self._refresh_claim_view()
 
-    # --- source browser -----------------------------------------------------------
+    # --- authoritative identity (GH-170 RC-D) --------------------------------
+
+    def _on_claim_authoritative(self) -> None:
+        """Record the selected DAT record as authoritative identity."""
+        etype, eid, fields = self._current_entity()
+        if not etype or not eid:
+            self._status_label.setText("No canonical record selected.")
+            return
+        # Claim title, year, publisher, region for releases; game title for games.
+        claim_fields = ["title", "year", "publisher", "region", "language"]
+        if etype == "game":
+            claim_fields = ["title"]
+        elif etype == "disk":
+            claim_fields = ["filename", "disk_number", "sha256"]
+        provenance = Provenance(
+            source="manual_lookup",
+            record_key=eid,
+            url="",
+            authority=SourceAuthority.CURATION,
+            authority_rank=SourceAuthority.CURATION.value,
+            confidence=1.0,
+        )
+        claimed = 0
+        for field in claim_fields:
+            # Read the current value from the entity report.
+            try:
+                value, _ = self._canon.resolve_field(etype, eid, field)
+            except Exception:
+                continue
+            if value is None or value == "":
+                continue
+            self._canon.claim_field(etype, eid, field, value, provenance)
+            claimed += 1
+        if claimed:
+            self._status_label.setText(
+                f"Recorded {claimed} authoritative claim(s) for "
+                f"{etype} {eid} (CURATION authority)."
+            )
+        else:
+            self._status_label.setText("No claimable fields found.")
+        self._refresh_claim_view()
+
+    # --- source browser ---------------------------------------------------------
 
     def _on_search_sources(self) -> None:
         query = self._query_edit.text().strip()
         self._candidates_table.setRowCount(0)
+        # (GH-170 RC-F) Report explicit states before/at search.
+        try:
+            sources = self._manager.list_sources()
+        except Exception as exc:
+            self._status_label.setText(
+                f"Source index unavailable: {exc}"
+            )
+            return
+        if not sources:
+            self._status_label.setText(
+                "No metadata sources indexed. Add sources via the Options tab."
+            )
+            return
+        # Check if any enabled sources exist.
+        enabled_sources = [s for s in sources if s.enabled]
+        if not enabled_sources:
+            self._status_label.setText(
+                f"All {len(sources)} source(s) are disabled. Enable at least one."
+            )
+            return
         if not query:
+            self._status_label.setText(
+                f"{len(sources)} source(s) indexed ({len(enabled_sources)} enabled). Enter a query."
+            )
             return
         # Exact-hash match first (hex-validated SHA-1 / MD5 / CRC32), then title.
         def _hex(s: str) -> bool:
@@ -324,10 +397,13 @@ class ManualLookupPanel(QWidget):
             else candidates_from_sources(self._manager, title=query)
         if not cands:
             self._status_label.setText(
-                "No matching indexed source entry for this query."
+                f"Zero results for query '{query}' across {len(enabled_sources)} enabled source(s). "
+                "Try a different query or check source index status."
             )
             return
-        self._status_label.setText("")
+        self._status_label.setText(
+            f"{len(cands)} result(s) from {len(enabled_sources)} enabled source(s)."
+        )
         self._candidates_table.setRowCount(len(cands))
         for r, cand in enumerate(cands):
             values = [
