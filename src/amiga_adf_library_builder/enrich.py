@@ -18,6 +18,7 @@ from typing import Callable, Optional
 from . import artwork as artwork_mod
 from .logging_utils import redact
 from .metadata import MetadataRecord, cache_key, guard_url, lookup_metadata
+from .metadata_source import MetadataSourceManager
 from .playmatch import PlaymatchMatchMethod
 from .hasheous import HasheousMatchMethod
 from .igdb import IgdbMatchMethod
@@ -135,6 +136,7 @@ class EnrichCategory(str, Enum):
     RETROACHIEVEMENTS = "retroachievements"
     RETROACHIEVEMENTS_MISS = "retroachievements_miss"
     RETROACHIEVEMENTS_REVIEW = "retroachievements_review"
+    DAT = "dat"
 
 
 @dataclass
@@ -638,6 +640,7 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                  screenscraper_provider=None,
                  retroachievements_provider=None,
                  halloflight_enabled: bool = True,
+                 metadata_source_manager: MetadataSourceManager = None,
                  include_artwork: bool = True,
                  cancel_event: Optional[threading.Event] = None,
                  activity: Optional[Callable[[str], None]] = None) -> EnrichResult:
@@ -907,6 +910,88 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                 ok=False, error=str(exc),
             ))
             _act(f"Hasheous error: {exc}.")
+
+    # (GH-164 RC4) DAT/local metadata participation.
+    # Queryed after exact-hash providers and before online metadata,
+    # with identity outranking fuzzy online title matches.
+    _dat_events: list[EnrichEvent] = []
+    _dat_source_id: str = ""
+    if metadata_source_manager is not None:
+        try:
+            _act("Checking DAT/local metadata sources…")
+            # Emit dat_loaded event once per run (counted via source manager)
+            _sources = metadata_source_manager.list_sources()
+            _enabled_sources = [s for s in _sources if s.enabled]
+            if _enabled_sources:
+                _dat_events.append(EnrichEvent(
+                    category=EnrichCategory.DAT,
+                    detail=f"dat_loaded sources={len(_enabled_sources)} entries={sum(s.entry_count for s in _enabled_sources)}",
+                    cache="hit", ok=True,
+                ))
+                # Query by sha256 first (exact-hash precedence)
+                _sha = None
+                for _rec in scans.values():
+                    _sha = getattr(_rec, "sha256", None)
+                    if _sha:
+                        break
+                _dat_matches = []
+                if _sha:
+                    _dat_matches = metadata_source_manager.lookup_by_sha256(_sha)
+                if _dat_matches:
+                    _dat_entry = _dat_matches[0]
+                    _dat_source_id = _dat_entry.source_id
+                    metadata = MetadataRecord(
+                        canonical_title=_dat_entry.title or lookup_title or group.title or "Unknown",
+                        description=_dat_entry.title,
+                        year=_dat_entry.year,
+                        publisher=_dat_entry.publisher,
+                        platforms=[],
+                    )
+                    metadata.provider = "dat"
+                    metadata.confidence = 1.0
+                    _dat_events.append(EnrichEvent(
+                        category=EnrichCategory.DAT,
+                        detail=f"dat_hash_match source={_dat_entry.source_id} title={_dat_entry.title!r}",
+                        cache="hit", ok=True,
+                    ))
+                    _act(f"DAT hash match: {_dat_entry.title}")
+                else:
+                    # Fallback: title-based lookup
+                    _title_matches = metadata_source_manager.lookup_by_title(
+                        lookup_title or group.title or ""
+                    )
+                    if _title_matches:
+                        _dat_entry = _title_matches[0]
+                        _dat_source_id = _dat_entry.source_id
+                        _dat_events.append(EnrichEvent(
+                            category=EnrichCategory.DAT,
+                            detail=f"dat_title_candidate source={_dat_entry.source_id} title={_dat_entry.title!r}",
+                            cache="hit", ok=True,
+                        ))
+                    else:
+                        _dat_events.append(EnrichEvent(
+                            category=EnrichCategory.DAT,
+                            detail="dat_no_match",
+                            cache="miss", ok=True,
+                        ))
+            else:
+                _dat_events.append(EnrichEvent(
+                    category=EnrichCategory.DAT,
+                    detail="dat_source_disabled",
+                    cache="negative", ok=True,
+                ))
+        except Exception as exc:
+            _dat_events.append(EnrichEvent(
+                category=EnrichCategory.DAT,
+                detail=f"dat_unavailable: {exc}",
+                cache="negative", ok=False, error=str(exc),
+            ))
+    else:
+        _dat_events.append(EnrichEvent(
+            category=EnrichCategory.DAT,
+            detail="dat_not_configured",
+            cache="negative", ok=True,
+        ))
 
     # Optional IGDB metadata/artwork provider. Title + Amiga platform search.
     # Non-hash-first; runs independently of Playmatch/Hasheous.
@@ -1438,7 +1523,8 @@ def enrich_all(groups: list[ReleaseGroup], *, nfo_dir: Path, scans: list[ScanRec
                halloflight_enabled: bool = True,
                include_artwork: bool = True,
                cancel_event: Optional[threading.Event] = None,
-               activity: Optional[Callable[[str], None]] = None) -> list[EnrichResult]:
+               activity: Optional[Callable[[str], None]] = None,
+               metadata_source_manager: MetadataSourceManager = None) -> list[EnrichResult]:
     scan_map = {s.filename: s for s in scans}
     metadata_cache_dir = Path(metadata_cache_dir or (Path(nfo_dir).parent / "metadata-cache"))
     curated_metadata_dir = Path(curated_metadata_dir or (Path(nfo_dir).parent / "metadata-curated"))
@@ -1475,5 +1561,6 @@ def enrich_all(groups: list[ReleaseGroup], *, nfo_dir: Path, scans: list[ScanRec
                      halloflight_enabled=halloflight_enabled,
                      include_artwork=include_artwork,
                      cancel_event=cancel_event,
-                     activity=activity))
+                     activity=activity,
+                     metadata_source_manager=metadata_source_manager))
     return results

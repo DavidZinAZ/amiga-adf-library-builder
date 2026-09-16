@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 from . import artwork as artwork_mod
 from . import catalog, enrich, exporter, grouper, quarantine, scanner
 from . import diagnostics
+from .metadata_source import MetadataSourceManager
 from .enrich import VERIFIED_ARTWORK_WIDTH, VERIFIED_ARTWORK_HEIGHT
 from .exporter_guard import export_gate_open
 from .logging_utils import redact
@@ -314,6 +315,15 @@ def run_pipeline(
                 hasheous_provider.discover()
         except Exception:  # provider failure must not break the pipeline
             hasheous_provider = None
+    # (GH-164 RC4) Optional DAT/local metadata source manager.
+    metadata_source_manager = None
+    if metadata_cache_dir:
+        try:
+            metadata_source_manager = MetadataSourceManager(
+                metadata_cache_dir / "metadata_sources.db"
+            )
+        except Exception:
+            metadata_source_manager = None
     # Optional IGDB metadata/artwork provider. OPTIONAL and DISABLED by
     # default; only built when an [igdb] config is present AND enabled.
     # The provider uses title + Amiga platform search (not hash-first).
@@ -445,6 +455,7 @@ def run_pipeline(
         include_artwork=include_artwork,
         activity=activity,
         cancel_event=cancel_event,
+        metadata_source_manager=metadata_source_manager,
     )
     _act("Metadata and artwork preparation complete.")
 
