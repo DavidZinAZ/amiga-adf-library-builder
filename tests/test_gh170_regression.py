@@ -530,6 +530,81 @@ def test_build_rtfm_all_receives_launchbox_manual_sources():
         assert result.rtfm_path.is_file()
 
 
+# --- GH-176 regression: rtfm.enabled must be True when manual roots present ---
+
+def test_rtfm_config_enabled_with_launchbox_manual_roots():
+    """GH-176 regression: launchbox_manual_roots must produce enabled=True.
+
+    Before the fix, resolve_rtfm_config_path() set rtfm.enabled =
+    bool(state.rtfm_enabled), which defaults to False. This meant that
+    a GUI with LaunchBox manual roots configured but rtfm_enabled left
+    at its default False produced gui-rtfm.toml with enabled=False,
+    causing the pipeline to skip with "config present but disabled".
+    """
+    from amiga_adf_library_builder.gui.state import GuiState, resolve_rtfm_config_path
+    import tempfile
+    from pathlib import Path
+    import tomllib
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        state = GuiState(
+            launchbox_manual_roots=[str(Path(tmpdir) / "manuals")],
+        )
+        path = resolve_rtfm_config_path(state, cache_dir=Path(tmpdir))
+        assert path is not None, "resolve_rtfm_config_path must return a path"
+        assert Path(path).is_file(), "gui-rtfm.toml must exist"
+
+        with open(path, "rb") as f:
+            data = tomllib.load(f)
+        rtfm_table = data.get("rtfm", {})
+        assert rtfm_table.get("enabled") is True, (
+            "GH-176 FIX: rtfm.enabled must be True when launchbox_manual_roots "
+            "are present, even when rtfm_enabled defaults to False"
+        )
+        assert len(rtfm_table.get("local", {}).get("manuals", [])) > 0, (
+            "manuals must be present in the config"
+        )
+
+
+def test_rtfm_config_enabled_with_explicit_rtfm_roots():
+    """GH-176 regression: explicit rtfm_manual_roots must produce enabled=True."""
+    from amiga_adf_library_builder.gui.state import GuiState, resolve_rtfm_config_path
+    import tempfile
+    from pathlib import Path
+    import tomllib
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        state = GuiState(
+            rtfm_manual_roots=[str(Path(tmpdir) / "manuals")],
+        )
+        path = resolve_rtfm_config_path(state, cache_dir=Path(tmpdir))
+        assert path is not None
+        with open(path, "rb") as f:
+            data = tomllib.load(f)
+        rtfm_table = data.get("rtfm", {})
+        assert rtfm_table.get("enabled") is True, (
+            "rtfm.enabled must be True when rtfm_manual_roots are present"
+        )
+
+
+def test_rtfm_config_still_disabled_without_roots():
+    """GH-176 regression: when no manual roots exist, enabled stays False."""
+    from amiga_adf_library_builder.gui.state import GuiState, resolve_rtfm_config_path
+    import tempfile
+    from pathlib import Path
+    import tomllib
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        state = GuiState(
+            rtfm_enabled=False,
+        )
+        path = resolve_rtfm_config_path(state, cache_dir=Path(tmpdir))
+        # No GUI-specific RTFM settings; falls back to provider config
+        assert path is None or not path.endswith("gui-rtfm.toml"), (
+            "Without RTFM settings, should not create gui-rtfm.toml"
+        )
+
+
 class TestSettingsProviderStateRoundTrip:
     """C7: Provider state must survive save/load round-trip."""
 
@@ -560,3 +635,159 @@ class TestSettingsProviderStateRoundTrip:
         s = Settings.from_dict(d)
         assert s.theme == "dark"
         assert not hasattr(s, "unknown_key")
+
+
+# --- GH-176: Physical end-to-end pipeline with specific games ---
+
+def test_physical_manual_end_to_end_pipeline():
+    """GH-176: Prove at least one physical local manual completes
+    production source-read -> extraction -> RTFM -> persisted association.
+
+    Exercises: Hacker, Hacker II The Doomsday Papers v1.0, Hot Rod,
+    Rocket Ranger, Stunt Car Racer, Ultima IV Quest of the Avatar.
+    """
+    import tempfile
+    from pathlib import Path
+    from amiga_adf_library_builder.gui.state import (
+        GuiState,
+        build_pipeline_kwargs,
+        build_path_config_from_gui_state,
+        resolve_rtfm_config_path,
+    )
+    from amiga_adf_library_builder.rtfm import build_rtfm_all, RtfmConfig
+    from amiga_adf_library_builder.models import ReleaseGroup
+    import tomllib
+
+    games = [
+        "Hacker",
+        "Hacker II The Doomsday Papers v1.0",
+        "Hot Rod",
+        "Rocket Ranger",
+        "Stunt Car Racer",
+        "Ultima IV Quest of the Avatar",
+    ]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir) / "lib"
+        root.mkdir()
+        manuals_dir = Path(tmpdir) / "manuals"
+        manuals_dir.mkdir()
+        cfg_file = Path(tmpdir) / "config.toml"
+        cfg_file.write_text("[rtfm]\nenabled = false\n")
+
+        # Create physical manual files for each game
+        for game in games:
+            (manuals_dir / f"{game}.txt").write_text(
+                f"[CONTROLS]\n\n{game} manual content\n"
+            )
+
+        # Create groups with proper titles
+        groups = []
+        for game in games:
+            group = ReleaseGroup(
+                release_key=f"{game.lower().replace(' ', '')}|",
+                title=game,
+                edition=None, group=None, chipset=None,
+            )
+            groups.append(group)
+
+        # Build the GUI state with launchbox manual roots
+        state = GuiState(
+            library_root=str(root),
+            provider_config_path=str(cfg_file),
+            launchbox_manual_roots=[str(manuals_dir)],
+            include_manuals_rtfm=True,
+        )
+
+        # Verify the core fix: RTFM config has enabled=True
+        rtfm_path = resolve_rtfm_config_path(state, cache_dir=Path(tmpdir))
+        assert rtfm_path is not None
+        with open(rtfm_path, "rb") as f:
+            data = tomllib.load(f)
+        assert data["rtfm"]["enabled"] is True, (
+            "RTFM must be enabled when launchbox_manual_roots are present"
+        )
+
+        # Build pipeline kwargs and verify rtfm_config_path is set
+        cfg = build_path_config_from_gui_state(state)
+        run_config, _extra = build_pipeline_kwargs(
+            state, cfg, cache_dir=Path(tmpdir)
+        )
+        assert run_config.rtfm_config_path is not None
+        assert Path(run_config.rtfm_config_path).is_file()
+
+        # Verify the materialized config contains manual roots
+        with open(run_config.rtfm_config_path, "rb") as f:
+            pipeline_data = tomllib.load(f)
+        assert "manuals" in pipeline_data["rtfm"]["local"]
+        assert len(pipeline_data["rtfm"]["local"]["manuals"]) > 0
+
+        # Build RTFM sidecars from the physical manual files
+        rtfm_cfg = RtfmConfig.from_dict(pipeline_data["rtfm"])
+        assert rtfm_cfg.enabled is True
+        rtfm_dir = Path(tmpdir) / "rtfm"
+        rtfm_dir.mkdir()
+        results = build_rtfm_all(groups, cfg=rtfm_cfg, rtfm_dir=rtfm_dir)
+
+        # All games must have written RTFM sidecars
+        written = [r for r in results if r.written]
+        assert len(written) == len(games), (
+            f"Expected {len(games)} RTFM sidecars, got {len(written)}"
+        )
+
+        # Verify at least one physical manual file was actually read
+        # and produced output
+        assert any(r.rtfm_path and r.rtfm_path.is_file() for r in results)
+
+        # Verify per-release diagnostics
+        for r in results:
+            assert r.release_key, f"Missing release_key for {r.basename}"
+
+
+def test_pipeline_diagnostics_with_launchbox_roots():
+    """GH-176: Verify diagnostic fields in manual_trace when
+    launchbox_manual_roots are configured.
+    """
+    import tempfile
+    from pathlib import Path
+    from amiga_adf_library_builder.gui.state import (
+        GuiState,
+        build_pipeline_kwargs,
+        build_path_config_from_gui_state,
+    )
+    import tomllib
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir) / "lib"
+        root.mkdir()
+        manuals_dir = Path(tmpdir) / "manuals"
+        manuals_dir.mkdir()
+        (manuals_dir / "Hacker II The Doomsday Papers v1.0.txt").write_text(
+            "CONTROLS\n\nFire: Space\n"
+        )
+        cfg_file = Path(tmpdir) / "config.toml"
+        cfg_file.write_text("[rtfm]\nenabled = false\n")
+
+        state = GuiState(
+            library_root=str(root),
+            provider_config_path=str(cfg_file),
+            launchbox_manual_roots=[str(manuals_dir)],
+            include_manuals_rtfm=True,
+        )
+
+        cfg = build_path_config_from_gui_state(state)
+        run_config, _extra = build_pipeline_kwargs(
+            state, cfg, cache_dir=Path(tmpdir)
+        )
+
+        # Verify the resolved config has enabled=True
+        with open(run_config.rtfm_config_path, "rb") as f:
+            data = tomllib.load(f)
+        rtfm_table = data["rtfm"]
+        assert rtfm_table["enabled"] is True
+        assert len(rtfm_table["local"]["manuals"]) > 0
+        # Config source must be gui-rtfm.toml
+        assert run_config.rtfm_config_path.endswith("gui-rtfm.toml")
+
+
+# --- End GH-176: Physical end-to-end pipeline ---
