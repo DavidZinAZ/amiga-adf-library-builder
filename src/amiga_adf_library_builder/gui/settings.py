@@ -62,6 +62,15 @@ SETTINGS_KEYS = (
     # (GH-170) Provider enablement and field persistence.
     "provider_enabled",
     "provider_fields",
+    # (GH-173) RTFM control plane — GUI-authored settings materialized
+    # to a managed run-config (mirrors the gui-local-media.toml pattern).
+    "rtfm_enabled",
+    "rtfm_template",
+    "rtfm_manual_roots",
+    "rtfm_instruction_roots",
+    "rtfm_cheat_roots",
+    "rtfm_max_bytes",
+    "retrokit_manuals_enabled",
 )
 
 
@@ -158,6 +167,16 @@ class Settings:
     # (GH-170) Provider enablement and field persistence.
     provider_enabled: dict[str, bool] = field(default_factory=dict)
     provider_fields: dict[str, dict[str, str]] = field(default_factory=dict)
+    # (GH-173) RTFM control plane — GUI-authored settings materialized
+    # to a managed run-config. These are written to gui-rtfm.toml
+    # by resolve_rtfm_config_path() and consumed by the pipeline.
+    rtfm_enabled: bool = False
+    rtfm_template: str = "controls-first"
+    rtfm_manual_roots: list[str] = field(default_factory=list)
+    rtfm_instruction_roots: list[str] = field(default_factory=list)
+    rtfm_cheat_roots: list[str] = field(default_factory=list)
+    rtfm_max_bytes: int = 15360
+    retrokit_manuals_enabled: bool = False
     presets: dict[str, "Preset"] = field(default_factory=dict)
 
     def as_dict(self) -> dict:
@@ -197,6 +216,20 @@ class Settings:
             # (GH-170) Provider enablement and field persistence.
             "provider_enabled": self.provider_enabled,
             "provider_fields": self.provider_fields,
+            # (GH-173) RTFM control plane.
+            "rtfm_enabled": self.rtfm_enabled,
+            "rtfm_template": self.rtfm_template,
+            "rtfm_manual_roots": _clean_manual_root_entries(
+                self.rtfm_manual_roots
+            ),
+            "rtfm_instruction_roots": _clean_manual_root_entries(
+                self.rtfm_instruction_roots
+            ),
+            "rtfm_cheat_roots": _clean_manual_root_entries(
+                self.rtfm_cheat_roots
+            ),
+            "rtfm_max_bytes": self.rtfm_max_bytes,
+            "retrokit_manuals_enabled": self.retrokit_manuals_enabled,
         }
         if self.presets:
             out["presets"] = {name: p.as_dict() for name, p in self.presets.items()}
@@ -248,6 +281,22 @@ class Settings:
         s.provider_fields = gui.get("provider_fields", {})
         if not isinstance(s.provider_fields, dict):
             s.provider_fields = {}
+        # (GH-173) RTFM control plane.
+        s.rtfm_enabled = bool(gui.get("rtfm_enabled", False))
+        s.rtfm_template = str(gui.get("rtfm_template", "controls-first"))
+        s.rtfm_manual_roots = _clean_manual_root_entries(
+            gui.get("rtfm_manual_roots")
+        )
+        s.rtfm_instruction_roots = _clean_manual_root_entries(
+            gui.get("rtfm_instruction_roots")
+        )
+        s.rtfm_cheat_roots = _clean_manual_root_entries(
+            gui.get("rtfm_cheat_roots")
+        )
+        s.rtfm_max_bytes = int(gui.get("rtfm_max_bytes", 15360))
+        s.retrokit_manuals_enabled = bool(
+            gui.get("retrokit_manuals_enabled", False)
+        )
         raw_presets = gui.get("presets")
         if isinstance(raw_presets, dict):
             for name, val in raw_presets.items():

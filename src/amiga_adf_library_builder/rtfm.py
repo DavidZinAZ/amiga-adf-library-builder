@@ -1484,17 +1484,17 @@ def build_rtfm_for_group(
     if not cfg.enabled:
         raise RtfmDisabled("rtfm builder is disabled in config")
 
-    # Use the same FAT32-sanitized basename that the exporter uses so the
+    # Use the same canonical basename that the exporter uses so the
     # .rtfm file can be found and copied into the Gotek staging tree.
-    from .naming import release_basename
+    from .naming import canonical_release_name
     from .exporter import _sanitize_component
     warnings.warn(
-        "release_basename() called from rtfm RTFM generation. "
-        "Use canonical_release_name() instead.",
+        "canonical_release_name() called from rtfm RTFM generation. ",
         DeprecationWarning,
         stacklevel=2,
     )
-    basename = _sanitize_component(release_basename(group))
+    basename, _prov = canonical_release_name(group, library_root=None)
+    basename = _sanitize_component(basename)
     result = RtfmResult(
         release_key=getattr(group, "release_key", "") or "",
         basename=basename,

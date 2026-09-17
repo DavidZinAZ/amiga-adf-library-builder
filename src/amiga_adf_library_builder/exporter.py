@@ -61,31 +61,9 @@ def _get_canonical_basename(
     When ``library_root`` is None, falls back without inferring a wrong path.
     Provenance is a human-readable string.
     """
-    from .canonical_naming import export_name_for_release_group, _load_canonical_library
-    if library_root is None:
-        warnings.warn(
-            "release_basename() fallback called from exporter: "
-            "no canonical DB and no library_root. "
-            "Use canonical_release_name() instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return release_basename(group), "fallback: no canonical DB"
-    _canon = _load_canonical_library(library_root)
-    if _canon is not None:
-        try:
-            _cn = export_name_for_release_group(_canon, group)
-            return _cn.basename, _cn.provenance_text
-        finally:
-            _canon.close()
-    warnings.warn(
-        "release_basename() fallback called from exporter: "
-        "canonical DB could not be loaded. "
-        "Use canonical_release_name() instead.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    return release_basename(group), "fallback: no canonical DB"
+    from .naming import canonical_release_name
+    basename, provenance = canonical_release_name(group, library_root)
+    return basename, provenance
 
 
 @dataclass
@@ -305,9 +283,24 @@ def export_release(
     # alongside .nfo/.jpg, mirroring the NFO handling. The provenance sidecar
     # (*.rtfm.provenance.json) is intentionally NOT copied into the Gotek
     # staging tree (it lives under assets/rtfm, outside the export).
-    rtfm_src = Path(rtfm_dir) / f"{basename}.rtfm" if rtfm_dir is not None else None
-    if rtfm_src is not None and rtfm_src.is_file():
-        rtfm_bytes = rtfm_src.read_bytes()
+    # (GH-173 C7) Operator-selected rtfm_files take precedence over
+    # auto-generated output.
+    staged_rtfm_files = _find_staged_rtfm(staged_library, release_key)
+    rtfm_bytes: Optional[bytes] = None
+    rtfm_src: Optional[Path] = None
+    if staged_rtfm_files:
+        # Use the first operator-selected file that exists.
+        for _rtfm_path in staged_rtfm_files:
+            _p = Path(_rtfm_path)
+            if _p.is_file():
+                rtfm_bytes = _p.read_bytes()
+                rtfm_src = _p
+                break
+    else:
+        rtfm_src = Path(rtfm_dir) / f"{basename}.rtfm" if rtfm_dir is not None else None
+        if rtfm_src is not None and rtfm_src.is_file():
+            rtfm_bytes = rtfm_src.read_bytes()
+    if rtfm_bytes is not None:
         rtfm_dest = folder / f"{basename}.rtfm"
         if verify_only:
             if rtfm_dest.exists() and rtfm_dest.read_bytes() != rtfm_bytes:
@@ -426,6 +419,24 @@ def _find_staged_artwork(
         return art_path.read_bytes()
     except OSError:
         return None
+
+
+def _find_staged_rtfm(
+    staged_library: Optional[StagedLibrary],
+    release_key: Optional[str],
+) -> list[str]:
+    """Return operator-selected RTFM file paths from the staged library.
+
+    Looks up the staged library entry by ``release_key`` and returns
+    the ``rtfm_files`` list if present. These operator selections take
+    precedence over auto-generated RTFM output (C7).
+    """
+    if staged_library is None or not release_key:
+        return []
+    entry = staged_library.releases.get(release_key)
+    if entry is None:
+        return []
+    return list(entry.rtfm_files) if entry.rtfm_files else []
 
 
 def export_all(
