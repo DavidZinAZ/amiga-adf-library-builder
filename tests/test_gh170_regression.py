@@ -412,7 +412,122 @@ def test_rtfm_settings_roundtrip():
     assert restored.retrokit_manuals_enabled is True
 
 
-# --- C7: Settings round-trip for provider state -----------------------------
+# --- C8b: GH-176 regression tests for launchbox_manual_roots flow ---
+
+
+def test_rtfm_settings_materialized_with_launchbox_manual_roots():
+    """GH-176: launchbox_manual_roots must trigger RTFM config materialization.
+
+    When the GUI has LaunchBox manual roots configured but no explicit
+    RTFM toggle is set, the RTFM config path must still be materialized
+    so the discovered manual files reach per-release matching.
+    """
+    from amiga_adf_library_builder.gui.state import _rtfm_settings_materialized, GuiState
+
+    state = GuiState(launchbox_manual_roots=["/data/manuals"])
+    assert _rtfm_settings_materialized(state) is True
+
+    state2 = GuiState()
+    assert _rtfm_settings_materialized(state2) is False
+
+
+def test_resolve_rtfm_config_path_fallback_to_provider_config():
+    """GH-176: resolve_rtfm_config_path falls back to provider config when no RTFM settings.
+
+    When no RTFM-specific GUI settings are materialized but a provider
+    config path exists, the provider config must be returned so that
+    CLI-only [rtfm] semantics are preserved and the pipeline always has
+    a valid config path.
+    """
+    from amiga_adf_library_builder.gui.state import GuiState, resolve_rtfm_config_path
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cfg_file = Path(tmpdir) / "config.toml"
+        cfg_file.write_text("[rtfm]\nenabled = false\n")
+        state = GuiState(provider_config_path=str(cfg_file))
+        path = resolve_rtfm_config_path(state, cache_dir=Path(tmpdir))
+        assert path == str(cfg_file)
+
+
+def test_build_pipeline_kwargs_rtfm_config_with_launchbox_manuals():
+    """GH-176: build_pipeline_kwargs wires launchbox_manual_roots into rtfm_config_path.
+
+    When the GUI has launchbox_manual_roots configured, the resulting
+    rtfm_config_path must point at a file that contains the manual roots
+    in its [rtfm] table, ensuring the RTFM builder discovers the same
+    manual files the local media scan reports.
+    """
+    from amiga_adf_library_builder.gui.state import (
+        GuiState,
+        build_pipeline_kwargs,
+        build_path_config_from_gui_state,
+    )
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir) / "lib"
+        root.mkdir()
+        cfg_file = Path(tmpdir) / "config.toml"
+        cfg_file.write_text("[rtfm]\nenabled = false\n")
+
+        state = GuiState(
+            library_root=str(root),
+            provider_config_path=str(cfg_file),
+            launchbox_manual_roots=[str(Path(tmpdir) / "manuals")],
+        )
+        cfg = build_path_config_from_gui_state(state)
+        run_config, _extra = build_pipeline_kwargs(state, cfg, cache_dir=Path(tmpdir))
+        assert run_config.rtfm_config_path is not None
+        assert Path(run_config.rtfm_config_path).is_file()
+
+        import tomllib
+        with open(run_config.rtfm_config_path, "rb") as f:
+            data = tomllib.load(f)
+        rtfm_table = data.get("rtfm", {})
+        local = rtfm_table.get("local", {})
+        assert "manuals" in local, "launchbox_manual_roots must appear in [rtfm] local.menus"
+        assert len(local["manuals"]) > 0, "manuals must not be empty"
+
+
+def test_build_rtfm_all_receives_launchbox_manual_sources():
+    """GH-176: build_rtfm_all discovers sources from launchbox_manual_roots roots.
+
+    A real local manual must physically traverse:
+    discovery -> candidate -> match -> build -> output.
+    """
+    import tempfile
+    from pathlib import Path
+    from amiga_adf_library_builder.rtfm import build_rtfm_all, RtfmConfig, RtfmSource
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        manuals_dir = Path(tmpdir) / "manuals"
+        manuals_dir.mkdir()
+        # Create a real manual file
+        (manuals_dir / "Hacker II The Doomsday Papers v1.0.txt").write_text(
+            "CONTROLS\n\nFire: Space\n"
+        )
+        # Create a group
+        from amiga_adf_library_builder.models import ReleaseGroup
+        group = ReleaseGroup(
+            release_key="hacker|",
+            title="Hacker",
+            edition=None, group=None, chipset=None,
+        )
+        # Set title to match the manual
+        group.title = "Hacker II The Doomsday Papers v1.0"
+
+        cfg = RtfmConfig(enabled=True, manuals_roots=(str(manuals_dir),))
+        rtfm_dir = Path(tmpdir) / "rtfm"
+        rtfm_dir.mkdir()
+        results = build_rtfm_all([group], cfg=cfg, rtfm_dir=rtfm_dir)
+        assert len(results) == 1
+        result = results[0]
+        assert result.written is True, f"Expected written RTFM, got: {result.review_reason}"
+        assert result.rtfm_path is not None
+        assert result.rtfm_path.is_file()
 
 
 class TestSettingsProviderStateRoundTrip:
