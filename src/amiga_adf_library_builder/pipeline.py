@@ -477,6 +477,12 @@ def run_pipeline(
         "export_status": "skipped",
         "category": "no-config",
         "detail": "",
+        # GH-176 diagnostic fields: resolved enabled state and reason
+        "resolved_enabled_state": False,
+        "enabled_reason": "no RTFM config path",
+        "config_source": "none",
+        # GH-176 per-release diagnostics: match/no-match/review detail
+        "per_release": [],
     }
     # (GH-24) Manuals/RTFM selection is independent of artwork. When the
     # operator turns it off, the deterministic RTFM build is skipped entirely
@@ -487,7 +493,22 @@ def run_pipeline(
             from .paths import load_rtfm_config
 
             rtfm_cfg = rtfm_mod.RtfmConfig.from_dict(load_rtfm_config(rtfm_config_path))
+            # GH-176 diagnostic: resolved enabled state and reason
+            _rtfm_config_source = "gui-rtfm.toml" if rtfm_config_path.endswith("gui-rtfm.toml") else "provider-config"
+            manual_trace["resolved_enabled_state"] = bool(rtfm_cfg.enabled)
+            manual_trace["config_source"] = _rtfm_config_source
             if rtfm_cfg.enabled:
+                # Determine why RTFM is enabled
+                _enabled_reason_parts = []
+                if rtfm_cfg.manuals_roots:
+                    _enabled_reason_parts.append(f"manuals_roots={list(rtfm_cfg.manuals_roots)}")
+                if rtfm_cfg.instructions_roots:
+                    _enabled_reason_parts.append(f"instructions_roots={list(rtfm_cfg.instructions_roots)}")
+                if rtfm_cfg.cheats_roots:
+                    _enabled_reason_parts.append(f"cheats_roots={list(rtfm_cfg.cheats_roots)}")
+                if not _enabled_reason_parts:
+                    _enabled_reason_parts.append("explicitly enabled")
+                manual_trace["enabled_reason"] = "; ".join(_enabled_reason_parts)
                 _act("RTFM phase: enabled, building manual sidecars…")
                 manual_trace["category"] = "enabled"
                 manual_trace["roots_searched"] = list(rtfm_cfg.manuals_roots)
@@ -539,6 +560,19 @@ def run_pipeline(
                     {"release_key": r.release_key, "basename": r.basename, "written": r.written}
                     for r in rtfm_results
                 ]
+                # GH-176 per-release diagnostics
+                manual_trace["per_release"] = [
+                    {
+                        "release_key": r.release_key,
+                        "basename": r.basename,
+                        "written": r.written,
+                        "routed_for_review": r.routed_for_review,
+                        "review_reason": r.review_reason,
+                        "output_path": str(r.rtfm_path) if r.rtfm_path else None,
+                        "sources_count": len(r.sources),
+                    }
+                    for r in rtfm_results
+                ]
                 for _r in rtfm_results:
                     if _r.written and _r.rtfm_path:
                         manual_trace["output_path"] = str(_r.rtfm_path)
@@ -549,6 +583,15 @@ def run_pipeline(
                 _act("RTFM phase: config present but disabled — skipping")
                 manual_trace["category"] = "disabled"
                 manual_trace["detail"] = "[rtfm] enabled=false in config"
+                manual_trace["enabled_reason"] = (
+                    "rtfm_cfg.enabled=False; no manual roots or RTFM roots "
+                    "present to auto-enable; operator explicitly disabled"
+                )
+                manual_trace["per_release"] = [
+                    {"release_key": g.release_key, "status": "skipped",
+                     "reason": "RTFM disabled in config"}
+                    for g in groups
+                ]
         except Exception as exc:
             # (GH-167 RC-C) Categorized failure records instead of
             # silently collapsing everything into []. Each group gets

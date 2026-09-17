@@ -286,7 +286,16 @@ def resolve_rtfm_config_path(
     rtfm_table = data.get("rtfm")
     if not isinstance(rtfm_table, dict):
         rtfm_table = {}
-    rtfm_table["enabled"] = bool(state.rtfm_enabled)
+    # When manual roots are present (LaunchBox or explicit RTFM roots),
+    # RTFM must be enabled regardless of the standalone rtfm_enabled
+    # toggle. The operator configured roots because they want RTFM —
+    # the toggle is only for explicit opt-out when no roots are present.
+    # This fixes GH-176: 1381 discovered manuals but RTFM disabled.
+    _has_manual_roots = bool(
+        state.launchbox_manual_roots or state.rtfm_manual_roots
+        or state.rtfm_instruction_roots or state.rtfm_cheat_roots
+    )
+    rtfm_table["enabled"] = bool(state.rtfm_enabled) or _has_manual_roots
     rtfm_table["template"] = str(state.rtfm_template)
     # Merge GUI manual roots (launchbox + explicit RTFM roots)
     # into the single canonical store, mirroring resolve_local_media_config_path.
