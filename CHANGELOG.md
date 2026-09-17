@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.22 — 2026-09-16
+
+### Windows User Test Release (post-GH-173)
+
+- Packaging-only release of GH-173 merged main for real operator Windows testing.
+- Version identity: 0.2.21 → 0.2.22 in pyproject.toml, AmigaADFGui.spec, tests/test_version_identity.py.
+- No substantive application changes beyond the GH-173 already-merged work.
+
 ## 0.2.21 — 2026-09-16
 
 - GH-170: Unified Lookup + Provider persistence.
