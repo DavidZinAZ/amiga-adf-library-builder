@@ -17,6 +17,7 @@ on:
     branches:
       - feat/issue15-windows-gui
       - feat/issue17-folder-persistence
+      - qual/gh176-*
   pull_request:
     branches:
       - main
