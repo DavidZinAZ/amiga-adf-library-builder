@@ -237,6 +237,8 @@ def _rtfm_settings_materialized(state: GuiState) -> bool:
     """Return True when any RTFM control-plane setting is non-default."""
     if state.rtfm_enabled or state.rtfm_manual_roots or state.rtfm_instruction_roots or state.rtfm_cheat_roots:
         return True
+    if state.launchbox_manual_roots:
+        return True
     if state.rtfm_template != "controls-first" or state.rtfm_max_bytes != 15360 or state.retrokit_manuals_enabled:
         return True
     return False
@@ -261,7 +263,9 @@ def resolve_rtfm_config_path(
     preferences and local path roots.
     """
     if not _rtfm_settings_materialized(state):
-        return None
+        # No GUI-specific RTFM settings; fall back to the provider
+        # config so CLI-only [rtfm] semantics are preserved exactly.
+        return state.provider_config_path or None
     import tomli_w
 
     cache_dir = Path(cache_dir) if cache_dir else Path(tempfile.gettempdir())
