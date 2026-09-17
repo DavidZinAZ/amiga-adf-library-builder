@@ -5,10 +5,14 @@ name: QA GH-176 real-Windows RTFM/manual qualification
 # driver), then EXECUTES the GH-176 qualification driver against the real
 # packaged Windows application to prove the fix boundaries end-to-end.
 #
-# Triggered manually via workflow_dispatch only (QA-only qualification).
+# Triggered on push to qual/gh176 branches (QA dispatch path) and manually
+# via workflow_dispatch (when present on the default branch).
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - qual/gh176-win-*
 
 permissions:
   contents: read
