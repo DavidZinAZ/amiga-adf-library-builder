@@ -39,6 +39,7 @@ import json
 import os
 import sys
 import time
+import tomllib
 from pathlib import Path
 
 REPORT: dict = {
@@ -191,9 +192,10 @@ def _gate_run_gate7_automated_regressions(report_dir: Path) -> None:
             capture_output=True, text=True, timeout=120,
         )
         output = result.stdout + result.stderr
-        # Parse pytest output
+        # Parse pytest output: "32 passed" line
         for line in output.splitlines():
-            if " passed" in line and "failed" not in line:
+            line_lower = line.lower()
+            if " passed" in line_lower:
                 parts = line.split()
                 for i, p in enumerate(parts):
                     if p == "passed":
@@ -201,9 +203,6 @@ def _gate_run_gate7_automated_regressions(report_dir: Path) -> None:
                             evidence["tests_passed"] = int(parts[i - 1])
                         except (ValueError, IndexError):
                             pass
-            elif " failed" in line:
-                parts = line.split()
-                for i, p in enumerate(parts):
                     if p == "failed":
                         try:
                             evidence["tests_failed"] = int(parts[i - 1])
