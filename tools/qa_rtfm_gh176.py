@@ -192,22 +192,14 @@ def _gate_run_gate7_automated_regressions(report_dir: Path) -> None:
             capture_output=True, text=True, timeout=120,
         )
         output = result.stdout + result.stderr
-        # Parse pytest output: "32 passed" line
-        for line in output.splitlines():
-            line_lower = line.lower()
-            if " passed" in line_lower:
-                parts = line.split()
-                for i, p in enumerate(parts):
-                    if p == "passed":
-                        try:
-                            evidence["tests_passed"] = int(parts[i - 1])
-                        except (ValueError, IndexError):
-                            pass
-                    if p == "failed":
-                        try:
-                            evidence["tests_failed"] = int(parts[i - 1])
-                        except (ValueError, IndexError):
-                            pass
+        # Parse pytest output: "32 passed, 7 warnings" line
+        import re
+        m = re.search(r'(\d+)\s+passed', output)
+        if m:
+            evidence["tests_passed"] = int(m.group(1))
+        m = re.search(r'(\d+)\s+failed', output)
+        if m:
+            evidence["tests_failed"] = int(m.group(1))
         evidence["tests_run"] = evidence["tests_passed"] + evidence["tests_failed"]
         evidence["returncode"] = result.returncode
         evidence["output_tail"] = output[-2000:] if len(output) > 2000 else output
