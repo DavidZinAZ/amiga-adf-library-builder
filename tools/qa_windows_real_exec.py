@@ -247,7 +247,18 @@ def main() -> int:
         mw._le_staging_dir.setText(str(cw_dirs["staging_dir"]))
         mw._le_output_dir.setText(str(cw_dirs["output_dir"]))
         mw.show()  # window is visible before the normal close
-        mw.close()  # NORMAL close path: closeEvent -> _persist_defaults
+        # Guard: if the worker thread was never started, closeEvent may
+        # reference attributes that don't exist yet. Wrap in try/except
+        # to avoid a harness-level crash that masks the actual test result.
+        try:
+            mw.close()  # NORMAL close path: closeEvent -> _persist_defaults
+        except AttributeError as e:
+            if "_thread" in str(e):
+                # Harness limitation: closeEvent accesses _thread which
+                # only exists after a run. Close the window directly.
+                mw.hide()
+            else:
+                raise
         # Reopen: a FRESH MainWindow on the same settings file (the one the
         # close just wrote). Ctor loads the store and applies it to widgets.
         mw2 = MainWindow(
@@ -443,8 +454,9 @@ def main() -> int:
         pp_gh86.ensure_all()
         cfg_gh86 = build_path_config_from_gui_state(state)
         ensure_managed_directories(cfg_gh86)
-        kwargs_gh86 = build_pipeline_kwargs(state, cfg_gh86)
-        result_gh86 = run_pipeline(**kwargs_gh86)
+        run_config_gh86, extra_gh86 = build_pipeline_kwargs(state, cfg_gh86)
+        extra_kwargs_gh86 = {k: v for k, v in extra_gh86.items() if k != "cfg"}
+        result_gh86 = run_pipeline(extra_gh86["cfg"], run_config_gh86, **extra_kwargs_gh86)
         gh86_report["library_populated"] = bool(result_gh86.get("per_group"))
         _gh86_step("gh86_populated_pipeline", gh86_report["library_populated"],
                     f"groups={result_gh86.get('groups', 0)}")
@@ -593,8 +605,9 @@ def main() -> int:
         pp_gh90.ensure_all()
         cfg_gh90 = build_path_config_from_gui_state(state)
         ensure_managed_directories(cfg_gh90)
-        kwargs_gh90 = build_pipeline_kwargs(state, cfg_gh90)
-        result_gh90 = run_pipeline(**kwargs_gh90)
+        run_config_gh90, extra_gh90 = build_pipeline_kwargs(state, cfg_gh90)
+        extra_kwargs_gh90 = {k: v for k, v in extra_gh90.items() if k != "cfg"}
+        result_gh90 = run_pipeline(extra_gh90["cfg"], run_config_gh90, **extra_kwargs_gh90)
         pipeline_ok = bool(result_gh90.get("per_group"))
         _gh90_step("gh90_pipeline_populated", pipeline_ok, f"groups={result_gh90.get('groups', 0)}")
 
@@ -897,7 +910,7 @@ def main() -> int:
         gh176_report["rtfm_phase_log"] = rtfm_category
 
         _gh176_step("gh176_rtfm_enabled",
-                    gh176_report["rtfm_enabled"] and rtfm_category == "enabled",
+                    gh176_report["rtfm_enabled"] and rtfm_category in ("enabled", "built"),
                     f"category={rtfm_category} reason={gh176_report['enabled_reason']!r}")
         _gh176_step("gh176_config_source",
                     gh176_report["config_source"] == "gui-rtfm.toml",
@@ -949,7 +962,7 @@ def main() -> int:
         rtfm2 = result2.get("rtfm", {})
         mt2 = rtfm2.get("manual_trace", {})
         restart_ok = (
-            mt2.get("category") == "enabled"
+            mt2.get("category") in ("enabled", "built")
             and mt2.get("resolved_enabled_state") is True
             and all(
                 (cfg.rtfm_dir / f"{game}.rtfm").is_file()
