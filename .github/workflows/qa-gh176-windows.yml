@@ -1,0 +1,56 @@
+name: QA GH-176 real-Windows RTFM/manual qualification
+
+# Independent QA real-Windows qualification for GH-176 P0 fix.
+# Builds the onedir artifact on windows-latest (reusing the standard build
+# driver), then EXECUTES the GH-176 qualification driver against the real
+# packaged Windows application to prove the fix boundaries end-to-end.
+#
+# Triggered manually via workflow_dispatch only (QA-only qualification).
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  qa-gh176:
+    name: GH-176 real-Windows qualification
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build + QA dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[gui]" pyinstaller pillow pytest
+
+      - name: Build onedir portable app (real artifact)
+        run: python tools/build_windows.py --target onedir --clean
+
+      - name: Run GH-176 qualification driver
+        env:
+          QT_QPA_PLATFORM: offscreen
+          QA_GUI_BASE: "C:\\Users\\runneradmin\\Test Dir With Spaces\\lib"
+          QA_EXE: "dist/AmigaADFLibraryBuilder/AmigaADFLibraryBuilder.exe"
+          QA_REPORT_DIR: "qa-gh176-artifacts"
+        run: python tools/qa_rtfm_gh176.py
+
+      - name: Upload GH-176 QA artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gh176-windows-evidence
+          path: |
+            qa-gh176-artifacts/
+          if-no-files-found: warn
