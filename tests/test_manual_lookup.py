@@ -184,11 +184,11 @@ def test_list_browse_releases_and_disks(canon):
     canon._conn.commit()
 
     games = list_library_entities(canon)["games"]
-    assert games[0]["label"] == "Turrican"
+    assert games[0]["label"] == "Turrican [g-slug]"
     rels = releases_for(canon, "g-slug")
     assert rels[0]["entity_id"] == "r-1"
     disks = disks_for(canon, "r-1")
-    assert disks[0]["label"] == "Turrican_Disk1.adf"
+    assert disks[0]["label"] == "Turrican_Disk1.adf [d-1]"
 
 
 # --- Slice 1 source index candidates (read-only) ------------------------------

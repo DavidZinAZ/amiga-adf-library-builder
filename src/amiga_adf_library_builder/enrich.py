@@ -25,7 +25,7 @@ from .igdb import IgdbMatchMethod
 from . import screenscraper as ss_mod
 from .models import ReleaseGroup, ScanRecord
 from .utils import write_json_atomic, now_iso as _now_iso
-from .naming import release_basename
+from .naming import _sanitize
 from .nfo_render import render_gotek_nfo
 import os
 
@@ -625,7 +625,8 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                  metadata_source_manager: MetadataSourceManager = None,
                  include_artwork: bool = True,
                  cancel_event: Optional[threading.Event] = None,
-                 activity: Optional[Callable[[str], None]] = None) -> EnrichResult:
+                 activity: Optional[Callable[[str], None]] = None,
+                 library_root: Optional[Path] = None) -> EnrichResult:
     metadata_cache_dir = Path(metadata_cache_dir or (Path(nfo_dir).parent / "metadata-cache"))
     curated_metadata_dir = Path(curated_metadata_dir or (Path(nfo_dir).parent / "metadata-curated"))
     notes: list[str] = []
@@ -1356,13 +1357,12 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                     max_bytes=artwork_mod.ARTWORK_MAX_BYTES,
                 )
                 Path(artwork_processed_dir).mkdir(parents=True, exist_ok=True)
-                processed = Path(artwork_processed_dir) / f"{release_basename(group)}.jpg"
-                warnings.warn(
-                    "release_basename() called from enrich.process_artwork. "
-                    "Use canonical_release_name() instead.",
-                    DeprecationWarning,
-                    stacklevel=2,
-                )
+                from .naming import canonical_release_name, _sanitize
+                try:
+                    _cn_basename, _prov = canonical_release_name(group, library_root)
+                except Exception:
+                    _cn_basename = _sanitize(group.title or "Unknown")
+                processed = Path(artwork_processed_dir) / f"{_cn_basename}.jpg"
                 if not processed.exists() or processed.read_bytes() != data:
                     processed.write_bytes(data)
                 notes.append(f"processed artwork: {processed}")
@@ -1408,13 +1408,11 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
         ))
 
     Path(nfo_dir).mkdir(parents=True, exist_ok=True)
-    warnings.warn(
-        "release_basename() called from enrich.write_nfo. "
-        "Use canonical_release_name() instead.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    basename = release_basename(group)
+    from .naming import canonical_release_name, _sanitize
+    try:
+        basename, _prov = canonical_release_name(group, library_root)
+    except Exception:
+        basename = _sanitize(group.title or "Unknown")
     nfo_path = Path(nfo_dir) / f"{basename}.nfo"
 
     # Gotek-facing display NFO: Title: + Blurb: at <= 512 bytes (Gotek NFO contract).
@@ -1506,7 +1504,8 @@ def enrich_all(groups: list[ReleaseGroup], *, nfo_dir: Path, scans: list[ScanRec
                include_artwork: bool = True,
                cancel_event: Optional[threading.Event] = None,
                activity: Optional[Callable[[str], None]] = None,
-               metadata_source_manager: MetadataSourceManager = None) -> list[EnrichResult]:
+               metadata_source_manager: MetadataSourceManager = None,
+               library_root: Optional[Path] = None) -> list[EnrichResult]:
     scan_map = {s.filename: s for s in scans}
     metadata_cache_dir = Path(metadata_cache_dir or (Path(nfo_dir).parent / "metadata-cache"))
     curated_metadata_dir = Path(curated_metadata_dir or (Path(nfo_dir).parent / "metadata-curated"))
@@ -1544,5 +1543,6 @@ def enrich_all(groups: list[ReleaseGroup], *, nfo_dir: Path, scans: list[ScanRec
                      include_artwork=include_artwork,
                      cancel_event=cancel_event,
                      activity=activity,
-                     metadata_source_manager=metadata_source_manager))
+                     metadata_source_manager=metadata_source_manager,
+                     library_root=library_root))
     return results

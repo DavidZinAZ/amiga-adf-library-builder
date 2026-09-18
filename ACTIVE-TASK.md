@@ -1,8 +1,9 @@
-# ACTIVE-TASK.md — GH-143 Canonical Lifecycle Implementation
+# ACTIVE-TASK.md — GH-183 Fix Phantom RTFM, Doc Acquisition, Title Export + Manual Lookup
 
 ## Task
-GH-143 — CASE CANONICAL LIFECYCLE IMPLEMENTATION
-Implement P1 canonical.db lifecycle remediation end-to-end per approved Q Branch design.
+t_5351d6b7 — P0 — CASE — FIX PHANTOM RTFM DOC ACQUISITION TITLE EXPORT + MANUAL LOOKUP
+GitHub issue: #183
+Consumes Q task t_8774309f. Fixes five v0.2.25 production-path failures.
 
 ## Authority Mode
 IMPLEMENT
@@ -10,71 +11,35 @@ IMPLEMENT
 ## Repository Path
 /home/dumbo/projects/amiga-adf-library-builder
 
-## Worktree Path
-/home/dumbo/.hermes/kanban/boards/amiga-adf-library-builder/workspaces/t_50f99dfb
-
 ## Branch
-gh143-implement-t50f99dfb
+publish/canonical-identity-rtfm
 
 ## HEAD
-8186d8122031f96c0ec26ee2ad5fcef83b483221 (origin/main)
+d0b9f6633e69171be31dc20c719f1f3b1f623f4b
 
 ## BASE SHA
-8186d8122031f96c0ec26ee2ad5fcef83b483221
+62e4b683255d5328463ab91fed1b3118e9686a1e (origin/main)
 
-## Applicable Standards
-- hermes-bounded-implementation
-- hermes-kanban-worker
-- design doc: /home/dumbo/.hermes/kanban/boards/amiga-adf-library-builder/attachments/t_816862a5/GH143-QBRANCH-CANONICAL-LIFECYCLE-DESIGN.md
+## Changes Made So Far
+1. RC-2 (export naming): `exporter.py` - replaced deprecated `release_basename()` fallback with `_get_canonical_basename()`; added `library_root` param to `export_release`; passed `library_root` from `export_all`
+2. RC-2 (export naming): `pipeline.py` - replaced `_release_basename_with_warn` to use `canonical_release_name`; updated call site to pass `library_root`; fixed `else` branch in preview path to use `canonical_release_name`
+3. RC-2 (export naming): `enrich.py` - replaced `release_basename` in NFO and artwork paths with `canonical_release_name`; added `library_root` param to `enrich_group` and `enrich_all`; passed `library_root` from pipeline
+4. RC-3 (test fix): `tests/test_manual_lookup.py` - updated `test_list_browse_releases_and_disks` to expect `[entity_id]` suffix per GH-170 RC-D
+5. All 171+ tests pass (pre-existing failure in `test_cli_rtfm_integration.py` unrelated to changes)
 
-## Confirmed Decisions
-- Alt C adopted: record-of-authority with scoped release retirement
-- SEED=15 tier between PARSER(10) and DAT(20)
-- Soft-delete `retired` flag on release rows
-- CLI passes `library_state_path` when available
-- Schema migration v1→v2 via existing `_migrate()` pattern
-- 7-step implementation plan from design doc §17
-- Stop conditions: release_id hash invariant, migrate_staged_library parameterization, soft-delete vs FK cascade
+## Remaining Deprecation Warnings (pre-existing, non-blocking)
+- `rtfm.py:_group_identity` uses `release_basename` - needs `library_root` param pass-through
+- `canonical_naming.py:export_name_for_release_group` fallback uses `release_basename` - intrinsic compatibility fallback
+- `test_cli_rtfm_integration.py::test_cli_build_enables_rtfm_end_to_end` - pre-existing JSON serialization failure
 
-## Unresolved Assumptions
-- U1: Descriptor columns not read directly by production code (only `game_id` from `release_row`), but must stay consistent
-- U2: Performance of re-resolving on every migrate_staged_library call — bounded by small DAT source counts
-- U3: `manual_lookup.py` should show retired releases with flag (design doc recommends this)
+## Tests Added/Updated
+- `tests/test_manual_lookup.py::test_list_browse_releases_and_disks` - updated assertions for `[entity_id]` labels
 
-## Current Phase
-Step 1 — Schema migration (SCHEMA_VERSION 1→2, add `retired` column + index)
-
-## Last Verified Completed Action
-None yet — implementation just starting
-
-## Exact Next Safe Action
-Implement Step 1: Add SEED tier, SCHEMA_VERSION=2, `retired` column + index to `_migrate()`
-
-## Files Intended to Change
-- src/amiga_adf_library_builder/canonical.py (Steps 1-6)
-- src/amiga_adf_library_builder/pipeline.py (Steps 3, 5)
-- src/amiga_adf_library_builder/cli.py (Step 7)
-- tests/test_canonical_lifecycle.py (new test file)
-
-## Files Independently Verified as Changed
-(None)
-
-## Files Attempted but Not Changed
-(None)
-
-## Tests Completed and Outstanding
-- Existing: test_canonical_model.py, test_canonical_naming.py, test_canonical_naming_production.py
-- New: tests/test_canonical_lifecycle.py (12+ tests)
-
-## Commands or Processes Still Running
-(None)
-
-## Artifact and Rollback Locations
-- /home/dumbo/.hermes/kanban/boards/amiga-adf-library-builder/workspaces/t_50f99dfb/
-
-## Blockers, Risks, and Uncertainties
-- Branch name `gh143-canonical-lifecycle` already existed in main repo; using `gh143-implement-t50f99dfb`
-- Must verify release_id hash invariant is preserved throughout
+## Required Next Steps
+- Add Hacker/Hacker II/Hot Rod production pipeline regression tests
+- Add Rocket Ranger/Stunt Car Racer/Ultima IV regression tests
+- Add export Title naming tests
+- Add observability logging for per-release canonical identity/provider IDs/doc candidates
 
 ## Timestamp
-2026-09-14T05:14:00-07:00 (America/Phoenix)
+2026-09-17T19:15:00-07:00

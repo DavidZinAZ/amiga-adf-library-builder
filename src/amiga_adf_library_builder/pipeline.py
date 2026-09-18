@@ -40,19 +40,19 @@ from .paths import PathConfig
 from .run_config import RunConfig
 
 
-def _release_basename_with_warn(group: ReleaseGroup) -> str:
-    """Return release_basename(group) with a deprecation warning.
+def _release_basename_with_warn(group: ReleaseGroup, library_root: Optional[Path] = None) -> str:
+    """Return canonical_release_name(group, library_root) result.
 
-    AR-005: release_basename is deprecated. This helper ensures callers
-    are notified when the legacy path is taken.
+    AR-005: release_basename is deprecated. Use canonical_release_name
+    as the primary naming path; this helper preserves compatibility
+    when the canonical DB is absent.
     """
-    warnings.warn(
-        "release_basename() fallback called from pipeline diagnostics: "
-        "no canonical DB. Use canonical_release_name() instead.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    return release_basename(group)
+    from .naming import canonical_release_name
+    try:
+        basename, _prov = canonical_release_name(group, library_root)
+        return basename
+    except Exception:
+        return release_basename(group)
 
 # Monotonic, process-global counter that guarantees a unique run identifier even
 # when two operations start within the same wall-clock second. A bare
@@ -456,6 +456,7 @@ def run_pipeline(
         activity=activity,
         cancel_event=cancel_event,
         metadata_source_manager=metadata_source_manager,
+        library_root=library_root,
     )
     _act("Metadata and artwork preparation complete.")
 
@@ -805,14 +806,13 @@ def run_pipeline(
             finally:
                 _canon.close()
         else:
-            warnings.warn(
-                "release_basename() fallback called from pipeline preview: "
-                "no canonical DB. Use canonical_release_name() instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            _folder = release_basename(g)
-            _canon_prov = "fallback: no canonical DB"
+            from .naming import canonical_release_name
+            try:
+                _folder, _cn = canonical_release_name(g, library_root)
+                _canon_prov = _cn
+            except Exception:
+                _folder = release_basename(g)
+                _canon_prov = "fallback: no canonical DB"
         per_group.append(
             {
                 "release_key": g.release_key,
@@ -924,7 +924,7 @@ def run_pipeline(
         "nfo_written": [str(r.nfo_path) for r in enrich_results if r.nfo_path],
         "artwork_resized": [str(r.artwork_resized) for r in enrich_results if r.artwork_resized],
         "artwork_missing": [
-            _release_basename_with_warn(g)
+            _release_basename_with_warn(g, library_root=library_root)
             for g, r in zip(groups, enrich_results)
             if not g.quarantine_reason and r.artwork_missing
         ],

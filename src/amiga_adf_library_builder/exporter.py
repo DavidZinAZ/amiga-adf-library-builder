@@ -195,6 +195,8 @@ def export_release(
     staged_library: Optional[StagedLibrary] = None,
     # Internal: release key for staged library lookup.
     release_key: Optional[str] = None,
+    # Canonical naming: explicit library root (replaces staging_root.parent.parent).
+    library_root: Optional[Path] = None,
 ) -> tuple[list[str], list[str], list[str]]:
     """Export one release group to the staging tree.
 
@@ -210,17 +212,8 @@ def export_release(
         except ValueError as exc:
             return [], [], [str(exc)]
     else:
-        try:
-            warnings.warn(
-                "release_basename() fallback called from export_release: "
-                "no explicit basename provided. "
-                "Use canonical_release_name() instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            basename = _sanitize_component(release_basename(group))
-        except ValueError as exc:
-            return [], [], [str(exc)]
+        # Use canonical naming when available; fall back only when canonical DB absent.
+        basename, _prov = _get_canonical_basename(group, staging_root, library_root=library_root)
 
     folder = root / basename
     written: list[str] = []
@@ -561,6 +554,8 @@ def export_all(
             # (GH-136) Staged library for manual artwork fallback.
             staged_library=staged_library,
             release_key=g.release_key,
+            # Canonical naming root.
+            library_root=library_root,
         )
         result.files_written.extend(written)
         result.files_unchanged.extend(unchanged)
