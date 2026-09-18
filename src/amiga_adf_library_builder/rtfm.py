@@ -333,6 +333,9 @@ class RtfmSource:
     provider: str = ""
     # Source URL for online-sourced documents (for provenance audit).
     source_url: str = ""
+    # Actual acquired document body content (for online typed docs).
+    # Populated when a document was successfully fetched from the provider.
+    content: str = ""
 
 
 @dataclass
@@ -365,6 +368,9 @@ class RtfmProvenanceSource:
     # RC-5: typed document type for provenance audit and section
     # placement. Populated when a source carries a DocType classification.
     doc_type: Optional[str] = None
+    # Actual acquired document body content (for online typed docs).
+    # Populated when a document was successfully fetched from the provider.
+    content: str = ""
 
 
 @dataclass
@@ -933,50 +939,31 @@ def _compose_sections(
     # instead of reordering by template.
     passthrough_order: Optional[list[str]] = None
 
-    # Provider-sourced sources (empty path, non-empty doc_type):
-    # generate readable content from provider metadata. These are used
-    # for online typed docs (Lemon Amiga Hints/Solution/Cheat) that
-    # have no local file.
-    for src in [s for s in sources if not s.path or str(s.path) == ""]:
-        doc_type = getattr(src, "doc_type", None)
-        provider = getattr(src, "provider", "")
-        stem = getattr(src, "stem", "")
-        source_url = getattr(src, "source_url", "")
-        category = src.category
-        marker = _section_for_category(category)
-
-        # Generate readable content from the source metadata.
-        content_lines = [
-            f"Documentation from {provider or 'provider'}",
-            f"Type: {doc_type or 'other'}",
-            f"Stem: {stem}",
-        ]
-        if source_url:
-            content_lines.append(f"Source URL: {source_url}")
-        content_lines.append("")
-        content_lines.append(f"Content for {doc_type or 'documentation'}")
-        content_lines.append("This documentation was acquired from the provider.")
-        body = "\n".join(content_lines) + "\n"
-
-        if body.strip():
-            sections.setdefault(marker, []).append(body.strip())
-
+    # Online typed-doc sources (empty path, non-empty content):
+    # use the actual acquired document body. These are created by
+    # lemonamiga_to_rtfm_sources() after fetching real pages.
+    for src in [s for s in sources if not s.path and getattr(src, "content", "")]:
+        content_text = getattr(src, "content", "")
+        if not content_text.strip():
+            continue
+        marker = _section_for_category(src.category)
+        sections.setdefault(marker, []).append(content_text.strip())
         root_index = getattr(src, "root_index", 0)
         sc = score_source_match(src, group)
         prov_sources.append(
             RtfmProvenanceSource(
                 category=src.category,
                 root_index=root_index,
-                source_rel=f"{provider}/{src.stem}",
+                source_rel=f"{src.provider or 'unknown'}/{src.stem}",
                 filename=src.stem,
-                kind=f"provider:{doc_type or 'other'}",
+                kind=f"provider:{src.doc_type or 'other'}",
                 sections=[marker],
                 sha256="",
-                size=len(body.encode("utf-8")),
+                size=len(content_text.encode("utf-8")),
                 match_confidence=sc.confidence,
                 match_kind=sc.kind,
                 match_evidence=list(sc.evidence),
-                doc_type=doc_type,
+                doc_type=getattr(src, "doc_type", None),
             )
         )
 
@@ -1808,21 +1795,21 @@ def lemonamiga_to_rtfm_sources(
 ) -> list[RtfmSource]:
     """Query Lemon Amiga for typed documentation and convert to RtfmSource entries.
 
-    For each game title, calls ``lemonamiga_lookup`` to fetch the game
-    record. When the game is found on Lemon Amiga, creates ``RtfmSource``
-    entries carrying ``DocType`` metadata (Hints, Solution, Cheat) so the
-    RTFM builder can produce readable RTFM with proper provenance.
+    For each game title, discovers which typed-document resources ACTUALLY
+    exist on Lemon Amiga (Hints, Solution, Cheat, Manual, etc.), fetches
+    the actual document pages, and extracts real player-useful body content.
+    Only creates RtfmSource entries for resources that were successfully
+    discovered and acquired. Never fabricates absent doc types/content.
 
-    ``doc_types`` limits which typed docs to acquire (e.g.
+    ``doc_types`` limits which typed docs to attempt (e.g.
     [DocType.HINTS.value, DocType.SOLUTION.value, DocType.CHEAT.value]).
-    When ``None``, all typed docs are attempted.
+    When ``None``, all typed docs discovered on the page are attempted.
 
     Returns an empty list when Lemon Amiga is disabled, unreachable,
     or returns no matches. Never raises.
     """
-    from .metadata import lemonamiga_lookup
-    from .rtfm import CATEGORY_MANUALS, DocType
-    from .utils import write_json_atomic
+    from .metadata import lemonamiga_discover_docs, lemonamiga_fetch_doc
+    from .rtfm import DocType
 
     if not doc_types:
         doc_types = [
@@ -1831,7 +1818,7 @@ def lemonamiga_to_rtfm_sources(
             DocType.REFERENCE.value,
         ]
 
-    # Module-level mapping from DocType to RTFM category.
+    # Map doc type values to RTFM categories
     doc_type_to_category = {
         DocType.MANUAL.value: "manuals",
         DocType.INSTRUCTIONS.value: "instructions",
@@ -1852,67 +1839,71 @@ def lemonamiga_to_rtfm_sources(
             continue
         release_key = getattr(game, "release_key", "") or getattr(game, "id", "")
 
+        # Step 1: Discover which typed documents actually exist on Lemon Amiga
         try:
-            record = lemonamiga_lookup(
-                title, timeout=timeout, opener=opener, config=config
+            discovered_docs = lemonamiga_discover_docs(
+                title, timeout=timeout, opener=opener
             )
         except Exception:
             continue
-        if record is None or not record.canonical_title:
+        if not discovered_docs:
             continue
 
-        provider_id = getattr(record, "provider_id", "") or ""
-        source_url = getattr(record, "source_url", "") or ""
-        canonical_title = record.canonical_title
-
-        # Build readable RTFM content from the metadata record.
-        content_parts = []
-        content_parts.append(f"RTFM generated from Lemon Amiga: {canonical_title}\n")
-        content_parts.append(f"Provider: lemon-amiga\n")
-        if record.publisher:
-            content_parts.append(f"Publisher: {record.publisher}\n")
-        if record.year:
-            content_parts.append(f"Year: {record.year}\n")
-        if record.developer:
-            content_parts.append(f"Developer: {record.developer}\n")
-        if record.description:
-            content_parts.append(f"\n{record.description}\n")
-        content = "\n".join(content_parts).strip() + "\n"
-
-        # Create one RtfmSource per typed doc type, carrying the
-        # DocType classification and provenance through the pipeline.
-        for doc_type_str in doc_types:
-            source_key = f"{release_key}/{doc_type_str}/{canonical_title}"
-            if source_key in seen_keys:
+        # Step 2: For each discovered doc type, fetch the actual content
+        for doc_info in discovered_docs:
+            doc_type_str = doc_info.get("type", "")
+            if doc_type_str not in doc_types:
                 continue
-            seen_keys.add(source_key)
-
-            stem = f"{canonical_title} ({doc_type_str})"
-            # Verify the DocType is valid before creating the source.
             try:
                 DocType(doc_type_str)
             except ValueError:
                 continue
 
-            # Map DocType to RTFM category for section placement.
-            category = doc_type_to_category.get(doc_type_str, "manuals")
+            doc_url = doc_info.get("url", "")
+            if not doc_url:
+                continue
+
+            # Fetch the actual document page content
+            try:
+                body_content = lemonamiga_fetch_doc(
+                    doc_url, timeout=timeout, opener=opener
+                )
+            except Exception:
+                continue
+            if not body_content or len(body_content.strip()) < 10:
+                continue
+
+            # Build a unique key for deduplication
+            canonical_title = ""
+            source_url = ""
+            # Get the canonical title from the game object or use the title
+            if hasattr(game, "canonical_title"):
+                canonical_title = game.canonical_title
+            if not canonical_title:
+                canonical_title = title
+
+            source_key = f"{release_key}/{doc_type_str}/{canonical_title}"
+            if source_key in seen_keys:
+                continue
+            seen_keys.add(source_key)
+
+            category = doc_type_to_category.get(doc_type_str, "cheats")
+            stem = f"{canonical_title} ({doc_type_str})"
 
             sources.append(
                 RtfmSource(
-                    path=Path(""),  # Will be materialized by the pipeline
+                    path=Path(""),  # No local file - content is inline
                     root=Path(""),
                     category=category,
                     stem=stem,
                     doc_type=doc_type_str,
                     provider="lemon-amiga",
-                    source_url=source_url,
-                    # Store the generated content on the source for
-                    # the pipeline to materialize into a temp file.
+                    source_url=doc_url,
+                    content=body_content,
                 )
             )
 
     return sources
-
 
 def build_rtfm_all(
     groups: list,

@@ -9,6 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional, Any
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QComboBox,
     QGroupBox,
@@ -35,6 +36,7 @@ from ..manual_lookup import (
     releases_for,
     revert_manual_override,
 )
+from ..rtfm import DocType
 
 _CANDIDATE_COLUMNS = [
     "Source", "Title", "Year", "Publisher", "Region", "SHA-1", "Record Key"
@@ -42,6 +44,10 @@ _CANDIDATE_COLUMNS = [
 _CLAIM_COLUMNS = [
     "Value", "Source", "Authority", "Rank", "Confidence", "Observed",
     "Record Key", "URL", "Winner", "Manual"
+]
+_DOC_COLUMNS = [
+    "Provider/Source", "Doc Type", "Title", "Status",
+    "Match/Reason", "Source URL", "Selected"
 ]
 
 
@@ -163,6 +169,41 @@ class ManualLookupPanel(QWidget):
         sl.addWidget(self._candidates_table)
         layout.addWidget(src_box, 2)
 
+        # Row 5: Typed-document search section.
+        doc_box = QGroupBox("Typed-document search (Lemon Amiga)")
+        dl = QVBoxLayout(doc_box)
+        brow2 = QHBoxLayout()
+        self._doc_query = QLineEdit(self)
+        self._doc_query.setPlaceholderText(
+            "Game title to search for typed docs (Hints/Solution/Cheat/Manual)"
+        )
+        brow2.addWidget(self._doc_query, 1)
+        self._doc_search_btn = QPushButton("Search Typed Docs")
+        self._doc_search_btn.setToolTip(
+            "Discover and fetch real typed documents from Lemon Amiga"
+        )
+        brow2.addWidget(self._doc_search_btn)
+        self._doc_apply_btn = QPushButton("Apply Selection")
+        self._doc_apply_btn.setToolTip(
+            "Persist selected documents as operator override"
+        )
+        brow2.addWidget(self._doc_apply_btn)
+        self._doc_refresh_btn = QPushButton("Refresh")
+        dl.addLayout(brow2)
+        self._doc_table = QTableWidget(self)
+        self._doc_table.setColumnCount(len(_DOC_COLUMNS))
+        self._doc_table.setHorizontalHeaderLabels(_DOC_COLUMNS)
+        self._doc_table.horizontalHeader().setStretchLastSection(True)
+        self._doc_table.setAlternatingRowColors(True)
+        self._doc_table.verticalHeader().setVisible(False)
+        self._doc_table.setSelectionBehavior(
+            QTableWidget.SelectRows
+        )
+        dl.addWidget(self._doc_table)
+        self._doc_status = QLabel("", self)
+        dl.addWidget(self._doc_status)
+        layout.addWidget(doc_box, 2)
+
         # Wire signals
         self._refresh_btn.clicked.connect(self.refresh)
         self._game_combo.currentIndexChanged.connect(self._on_game_selected)
@@ -174,6 +215,8 @@ class ManualLookupPanel(QWidget):
         self._search_btn.clicked.connect(self._on_search_sources)
         self._use_query_btn.clicked.connect(self._on_use_query_value)
         self._lookup_btn.clicked.connect(self._on_unified_lookup)
+        self._doc_search_btn.clicked.connect(self._on_doc_search)
+        self._doc_apply_btn.clicked.connect(self._on_doc_override)
 
     # --- entity selection ------------------------------------------------------
 
@@ -575,6 +618,119 @@ class ManualLookupPanel(QWidget):
         else:
             self._status_label.setText(f"DAT results: {len(cands)}")
         # ---------------------------------------------------------------------
+
+    def _on_doc_search(self) -> None:
+        """Search Lemon Amiga for typed documents for the selected game."""
+        title = self._doc_query.text().strip()
+        if not title:
+            # Try to get the title from the current game selection
+            game_id = self._game_combo.currentData()
+            if game_id:
+                from ..manual_lookup import _game_label
+                title = _game_label(self._canon, game_id)
+        if not title:
+            self._doc_status.setText("No game title selected for doc search.")
+            return
+
+        from ..metadata import lemonamiga_discover_docs
+        from ..rtfm import DocType
+
+        try:
+            discovered = lemonamiga_discover_docs(title, timeout=20.0)
+        except Exception as exc:
+            self._doc_status.setText(f"Doc search failed: {exc}")
+            discovered = []
+
+        self._doc_table.setRowCount(0)
+        if not discovered:
+            self._doc_status.setText(
+                f"No typed documents discovered for '{title}' on Lemon Amiga. "
+                "The game may not have Hints/Solution/Cheat available."
+            )
+            return
+
+        # Map doc type to human-readable labels
+        type_labels = {
+            DocType.HINTS.value: "Hints",
+            DocType.SOLUTION.value: "Solution",
+            DocType.CHEAT.value: "Cheat",
+            DocType.WALKTHROUGH.value: "Walkthrough",
+            DocType.MANUAL.value: "Manual",
+            DocType.INSTRUCTIONS.value: "Instructions",
+            DocType.REFERENCE.value: "Reference",
+        }
+
+        self._doc_table.setRowCount(len(discovered))
+        for r, doc_info in enumerate(discovered):
+            doc_type = doc_info.get("type", "")
+            doc_url = doc_info.get("url", "")
+            label = type_labels.get(doc_type, doc_type.capitalize())
+            self._doc_table.setItem(r, 0, QTableWidgetItem("lemon-amiga"))
+            self._doc_table.setItem(r, 1, QTableWidgetItem(label))
+            self._doc_table.setItem(r, 2, QTableWidgetItem(title))
+            self._doc_table.setItem(r, 3, QTableWidgetItem("Discovered"))
+            self._doc_table.setItem(r, 4, QTableWidgetItem("Available on provider"))
+            self._doc_table.setItem(r, 5, QTableWidgetItem(doc_url))
+            check = QTableWidgetItem()
+            check.setFlags(check.flags() | Qt.ItemIsUserCheckable)
+            check.setCheckState(Qt.CheckedState.Checked)
+            self._doc_table.setItem(r, 6, check)
+
+        n_docs = len(discovered)
+        self._doc_status.setText(
+            f"Found {n_docs} typed document(s) for '{title}'. "
+            "Select which to associate with this release."
+        )
+
+    def _on_doc_override(self) -> None:
+        """Persist the operator's doc selection as a manual override."""
+        rows = self._doc_table.rowCount()
+        if rows == 0:
+            self._doc_status.setText("No documents to apply.")
+            return
+
+        release_id = self._release_combo.currentData()
+        if not release_id:
+            self._doc_status.setText("No release selected for doc override.")
+            return
+
+        selected_docs = []
+        for r in range(rows):
+            check_item = self._doc_table.item(r, 6)
+            if check_item and check_item.checkState() == Qt.CheckedState.Checked:
+                doc_type = self._doc_table.item(r, 1).text()
+                doc_url = self._doc_table.item(r, 5).text()
+                selected_docs.append((doc_type, doc_url))
+
+        if not selected_docs:
+            self._doc_status.setText(
+                "No documents selected for override. "
+                "Check the rows you want to associate."
+            )
+            return
+
+        # Persist the association as a manual override
+        # Store the doc association in the canonical library
+        for doc_type, doc_url in selected_docs:
+            try:
+                self._canon.claim_field(
+                    "release", release_id,
+                    f"doc_{doc_type}",
+                    doc_url,
+                    Provenance(
+                        source="operator",
+                        authority=SourceAuthority.CURATION,
+                        record_key=f"doc:{doc_type}",
+                        url=doc_url,
+                    )
+                )
+            except Exception:
+                pass
+
+        self._canon._conn.commit()
+        self._doc_status.setText(
+            f"Applied {len(selected_docs)} document override(s) for release."
+        )
 
     def closeEvent(self, event) -> None:  # release the canonical DB promptly
         try:
