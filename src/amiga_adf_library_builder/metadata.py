@@ -32,6 +32,54 @@ _ALLOWED_ARTWORK_PAGE_HOSTS = {
 }
 
 
+def _roman_numerals_to_arabic(text: str) -> str:
+    """Convert roman numeral tokens in ``text`` to arabic digits.
+
+    ``"Hacker II: The Doomsday Papers"`` → ``"Hacker 2: The Doomsday Papers"``.
+    Only converts valid roman numerals; non-roman tokens pass through.
+    """
+    _roman_vals = {"I": 1, "V": 5, "X": 10, "L": 50, "C": 100, "D": 500, "M": 1000}
+
+    def _arabic_to_roman(n: int) -> str:
+        if n <= 0 or n >= 4000:
+            return ""
+        table = (
+            (1000, "M"), (900, "CM"), (500, "D"), (400, "CD"),
+            (100, "C"), (90, "XC"), (50, "L"), (40, "XL"),
+            (10, "X"), (9, "IX"), (5, "V"), (4, "IV"), (1, "I"),
+        )
+        out = []
+        for value, sym in table:
+            while n >= value:
+                out.append(sym)
+                n -= value
+        return "".join(out)
+
+    def _to_arabic(tok: str) -> str:
+        if not tok or not re.fullmatch(r"[IVXLCDM]+", tok.upper()):
+            return tok
+        total = 0
+        prev = 0
+        try:
+            for ch in reversed(tok.upper()):
+                v = _roman_vals[ch]
+                total += -v if v < prev else v
+                prev = v
+        except KeyError:
+            return tok
+        # Reject non-standard forms by round-tripping.
+        if _arabic_to_roman(total) != tok.upper():
+            return tok
+        return str(total)
+
+    return re.sub(
+        r"\b([IVXLCDM]+)\b",
+        lambda m: _to_arabic(m.group(1)),
+        text,
+        flags=re.IGNORECASE,
+    )
+
+
 class UnsafeUrlError(ValueError):
     """Raised when an outbound fetch URL targets a private/loopback/link-local address."""
 
@@ -293,6 +341,12 @@ class LemonAmigaConfig:
 
 
 def _norm(value: str) -> str:
+    # Delegate to canonical_title for universal roman/arabic,
+    # article-movement, and disambiguator normalization.
+    # Falls back to raw alnum-strip when canonical_title returns empty.
+    canonical = canonical_title(value)
+    if canonical:
+        return re.sub(r"[^a-z0-9]", "", canonical.lower())
     return re.sub(r"[^a-z0-9]", "", value.lower())
 
 
@@ -983,8 +1037,14 @@ def lemonamiga_lookup(title: str, *, timeout: float = 20.0,
     if not cfg.enabled:
         return None
 
-    # Step 1: Construct a slug from the title and try the game page directly
-    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+    # Pre-normalize the title: strip version suffixes and convert
+    # roman numerals to arabic so the slug matches live URLs
+    # (e.g. "Hacker II: The Doomsday Papers v1.0" →
+    #  "hacker-2-the-doomsday-papers" not "hacker-ii-the-doomsday-papers-v1-0").
+    _version_stripped = re.sub(r"\s+v\d[\d.]*\s*$", "", title).strip()
+    # Convert roman numerals to arabic in the title for slug generation.
+    _arabic_title = _roman_numerals_to_arabic(_version_stripped)
+    slug = re.sub(r"[^a-z0-9]+", "-", _arabic_title.lower()).strip("-")
     game_url = f"https://www.lemonamiga.com/game/{slug}"
 
     try:

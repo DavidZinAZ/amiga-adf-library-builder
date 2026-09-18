@@ -62,6 +62,7 @@ section only and never invents a split.
 
 from __future__ import annotations
 
+import enum
 import os
 import re
 import stat
@@ -177,6 +178,38 @@ CATEGORY_PRIMARY_MARKER: dict[str, str] = {
     CATEGORY_INSTRUCTIONS: MARKER_CONTROLS,
     CATEGORY_MANUALS: MARKER_GETTING_STARTED,
     CATEGORY_CHEATS: MARKER_HINTS_CHEATS,
+}
+
+# --- Typed document types (RC-5) ---
+# Canonical enum for document provenance types beyond the three
+# source roots. Enables Hints, Solution/Walkthrough, Cheat, Reference
+# content from providers like Lemon Amiga to carry proper type info
+# through to RTFM provenance and section placement.
+
+
+class DocType(str, enum.Enum):
+    """Canonical document type for typed docs provenance."""
+
+    MANUAL = "manual"
+    INSTRUCTIONS = "instructions"
+    HINTS = "hints"
+    SOLUTION = "solution"
+    WALKTHROUGH = "walkthrough"
+    CHEAT = "cheat"
+    REFERENCE = "reference"
+    OTHER = "other"
+
+
+#: Maps DocType → RTFM section marker for composition placement.
+DOC_TYPE_SECTION_MAP: dict[str, str] = {
+    DocType.MANUAL.value: MARKER_GETTING_STARTED,
+    DocType.INSTRUCTIONS.value: MARKER_CONTROLS,
+    DocType.HINTS.value: MARKER_HINTS_CHEATS,
+    DocType.SOLUTION.value: MARKER_HINTS_CHEATS,
+    DocType.WALKTHROUGH.value: MARKER_HINTS_CHEATS,
+    DocType.CHEAT.value: MARKER_HINTS_CHEATS,
+    DocType.REFERENCE.value: MARKER_ADDITIONAL_REFERENCE,
+    DocType.OTHER.value: MARKER_HINTS_CHEATS,
 }
 
 #: Source files we consider as manual text.
@@ -321,6 +354,9 @@ class RtfmProvenanceSource:
     extraction_method: Optional[str] = None
     pages: Optional[list[dict]] = None
     deduped_by: Optional[str] = None
+    # RC-5: typed document type for provenance audit and section
+    # placement. Populated when a source carries a DocType classification.
+    doc_type: Optional[str] = None
 
 
 @dataclass
@@ -592,6 +628,9 @@ def _strip_release_tags(title: str) -> str:
         kept.append(tok)
     t = "".join(kept)
     t = re.sub(r"\s+[a-z]\s*$", " ", t, flags=re.IGNORECASE)
+    # Strip version suffixes (e.g. " v1.0", " v2") so the canonical
+    # base is compared without release-version noise (RC-3).
+    t = re.sub(r"\s+v\d[\d.]*\s*$", "", t, flags=re.IGNORECASE)
     return re.sub(r"\s+", " ", t).strip()
 
 
