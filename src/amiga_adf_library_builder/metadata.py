@@ -1190,6 +1190,8 @@ class _LemonAmigaGameParser(HTMLParser):
         self.doc_links: list[dict[str, str]] = []  # [{type, url, slug, id}]
         self._in_docs_section: bool = False
         self._current_doc_type: str = ""
+        self._in_doc_link: bool = False
+        self._doc_link_text_parts: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
         a = {k.lower(): (v or "") for k, v in attrs}
@@ -1240,12 +1242,19 @@ class _LemonAmigaGameParser(HTMLParser):
                 self._table_section = "relationships"
             elif "review" in tbl_class or "review" in tbl_id:
                 self._table_section = "reviews"
+        elif tag_lower == "a" and a.get("href"):
+            href = a["href"]
+            if self._in_docs_section and (href.startswith("/doc/") or href.startswith("/cheat/")):
+                self._in_doc_link = True
+                self._doc_link_text_parts = []
+                self._parse_doc_link(href)
         elif tag_lower == "div":
             cls = a.get("class", "").lower()
             if "description" in cls:
                 self._in_description = True
                 self._description_parts = []
             # Track the "Docs" section for typed-document link discovery.
+            # Support EVERY offered typed-doc link: /doc/... and /cheat/...
             if "docs" in cls or "doc" in cls:
                 self._in_docs_section = True
 
@@ -1267,8 +1276,31 @@ class _LemonAmigaGameParser(HTMLParser):
             self._in_docs_section = False
         elif tag_lower == "table":
             self._table_section = ""
-        elif tag_lower == "a" and self._in_docs_section:
-            self._in_docs_section = False
+        # Do NOT turn off _in_docs_section on </a> —
+        # the section must survive multiple links/resources.
+        # _in_docs_section is only cleared when leaving the outer div.
+        elif tag_lower == "a" and self._in_doc_link:
+            self._in_doc_link = False
+            if self.doc_links:
+                last = self.doc_links[-1]
+                link_text = "".join(self._doc_link_text_parts).strip().lower()
+                if not last.get("type"):
+                    if link_text in ("hints", "tip", "tips"):
+                        last["type"] = "hints"
+                    elif link_text in ("manual", "instructions"):
+                        last["type"] = "manual"
+                    elif link_text in ("cheat", "cheats"):
+                        last["type"] = "cheat"
+                    elif link_text in ("solution",):
+                        last["type"] = "solution"
+                    elif link_text in ("walkthrough",):
+                        last["type"] = "walkthrough"
+                    elif link_text in ("reference",):
+                        last["type"] = "reference"
+                    elif link_text:
+                        last["type"] = link_text
+                    else:
+                        last["type"] = "other"
 
     def handle_data(self, data: str) -> None:
         data = data.strip()
@@ -1281,6 +1313,8 @@ class _LemonAmigaGameParser(HTMLParser):
             self._td_text += data + " "
         elif self._in_th:
             self._th_text += data + " "
+        elif self._in_doc_link:
+            self._doc_link_text_parts.append(data)
         elif not self.canonical_title:
             self.canonical_title = data
 
@@ -1325,43 +1359,22 @@ class _LemonAmigaGameParser(HTMLParser):
                     self.platforms.append(p)
 
     def _parse_doc_link(self, href: str) -> None:
-        """Parse a typed-document URL like /doc/slug/123 or /cheat/slug/456."""
-        # Match /doc/{slug}/{id} or /cheat/{slug}/{id}
+        """Parse a typed-document URL like /doc/slug/123 or /cheat/slug/456.
+
+        The type is determined from the link text, not the URL path,
+        so the implementation is generic and contains no title-specific hack.
+        """
         m = re.match(r"^/(doc|cheat)/([^/]+)/(\d+)$", href.strip())
         if not m:
             return
         doc_type, slug, doc_id = m.group(1), m.group(2), m.group(3)
-        # Normalize doc type names
-        if doc_type == "doc":
-            # /doc/ pages need the link text to determine the type.
-            # Default to "hints" for now; the link text will be parsed
-            # in handle_data. Store the URL for now.
-            self.doc_links.append({
-                "type": "",  # Will be filled from link text
-                "url": href,
-                "slug": slug,
-                "id": doc_id,
-            })
-            return
+        # Store with empty type; link text in handle_endtag determines the type.
         self.doc_links.append({
-            "type": doc_type,
+            "type": "",
             "url": href,
             "slug": slug,
             "id": doc_id,
         })
-
-    def handle_data(self, data: str) -> None:
-        data = data.strip()
-        if not data:
-            return
-
-        if self._in_title_tag:
-            return
-        if self._in_td:
-            self._td_text += data + " "
-        elif self._in_th:
-            self._th_text += data + " "
-
 
 
 class _LemonAmigaDocParser(HTMLParser):
@@ -1383,6 +1396,8 @@ class _LemonAmigaDocParser(HTMLParser):
         self._td_text: str = ""
         self._in_chrome: bool = False
         self._skip_depth: int = 0
+        self._in_tr: bool = False
+        self._current_row_parts: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
         a = {k.lower(): (v or "") for k, v in attrs}
@@ -1397,6 +1412,9 @@ class _LemonAmigaDocParser(HTMLParser):
         elif tag_lower == "td" and self._in_table:
             self._in_td = True
             self._td_text = ""
+        elif tag_lower == "tr":
+            self._in_tr = True
+            self._current_row_parts = []
         elif tag_lower in ("nav", "header", "footer", "aside"):
             self._skip_depth += 1
         elif tag_lower == "a" and self._skip_depth > 0:
@@ -1414,6 +1432,14 @@ class _LemonAmigaDocParser(HTMLParser):
                 self.body = "\n".join(self._table_rows).strip()
         elif tag_lower == "td" and self._in_td:
             self._in_td = False
+            # Accumulate cell text into the current row
+            if self._in_tr and self._td_text.strip():
+                self._current_row_parts.append(self._td_text.strip())
+        elif tag_lower == "tr" and self._in_tr:
+            self._in_tr = False
+            if self._current_row_parts:
+                self._table_rows.append(" | ".join(self._current_row_parts))
+            self._current_row_parts = []
         elif tag_lower in ("nav", "header", "footer", "aside"):
             self._skip_depth = max(0, self._skip_depth - 1)
 
@@ -1427,10 +1453,6 @@ class _LemonAmigaDocParser(HTMLParser):
             self._code_parts.append(data)
         elif self._in_td:
             self._td_text += data + " "
-            # Build row text from table cells
-            if self._in_table and not self._in_code:
-                # Simple: accumulate all td text for table rows
-                pass
 
 def _discover_curated_artwork(record: MetadataRecord, title: str, *, timeout: float,
                               opener: Optional[Callable[..., Any]]) -> None:
@@ -1479,8 +1501,9 @@ def lemonamiga_discover_docs(
     if not parser.canonical_title:
         return []
 
-    # Filter out entries with empty type (from /doc/ pages where
-    # the text was in a different cell). Keep only entries with a type.
+    # Keep only entries with a recognized type.
+    # Both /doc/ and /cheat/ links are now populated from
+    # link text or explicit type mapping.
     docs = [d for d in parser.doc_links if d.get("type") and d["type"] != "other"]
     return docs
 

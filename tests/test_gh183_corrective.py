@@ -96,11 +96,59 @@ class TestLemonAmigaTypedDocAcquisition:
 
     def test_lemonamiga_discover_docs_returns_doc_list(self):
         """lemonamiga_discover_docs returns list of doc dicts
-        with type, url, slug, id keys."""
-        from amiga_adf_library_builder.metadata import lemonamiga_discover_docs
-        # The function generates the slug from the title and fetches
-        # the game page. We patch _text_get to simulate the game page.
-        pass  # Actual integration test requires live fetch or fixture
+        with type, url, slug, id keys — using real parser fixtures."""
+        from amiga_adf_library_builder.metadata import (
+            lemonamiga_discover_docs, _LemonAmigaGameParser,
+        )
+        # Fixture: game page with MULTIPLE typed-doc links including /doc/ and /cheat/
+        game_html = (
+            '<html><body>'
+            '<h1>Hacker II: The Doomsday Papers</h1>'
+            '<div class="docs">'
+            '<a href="/doc/hacker-2-the-doomsday-papers/763">Hints</a>'
+            '<a href="/cheat/hacker-2-the-doomsday-papers/480">Cheat</a>'
+            '<a href="/doc/hacker-2-the-doomsday-papers/764">Manual</a>'
+            '</div></body></html>'
+        )
+        # Use the REAL parser on the fixture
+        parser = _LemonAmigaGameParser()
+        parser.feed(game_html)
+        assert parser.canonical_title == "Hacker II: The Doomsday Papers"
+        assert len(parser.doc_links) >= 3, \
+            f"Expected >=3 doc links, got {len(parser.doc_links)}"
+        # Verify every link has a recognized type
+        for link in parser.doc_links:
+            assert link.get("type"), f"Link {link['url']} has no type"
+            assert link["type"] != "other", f"Link {link['url']} has type 'other'"
+        # Verify /cheat/ link is discovered
+        cheat_links = [d for d in parser.doc_links if d["url"].startswith("/cheat/")]
+        assert len(cheat_links) >= 1, "No /cheat/ links discovered"
+
+    def test_lemonamiga_discover_docs_multiple_links_survive(self):
+        """Docs-section parser state survives multiple links/resources
+        on the same game page — no early </a> termination."""
+        from amiga_adf_library_builder.metadata import _LemonAmigaGameParser
+        # Fixture: page where docs section has many <a> tags
+        game_html = (
+            '<html><body>'
+            '<div class="docs">'
+            '<a href="/doc/game/1">Hints</a>'
+            '<a href="/cheat/game/2">Cheat</a>'
+            '<a href="/doc/game/3">Solution</a>'
+            '<a href="/cheat/game/4">Walkthrough</a>'
+            '</div></body></html>'
+        )
+        parser = _LemonAmigaGameParser()
+        parser.feed(game_html)
+        # All 4 links must be discovered — the old bug killed _in_docs_section
+        # on the first </a>, so only 1 link would be found
+        assert len(parser.doc_links) == 4, \
+            f"Expected 4 doc links, got {len(parser.doc_links)}"
+        types = [d["type"] for d in parser.doc_links]
+        assert "hints" in types
+        assert "cheat" in types
+        assert "solution" in types
+        assert "walkthrough" in types
 
     def test_lemonamiga_to_rtfm_sources_returns_empty_when_no_docs(self):
         """Returns empty list when no typed docs are discovered."""
@@ -188,8 +236,88 @@ class TestLemonAmigaTypedDocAcquisition:
         assert sources == []
 
     def test_lemonamiga_sources_produce_provider_kind_in_provenance(self):
-        """Sources created from fetched docs have provider kind in provenance."""
-        pass  # Verified via _compose_sections integration
+        """Sources created from fetched docs have provider kind in provenance
+        — using real parser fixtures and actual extracted bodies."""
+        from amiga_adf_library_builder.metadata import (
+            _LemonAmigaGameParser, _LemonAmigaDocParser,
+        )
+        from amiga_adf_library_builder.rtfm import (
+            lemonamiga_to_rtfm_sources, DocType, RtfmSource,
+        )
+        # Fixture: game page with /doc/ and /cheat/ links
+        game_html = (
+            '<html><body>'
+            '<h1>Hacker II</h1>'
+            '<div class="docs">'
+            '<a href="/doc/hacker-2/763">Hints</a>'
+            '<a href="/cheat/hacker-2/480">Cheat</a>'
+            '</div></body></html>'
+        )
+        # Fixture: hints doc page with <code> body
+        hints_html = (
+            '<html><body>'
+            '<code>Real hints body content here</code>'
+            '</body></html>'
+        )
+        # Fixture: cheat doc page with table body
+        cheat_html = (
+            '<html><body>'
+            '<table>'
+            '<tr><td>Cheat code one</td></tr>'
+            '<tr><td>Cheat code two</td></tr>'
+            '</table>'
+            '</body></html>'
+        )
+        # Parse game page with REAL parser
+        game_parser = _LemonAmigaGameParser()
+        game_parser.feed(game_html)
+        assert len(game_parser.doc_links) >= 2
+
+        # Parse doc pages with REAL parsers
+        hints_parser = _LemonAmigaDocParser()
+        hints_parser.feed(hints_html)
+        assert hints_parser.body == "Real hints body content here"
+
+        cheat_parser = _LemonAmigaDocParser()
+        cheat_parser.feed(cheat_html)
+        assert "Cheat code one" in cheat_parser.body
+        assert "Cheat code two" in cheat_parser.body
+
+        # Build sources using the real extracted bodies
+        games = [MagicMock()]
+        games[0].title = "Hacker II"
+        games[0].release_key = "hacker-ii|1"
+        games[0].canonical_title = "Hacker II"
+
+        # Patch _text_get to return our fixture HTML in sequence
+        with patch(
+            "amiga_adf_library_builder.metadata._text_get",
+            side_effect=[
+                (game_html, "https://www.lemonamiga.com/game/hacker-2"),
+                (hints_html, "https://www.lemonamiga.com/doc/hacker-2/763"),
+                (cheat_html, "https://www.lemonamiga.com/cheat/hacker-2/480"),
+            ],
+        ):
+            sources = lemonamiga_to_rtfm_sources(
+                games, doc_types=[DocType.HINTS.value, DocType.CHEAT.value]
+            )
+
+        # Verify: real bodies present, no placeholder prose
+        assert len(sources) >= 1, "Expected at least one source"
+        for s in sources:
+            assert isinstance(s, RtfmSource)
+            assert s.provider == "lemon-amiga"
+            assert s.content != "", f"Source {s.doc_type} has empty content"
+            assert "placeholder" not in s.content.lower(),                 f"Source {s.doc_type} contains placeholder prose"
+            assert "Real" in s.content or "Cheat" in s.content,                 f"Source {s.doc_type} missing real body content"
+
+        # Verify: generated RTFM contains the real fixture bodies
+        from amiga_adf_library_builder.rtfm import _compose_sections, RtfmConfig
+        cfg = RtfmConfig()
+        sections, _, _, _ = _compose_sections(sources, group=None, cfg=cfg)
+        for marker, texts in sections.items():
+            for text in texts:
+                assert "placeholder" not in text.lower(),                     f"RTFM section {marker} contains placeholder prose"
 
 
 # ---------------------------------------------------------------------------
