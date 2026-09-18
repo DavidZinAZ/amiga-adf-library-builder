@@ -548,11 +548,49 @@ def run_pipeline(
                     except Exception:  # provider failure must not break the pipeline
                         retrokit_sources = None
                         manual_trace["provider_statuses"].append("retrokit:error")
+
+                # (GH-183) Wire Lemon Amiga typed doc acquisition
+                # into the RTFM pipeline. Query Lemon Amiga for
+                # Hints/Solution/Cheat and convert to RtfmSource entries
+                # with DocType classification so the RTFM builder can
+                # produce readable RTFM with proper provenance.
+                lemonamiga_sources = []
+                try:
+                    from .rtfm import lemonamiga_to_rtfm_sources
+                    # Build a list of game objects from groups for
+                    # Lemon Amiga lookup.
+                    _games_for_lem = [
+                        g for g in groups
+                        if not g.quarantine_reason
+                    ]
+                    if _games_for_lem:
+                        lemonamiga_sources = lemonamiga_to_rtfm_sources(
+                            _games_for_lem,
+                            config=None,  # Use defaults (lemonamiga enabled
+                            # via provider config if available)
+                        )
+                        _act(
+                            f"RTFM phase: Lemon Amiga returned "
+                            f"{len(lemonamiga_sources)} typed doc candidate(s)"
+                        )
+                        manual_trace["provider_statuses"].append("lemon-amiga:queried")
+                except Exception:  # Lemon Amiga failure must not break the run
+                    manual_trace["provider_statuses"].append("lemon-amiga:error")
+
+                # Combine all extra sources: RetroKit first, then
+                # Lemon Amiga typed docs.
+                _all_extra_sources = []
+                if retrokit_sources:
+                    _all_extra_sources.extend(retrokit_sources)
+                if lemonamiga_sources:
+                    _all_extra_sources.extend(lemonamiga_sources)
+
                 rtfm_results = rtfm_mod.build_rtfm_all(
                     groups,
                     cfg=rtfm_cfg,
                     rtfm_dir=rtfm_dir,
-                    extra_sources=retrokit_sources,
+                    extra_sources=_all_extra_sources if _all_extra_sources else None,
+                    library_root=library_root,
                 )
                 _act(f"RTFM phase: built {len(rtfm_results)} sidecar(s)")
                 manual_trace["category"] = "built"

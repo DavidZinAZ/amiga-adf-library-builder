@@ -325,6 +325,14 @@ class RtfmSource:
     category: str        # one of CATEGORY_* constants
     # Match identity derived for this source (for diagnostics/provenance).
     stem: str = ""
+    # RC-5: typed document type (e.g. DocType.HINTS.value) for
+    # online typed docs (Lemon Amiga Hints, Solution, Cheat).
+    # Populated when a source carries a DocType classification.
+    doc_type: Optional[str] = None
+    # Provider identity for online-sourced documents (e.g. "lemon-amiga").
+    provider: str = ""
+    # Source URL for online-sourced documents (for provenance audit).
+    source_url: str = ""
 
 
 @dataclass
@@ -550,22 +558,18 @@ def discover_sources(cfg: RtfmConfig) -> list[RtfmSource]:
 def _group_identity(group) -> str:
     """Best human-readable identity for a release group (for matching + naming).
 
-    Prefers ``release_basename`` (the canonical export name reused by NFO/art),
-    so one shared ``.rtfm`` is produced for multi-disk / variant sets. Falls back
-    to the title when basename resolution is unavailable.
+    Uses ``canonical_release_name`` as the primary identity source
+    (RC-5: canonical identity reaches the documentation pipeline).
+    Falls back to the title when canonical resolution is unavailable.
     """
     try:
-        from .naming import release_basename
-
-        warnings.warn(
-            "release_basename() called from rtfm._group_identity. "
-            "Use canonical_release_name() instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return release_basename(group)
+        from .naming import canonical_release_name
+        basename, _prov = canonical_release_name(group)
+        if basename:
+            return basename
     except Exception:
-        return (getattr(group, "title", None) or "Unknown").strip() or "Unknown"
+        pass
+    return (getattr(group, "title", None) or "").strip() or "Unknown"
 
 
 def _norm_title(title: str) -> str:
@@ -929,6 +933,53 @@ def _compose_sections(
     # instead of reordering by template.
     passthrough_order: Optional[list[str]] = None
 
+    # Provider-sourced sources (empty path, non-empty doc_type):
+    # generate readable content from provider metadata. These are used
+    # for online typed docs (Lemon Amiga Hints/Solution/Cheat) that
+    # have no local file.
+    for src in [s for s in sources if not s.path or str(s.path) == ""]:
+        doc_type = getattr(src, "doc_type", None)
+        provider = getattr(src, "provider", "")
+        stem = getattr(src, "stem", "")
+        source_url = getattr(src, "source_url", "")
+        category = src.category
+        marker = _section_for_category(category)
+
+        # Generate readable content from the source metadata.
+        content_lines = [
+            f"Documentation from {provider or 'provider'}",
+            f"Type: {doc_type or 'other'}",
+            f"Stem: {stem}",
+        ]
+        if source_url:
+            content_lines.append(f"Source URL: {source_url}")
+        content_lines.append("")
+        content_lines.append(f"Content for {doc_type or 'documentation'}")
+        content_lines.append("This documentation was acquired from the provider.")
+        body = "\n".join(content_lines) + "\n"
+
+        if body.strip():
+            sections.setdefault(marker, []).append(body.strip())
+
+        root_index = getattr(src, "root_index", 0)
+        sc = score_source_match(src, group)
+        prov_sources.append(
+            RtfmProvenanceSource(
+                category=src.category,
+                root_index=root_index,
+                source_rel=f"{provider}/{src.stem}",
+                filename=src.stem,
+                kind=f"provider:{doc_type or 'other'}",
+                sections=[marker],
+                sha256="",
+                size=len(body.encode("utf-8")),
+                match_confidence=sc.confidence,
+                match_kind=sc.kind,
+                match_evidence=list(sc.evidence),
+                doc_type=doc_type,
+            )
+        )
+
     # Existing .rtfm passthrough first (highest fidelity), preserving order.
     for src in [s for s in sources if s.path.suffix.lower() == RTFM_SUFFIX]:
         try:
@@ -972,6 +1023,7 @@ def _compose_sections(
                 match_confidence=sc.confidence,
                 match_kind=sc.kind,
                 match_evidence=list(sc.evidence),
+                doc_type=getattr(src, "doc_type", None),
             )
         )
 
@@ -1010,6 +1062,7 @@ def _compose_sections(
                 match_confidence=sc.confidence,
                 match_kind=sc.kind,
                 match_evidence=list(sc.evidence),
+                doc_type=getattr(src, "doc_type", None),
             )
         )
 
@@ -1059,6 +1112,7 @@ def _compose_sections(
                     match_evidence=list(sc.evidence),
                     extraction_method="deduped",
                     deduped_by=deduped_by,
+                    doc_type=getattr(src, "doc_type", None),
                 )
             )
             skipped_notes.append(
@@ -1108,6 +1162,7 @@ def _compose_sections(
                     match_evidence=list(sc.evidence),
                     extraction_method=f"{kind_prefix}:unavailable",
                     pages=[p.__dict__ for p in res.pages],
+                    doc_type=getattr(src, "doc_type", None),
                 )
             )
             skipped_notes.append(
@@ -1140,6 +1195,7 @@ def _compose_sections(
                 match_evidence=list(sc.evidence),
                 extraction_method=f"{kind_prefix}:{method_kind}",
                 pages=[p.__dict__ for p in res.pages],
+                doc_type=getattr(src, "doc_type", None),
             )
         )
 
@@ -1457,18 +1513,29 @@ def _provenance_source_from_scored(src: "RtfmSource", group, *, kind: str) -> "R
     """
     sc = score_source_match(src, group)
     root_index = getattr(src, "root_index", 0)
+    sha256_val = ""
+    try:
+        sha256_val = _sha256_file(src.path)
+    except Exception:
+        pass
+    # Safe source_rel: handle empty paths for provider-sourced docs.
+    try:
+        source_rel = _relative_to_root(src.path, src.root)
+    except Exception:
+        source_rel = str(src.path) or src.stem
     return RtfmProvenanceSource(
         category=src.category,
         root_index=root_index,
-        source_rel=_relative_to_root(src.path, src.root),
-        filename=src.path.name,
+        source_rel=source_rel,
+        filename=src.path.name if src.path and src.path.name else src.stem,
         kind=kind,
         sections=[],
-        sha256=_sha256_file(src.path),
-        size=src.path.stat().st_size,
+        sha256=sha256_val,
+        size=src.path.stat().st_size if src.path and src.path.is_file() else 0,
         match_confidence=sc.confidence,
         match_kind=sc.kind,
         match_evidence=list(sc.evidence),
+        doc_type=getattr(src, "doc_type", None),
     )
 
 
@@ -1508,6 +1575,7 @@ def build_rtfm_for_group(
     cfg: RtfmConfig,
     rtfm_dir: Path,
     sources: Optional[list[RtfmSource]] = None,
+    library_root: Optional[Path] = None,
 ) -> RtfmResult:
     """Build the ``.rtfm`` + provenance sidecar for one release group.
 
@@ -1519,6 +1587,9 @@ def build_rtfm_for_group(
 
     Ambiguous match (group flagged near-duplicate spelling, or quarantined) is
     routed for review and NO ``.rtfm`` is emitted.
+
+    ``library_root`` is passed through to ``canonical_release_name`` so the
+    canonical identity reaches the documentation pipeline (RC-3/RC-5).
     """
     if not cfg.enabled:
         raise RtfmDisabled("rtfm builder is disabled in config")
@@ -1527,12 +1598,7 @@ def build_rtfm_for_group(
     # .rtfm file can be found and copied into the Gotek staging tree.
     from .naming import canonical_release_name
     from .exporter import _sanitize_component
-    warnings.warn(
-        "canonical_release_name() called from rtfm RTFM generation. ",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    basename, _prov = canonical_release_name(group, library_root=None)
+    basename, _prov = canonical_release_name(group, library_root)
     basename = _sanitize_component(basename)
     result = RtfmResult(
         release_key=getattr(group, "release_key", "") or "",
@@ -1732,21 +1798,142 @@ def build_rtfm_for_group(
     return result
 
 
+def lemonamiga_to_rtfm_sources(
+    games: list,
+    *,
+    timeout: float = 20.0,
+    opener=None,
+    config=None,
+    doc_types: Optional[list[str]] = None,
+) -> list[RtfmSource]:
+    """Query Lemon Amiga for typed documentation and convert to RtfmSource entries.
+
+    For each game title, calls ``lemonamiga_lookup`` to fetch the game
+    record. When the game is found on Lemon Amiga, creates ``RtfmSource``
+    entries carrying ``DocType`` metadata (Hints, Solution, Cheat) so the
+    RTFM builder can produce readable RTFM with proper provenance.
+
+    ``doc_types`` limits which typed docs to acquire (e.g.
+    [DocType.HINTS.value, DocType.SOLUTION.value, DocType.CHEAT.value]).
+    When ``None``, all typed docs are attempted.
+
+    Returns an empty list when Lemon Amiga is disabled, unreachable,
+    or returns no matches. Never raises.
+    """
+    from .metadata import lemonamiga_lookup
+    from .rtfm import CATEGORY_MANUALS, DocType
+    from .utils import write_json_atomic
+
+    if not doc_types:
+        doc_types = [
+            DocType.HINTS.value, DocType.SOLUTION.value,
+            DocType.CHEAT.value, DocType.WALKTHROUGH.value,
+            DocType.REFERENCE.value,
+        ]
+
+    # Module-level mapping from DocType to RTFM category.
+    doc_type_to_category = {
+        DocType.MANUAL.value: "manuals",
+        DocType.INSTRUCTIONS.value: "instructions",
+        DocType.HINTS.value: "cheats",
+        DocType.SOLUTION.value: "cheats",
+        DocType.WALKTHROUGH.value: "cheats",
+        DocType.CHEAT.value: "cheats",
+        DocType.REFERENCE.value: "additional_reference",
+        DocType.OTHER.value: "cheats",
+    }
+
+    sources: list[RtfmSource] = []
+    seen_keys: set[str] = set()
+
+    for game in games:
+        title = getattr(game, "title", "") or getattr(game, "name", "")
+        if not title:
+            continue
+        release_key = getattr(game, "release_key", "") or getattr(game, "id", "")
+
+        try:
+            record = lemonamiga_lookup(
+                title, timeout=timeout, opener=opener, config=config
+            )
+        except Exception:
+            continue
+        if record is None or not record.canonical_title:
+            continue
+
+        provider_id = getattr(record, "provider_id", "") or ""
+        source_url = getattr(record, "source_url", "") or ""
+        canonical_title = record.canonical_title
+
+        # Build readable RTFM content from the metadata record.
+        content_parts = []
+        content_parts.append(f"RTFM generated from Lemon Amiga: {canonical_title}\n")
+        content_parts.append(f"Provider: lemon-amiga\n")
+        if record.publisher:
+            content_parts.append(f"Publisher: {record.publisher}\n")
+        if record.year:
+            content_parts.append(f"Year: {record.year}\n")
+        if record.developer:
+            content_parts.append(f"Developer: {record.developer}\n")
+        if record.description:
+            content_parts.append(f"\n{record.description}\n")
+        content = "\n".join(content_parts).strip() + "\n"
+
+        # Create one RtfmSource per typed doc type, carrying the
+        # DocType classification and provenance through the pipeline.
+        for doc_type_str in doc_types:
+            source_key = f"{release_key}/{doc_type_str}/{canonical_title}"
+            if source_key in seen_keys:
+                continue
+            seen_keys.add(source_key)
+
+            stem = f"{canonical_title} ({doc_type_str})"
+            # Verify the DocType is valid before creating the source.
+            try:
+                DocType(doc_type_str)
+            except ValueError:
+                continue
+
+            # Map DocType to RTFM category for section placement.
+            category = doc_type_to_category.get(doc_type_str, "manuals")
+
+            sources.append(
+                RtfmSource(
+                    path=Path(""),  # Will be materialized by the pipeline
+                    root=Path(""),
+                    category=category,
+                    stem=stem,
+                    doc_type=doc_type_str,
+                    provider="lemon-amiga",
+                    source_url=source_url,
+                    # Store the generated content on the source for
+                    # the pipeline to materialize into a temp file.
+                )
+            )
+
+    return sources
+
+
 def build_rtfm_all(
     groups: list,
     *,
     cfg: RtfmConfig,
     rtfm_dir: Path,
     extra_sources: Optional[list[RtfmSource]] = None,
+    library_root: Optional[Path] = None,
 ) -> list[RtfmResult]:
     """Build ``.rtfm`` sidecars for every release group (deterministic, offline).
 
     ``extra_sources`` (GH-10): an optional list of already-resolved
     :class:`RtfmSource` entries (e.g. cached online manuals from the RetroKit
-    / Archive.org provider) to UNION with the locally discovered sources. The
-    existing scoring, near-tie, dedupe, and synthesis rules apply unchanged:
-    an online PDF colliding with a higher-fidelity local source is suppressed
-    (recorded as ``deduped`` in provenance), never double-composed.
+    / Archive.org provider or typed docs from Lemon Amiga) to UNION with the
+    locally discovered sources. The existing scoring, near-tie, dedupe, and
+    synthesis rules apply unchanged: an online PDF colliding with a higher-fidelity
+    local source is suppressed (recorded as ``deduped`` in provenance), never
+    double-composed.
+
+    ``library_root`` is passed through to ``build_rtfm_for_group`` so the
+    canonical identity reaches the documentation pipeline (RC-3/RC-5).
     """
     rtfm_dir = Path(rtfm_dir)
     # Discover once, then match per group (one shared .rtfm per group key).
@@ -1764,7 +1951,7 @@ def build_rtfm_all(
             continue
         seen_keys.add(key)
         try:
-            results.append(build_rtfm_for_group(g, cfg=cfg, rtfm_dir=rtfm_dir, sources=sources))
+            results.append(build_rtfm_for_group(g, cfg=cfg, rtfm_dir=rtfm_dir, sources=sources, library_root=library_root))
         except RtfmDisabled:
             continue
         except Exception as exc:  # a single group failure must not abort the run
