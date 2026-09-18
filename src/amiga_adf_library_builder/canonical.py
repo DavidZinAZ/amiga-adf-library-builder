@@ -90,6 +90,9 @@ class Provenance:
     source: str
     record_key: str = ""
     url: str = ""
+    # RC: canonical provider URL after positive identification,
+    # enabling reuse of provider game IDs across runs.
+    provider_url_canonical: str = ""
     authority: SourceAuthority = SourceAuthority.PARSER
     authority_rank: int = 0
     confidence: Optional[float] = None
@@ -100,6 +103,7 @@ class Provenance:
             "source": self.source,
             "record_key": self.record_key,
             "url": self.url,
+            "provider_url_canonical": self.provider_url_canonical,
             "authority": self.authority.tier,
             "authority_rank": self.authority_rank,
             "confidence": self.confidence,
@@ -119,6 +123,7 @@ class Provenance:
             source=d.get("source", ""),
             record_key=d.get("record_key", ""),
             url=d.get("url", ""),
+            provider_url_canonical=d.get("provider_url_canonical", ""),
             authority=authority,
             authority_rank=int(d.get("authority_rank", 0)),
             confidence=d.get("confidence"),

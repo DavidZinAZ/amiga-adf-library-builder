@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from typing import Optional
 
 # Trailing media ordinal suffix: ``-01``, ``-12``, etc.  Reuses the same
 # semantics as ``_LAUNCHBOX_ORDINAL_RE`` in local_media.py.
@@ -124,8 +125,52 @@ def _move_articles(title: str) -> str:
     return title
 
 
+def _roman_to_arabic(tok: str) -> Optional[int]:
+    """Convert a roman numeral token to its arabic value, or None."""
+    if not tok:
+        return None
+    up = tok.upper()
+    if not re.fullmatch(r"[IVXLCDM]+", up):
+        return None
+    vals = {"I": 1, "V": 5, "X": 10, "L": 50, "C": 100, "D": 500, "M": 1000}
+    total = 0
+    prev = 0
+    try:
+        for ch in reversed(up):
+            v = vals[ch]
+            total += -v if v < prev else v
+            prev = v
+    except KeyError:
+        return None
+    # Reject non-standard forms by confirming a clean re-encode round-trips.
+    if _arabic_to_roman(total) != up:
+        return None
+    return total
+
+
+def _arabic_to_roman(n: int) -> str:
+    """Encode an arabic integer (1..3999) to its standard roman numeral."""
+    if n <= 0 or n >= 4000:
+        return ""
+    table = (
+        (1000, "M"), (900, "CM"), (500, "D"), (400, "CD"),
+        (100, "C"), (90, "XC"), (50, "L"), (40, "XL"),
+        (10, "X"), (9, "IX"), (5, "V"), (4, "IV"), (1, "I"),
+    )
+    out = []
+    for value, sym in table:
+        while n >= value:
+            out.append(sym)
+            n -= value
+    return "".join(out)
+
+
 def _to_alnum_key(text: str) -> str:
-    """Normalize unicode, collapse separators, and produce an alnum-only key."""
+    """Normalize unicode, collapse separators, and produce an alnum-only key.
+
+    Roman numerals are converted to arabic digits so that
+    ``"Hacker II"`` and ``"Hacker 2"`` produce identical keys.
+    """
     # NFKD decomposition separates characters from diacritics.
     decomposed = unicodedata.normalize("NFKD", text)
     # Lowercase, replace non-alphanumeric chars with spaces, collapse.
@@ -133,8 +178,20 @@ def _to_alnum_key(text: str) -> str:
     # Replace separators with spaces, then collapse and strip.
     key = re.sub(r"[^a-z0-9]", " ", lowered)
     key = re.sub(r"\s+", " ", key).strip()
-    # Remove spaces for the final alnum-only key.
-    return key.replace(" ", "")
+    # Convert roman numeral tokens to arabic before removing spaces.
+    tokens = key.split(" ")
+    converted = []
+    for tok in tokens:
+        arabic = _roman_to_arabic(tok)
+        if arabic is not None:
+            converted.append(f"{arabic:04d}")
+        elif tok.isdigit():
+            # Pad arabic numerals too so "2" == "0002" == "II".
+            converted.append(f"{int(tok):04d}")
+        else:
+            converted.append(tok)
+    key = "".join(converted)
+    return key
 
 
 # Re-export the ordinal regex for use by consumers that need to match
