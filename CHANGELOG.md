@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.25 — 2026-09-17
+
+### Windows User Test Release (post-Canonical-Identity-RTFM)
+
+- Packaging-only release of PR #181 merged main for real operator Windows testing.
+- Version identity: 0.2.24 → 0.2.25 in pyproject.toml, AmigaADFGui.spec, tests/test_version_identity.py.
+- No substantive application changes beyond the canonical identity/RTFM already-merged work.
+
 ## 0.2.24 — 2026-09-17
 
 ### Windows User Test Release (post-RTFM-FIX)
