@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 from .canonical import (
@@ -34,6 +35,7 @@ from .canonical import (
     SourceAuthority,
 )
 from .metadata_source import MetadataSourceManager
+from .rtfm import DocType
 
 
 @dataclass(frozen=True)
@@ -152,9 +154,9 @@ def _report_for_field(canon: CanonicalLibrary, entity_type: str,
 def fields_for_entity(entity_type: str, release=None, disk=None) -> list:
     """Canonical field names probed for one entity (documented set)."""
     if entity_type == "game":
-        return ["title"]
+        return ["title", "rtfm_document"]
     if entity_type == "release":
-        return ["title", "edition", "region", "language", "publisher"]
+        return ["title", "edition", "region", "language", "publisher", "rtfm_document"]
     if entity_type == "disk":
         return ["filename", "disk_number", "sha256", "size"]
     return []
@@ -383,3 +385,115 @@ def provider_refresh_preserves_override(canon: CanonicalLibrary, entity_type: st
         and win_prov is not None
         and win_prov.authority == SourceAuthority.CURATION
     )
+
+
+# --- Typed document association (GH-183) -----------------------------------
+
+
+@dataclass(frozen=True)
+class ManualDocument:
+    """A concrete typed document candidate with full identity/provenance.
+
+    Represents a Manual / Instructions / Hints / Solution / Walkthrough /
+    Cheat / Reference resource discovered through the production Manual
+    Lookup path. Carries concrete document identity (provider + URL/type)
+    and real acquired document content or materialized document path.
+    """
+
+    doc_type: str          # DocType value (e.g. DocType.HINTS.value)
+    provider: str          # e.g. "lemon-amiga"
+    url: str               # Source URL for provenance audit
+    title: str             # Document title
+    content: str           # Acquired document body content
+    source_path: Optional[Path] = None  # Materialized path, if any
+
+
+def apply_manual_document(
+    canon: CanonicalLibrary, entity_type: str, entity_id: str,
+    document: ManualDocument,
+    *, observed_at: str = "",
+) -> Provenance:
+    """Persist a typed document association as a ``curation``-authority claim.
+
+    Stores the document body as the claim value and encodes full provenance
+    (provider, URL, document type) in the Provenance. This is the production
+    callable for the Manual Lookup GUI action that selects/applies a document.
+
+    The claim is stored on the ``rtfm_document`` field so it can be queried
+    separately from title overrides and consumed by the RTFM export path.
+    """
+    from .utils import now_iso as _now_iso
+
+    prov = Provenance(
+        source=document.provider,
+        record_key=document.doc_type,
+        url=document.url,
+        authority=SourceAuthority.CURATION,
+        observed_at=observed_at or _now_iso(),
+    )
+    # Store document content as the claim value; provenance carries identity
+    canon.claim_field(
+        entity_type, entity_id, "rtfm_document", document.content, prov,
+    )
+    return prov
+
+
+def get_document_associations(
+    canon: CanonicalLibrary, entity_type: str, entity_id: str,
+) -> list[tuple[Provenance, str]]:
+    """Retrieve persisted document associations for an entity.
+
+    Returns list of (provenance, content) tuples for all ``rtfm_document``
+    claims, ordered by authority/provenance sort key.
+    """
+    claims = canon.claims_for(entity_type, entity_id, "rtfm_document")
+    return claims
+
+
+def document_to_rtfm_sources(
+    entity_type: str, entity_id: str, canon: CanonicalLibrary,
+    game_title: str = "",
+) -> list:
+    """Convert persisted document associations to RtfmSource entries.
+
+    Reads the canonical/curation store for ``rtfm_document`` claims and
+    produces RtfmSource objects suitable for passing as ``extra_sources``
+    to ``build_rtfm_for_group``.
+    """
+    from .rtfm import RtfmSource, DocType
+
+    claims = get_document_associations(canon, entity_type, entity_id)
+    sources = []
+    for prov, content in claims:
+        doc_type = prov.record_key or DocType.OTHER.value
+        provider = prov.source or "unknown"
+        url = prov.url or ""
+        title = game_title or entity_id
+
+        # Resolve the DocType to an RTFM category
+        from .rtfm import DOC_TYPE_SECTION_MAP, CATEGORY_PRIMARY_MARKER
+        doc_type_category = DOC_TYPE_SECTION_MAP.get(doc_type)
+        rtfm_category = "cheats"  # default
+        if doc_type_category:
+            # Reverse-map: category marker → category name
+            marker_to_cat = {v: k for k, v in {
+                "manuals": "manuals", "instructions": "instructions",
+                "cheats": "cheats", "additional_reference": "additional_reference"
+            }.items()}
+            rtfm_category = marker_to_cat.get(doc_type_category, "cheats")
+
+        # Use the title as stem so score_source_match finds a match
+        stem = title
+        sources.append(
+            RtfmSource(
+                path=Path(""),  # No local file - content is inline
+                root=Path(""),
+                category=rtfm_category,
+                stem=stem,
+                doc_type=doc_type,
+                provider=provider,
+                source_url=url,
+                content=content if content else "",
+            )
+        )
+    return sources

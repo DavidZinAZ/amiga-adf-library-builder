@@ -942,7 +942,7 @@ def _compose_sections(
     # Online typed-doc sources (empty path, non-empty content):
     # use the actual acquired document body. These are created by
     # lemonamiga_to_rtfm_sources() after fetching real pages.
-    for src in [s for s in sources if not s.path and getattr(src, "content", "")]:
+    for src in [s for s in sources if (not s.path or str(s.path) in ("", ".")) and getattr(s, "content", "")]:
         content_text = getattr(src, "content", "")
         if not content_text.strip():
             continue
@@ -1711,8 +1711,15 @@ def build_rtfm_for_group(
         return result
 
     # Size safety: reject oversized sources before reading (DoS guard).
+    # Online typed-doc sources (empty path, non-empty content) are
+    # already bounded by the fetch; skip the file stat check.
     safe_matched: list[RtfmSource] = []
     for s in matched:
+        # Online sources have no local file; they were bounded by the
+        # producer (lemonamiga_fetch_doc / document content limit).
+        if not s.path or str(s.path) in ("", "."):
+            safe_matched.append(s)
+            continue
         try:
             st = s.path.stat()
         except OSError:
