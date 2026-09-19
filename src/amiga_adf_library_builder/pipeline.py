@@ -595,35 +595,59 @@ def run_pipeline(
                 _act(f"RTFM phase: built {len(rtfm_results)} sidecar(s)")
                 manual_trace["category"] = "built"
                 manual_trace["files_indexed"] = len(rtfm_results)
+                # Build a release_key -> title map for diagnostics
+                _group_title_map: dict[str, str] = {
+                    g.release_key: getattr(g, "title", "") for g in groups
+                }
                 manual_trace["candidates"] = [
-                    {"release_key": r.release_key, "basename": r.basename, "written": r.written}
-                    for r in rtfm_results
-                ]
-                # GH-176 per-release diagnostics
-                manual_trace["per_release"] = [
                     {
                         "release_key": r.release_key,
+                        "title": _group_title_map.get(r.release_key, ""),
                         "basename": r.basename,
                         "written": r.written,
                         "routed_for_review": r.routed_for_review,
                         "review_reason": r.review_reason,
-                        "output_path": str(r.rtfm_path) if r.rtfm_path else None,
                         "sources_count": len(r.sources),
-                        # RC-5: typed doc type from first source (if any),
-                        # else the highest-priority source category.
-                        "doc_type": (
-                            r.sources[0].doc_type
-                            if r.sources and r.sources[0].doc_type
-                            else (r.sources[0].category if r.sources else "")
-                        ),
-                        # RC: whether the provider game ID was preserved
-                        # across identification (non-empty provider_url_canonical).
-                        "provider_id_preserved": any(
-                            s.match_kind and s.match_kind != "none"
-                            for s in (r.sources or [])
-                        ),
+                        "source_details": [
+                            {
+                                "category": s.category,
+                                "source_rel": s.source_rel,
+                                "doc_type": s.doc_type,
+                                "filename": s.filename,
+                                "match_kind": s.match_kind,
+                            }
+                            for s in r.sources
+                        ],
                     }
                     for r in rtfm_results
+                ]
+                # GH-183 per-release diagnostics: include ALL releases
+                # so operators see every release's RTFM outcome, not
+                # just those with produced sidecars.
+                _rtfm_results_map: dict[str, dict] = {}
+                for _r in rtfm_results:
+                    _rk = getattr(_r, "release_key", "")
+                    if _rk:
+                        _rtfm_results_map.setdefault(_rk, {})[_r.basename] = _r.to_dict()
+                manual_trace["per_release"] = [
+                    {
+                        "release_key": g.release_key,
+                        "title": g.title,
+                        "basename": rtd.get("basename", ""),
+                        "written": rtd.get("written", False) if rtd else False,
+                        "routed_for_review": rtd.get("routed_for_review", True) if rtd else True,
+                        "review_reason": rtd.get("review_reason", "no RTFM source discovered") if rtd else "no RTFM source discovered",
+                        "output_path": rtd.get("output_path") if rtd else None,
+                        "sources_count": rtd.get("sources_count", 0) if rtd else 0,
+                        "doc_type": rtd.get("doc_type", "") if rtd else "",
+                        "provider_id_preserved": rtd.get("provider_id_preserved", False) if rtd else False,
+                        "no_rtfm_reason": (
+                            rtd.get("review_reason", "") if rtd and rtd.get("routed_for_review")
+                            else ""
+                        ),
+                    }
+                    for g in groups
+                    for rtd in [_rtfm_results_map.get(g.release_key, {})]
                 ]
                 for _r in rtfm_results:
                     if _r.written and _r.rtfm_path:
@@ -640,8 +664,31 @@ def run_pipeline(
                     "present to auto-enable; operator explicitly disabled"
                 )
                 manual_trace["per_release"] = [
-                    {"release_key": g.release_key, "status": "skipped",
-                     "reason": "RTFM disabled in config"}
+                    {
+                        "release_key": g.release_key,
+                        "title": g.title,
+                        "basename": "",
+                        "written": False,
+                        "routed_for_review": True,
+                        "review_reason": "RTFM config disabled",
+                        "output_path": None,
+                        "sources_count": 0,
+                        "doc_type": "",
+                        "provider_id_preserved": False,
+                        "no_rtfm_reason": "RTFM config disabled in provider config",
+                    }
+                    for g in groups
+                ]
+                manual_trace["candidates"] = [
+                    {
+                        "release_key": g.release_key,
+                        "title": g.title,
+                        "basename": "",
+                        "written": False,
+                        "routed_for_review": True,
+                        "review_reason": "RTFM config disabled",
+                        "sources_count": 0,
+                    }
                     for g in groups
                 ]
         except Exception as exc:

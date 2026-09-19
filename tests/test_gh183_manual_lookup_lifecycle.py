@@ -690,8 +690,20 @@ class TestExportNamingDisplayedTitle:
         """_sanitize_token must preserve readable case in the title."""
         from amiga_adf_library_builder.canonical_naming import _sanitize_token
 
-        assert _sanitize_token("Hacker II: The Doomsday Papers") == "Hacker II_ The Doomsday Papers"
-        assert _sanitize_token("Hacker II: The Doomsday Papers").istitle() or "Hacker" in _sanitize_token("Hacker II: The Doomsday Papers")
+        # Colons are preserved (only FAT32-illegal chars are replaced)
+        result = _sanitize_token("Hacker II: The Doomsday Papers")
+        assert ":" in result, f"Colon must be preserved in '{result}'"
+        assert "Hacker" in result, f"Title must be readable in '{result}'"
+        # Other characters like spaces are preserved
+        assert " " in result
+
+    def test_sanitize_token_replaces_fat32_illegal_chars(self):
+        """FAT32-illegal characters (*?\"<>|) must still be replaced."""
+        from amiga_adf_library_builder.canonical_naming import _sanitize_token
+
+        result = _sanitize_token("Game*Name?Test")
+        assert "*" not in result and "?" not in result, \
+            f"FAT32-illegal chars must be replaced in '{result}'"
 
 
 class TestNoPhantomPreviewRTFM:

@@ -157,13 +157,17 @@ def _claim_values(
 def _sanitize_token(value: str) -> str:
     """Sanitize a single naming token for FAT32 safety.
 
-    Preserves canonical metadata characters: alphanumerics, spaces, and
-    .-[]() are kept; everything else becomes _. Leading/trailing dots and
-    spaces are stripped. Empty result becomes 'Unknown'.
+    Only characters invalid/unsafe for Windows paths are replaced:
+    * ? " < > | (same set as _INVALID_FILENAME_CHARS in exporter.py).
+    Preserves all other characters including colons, slashes, etc.
+    so displayed titles like "Hacker II: The Doomsday Papers" remain
+    human-readable in export folder names.
     """
     if not value:
         return "Unknown"
-    out = "".join(ch if ch.isalnum() or ch in " .-[]()" else "_" for ch in value)
+    # Only replace FAT32-illegal characters; preserve everything else
+    # including colons and other punctuation for readability.
+    out = "".join(ch if ch not in _FAT32_ILLEGAL else "_" for ch in value)
     out = out.strip().strip(".")
     return out if out else "Unknown"
 
