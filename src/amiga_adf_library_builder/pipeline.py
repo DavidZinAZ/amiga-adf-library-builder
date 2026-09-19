@@ -902,11 +902,12 @@ def run_pipeline(
 
     # (GH-167 RC-C) Map rtfm_results to per_group entries
     # so staging can populate entry.rtfm_files.
+    # Convert RtfmResult objects to JSON-serializable dicts.
     _rtfm_by_key: dict[str, list] = {}
     for _r in rtfm_results:
         _rk = getattr(_r, "release_key", "")
         if _rk:
-            _rtfm_by_key.setdefault(_rk, []).append(_r)
+            _rtfm_by_key.setdefault(_rk, []).append(_r.to_dict())
     for _pg in per_group:
         _pg["rtfm_results"] = _rtfm_by_key.get(_pg["release_key"], [])
 
@@ -1177,8 +1178,8 @@ def build_staged_library_from_result(
         # instead of "(none)". Also categorizes failures via
         # RtfmResult.routed_for_review/review_reason.
         for _r in pg.get("rtfm_results", []):
-            if getattr(_r, "written", False) and getattr(_r, "rtfm_path", None):
-                rtfm_path = str(_r.rtfm_path)
+            if _r.get("written", False) and _r.get("rtfm_path"):
+                rtfm_path = str(_r["rtfm_path"])
                 if rtfm_path and rtfm_path not in entry.rtfm_files:
                     entry.rtfm_files.append(rtfm_path)
 

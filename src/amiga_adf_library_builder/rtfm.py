@@ -337,6 +337,19 @@ class RtfmSource:
     # Populated when a document was successfully fetched from the provider.
     content: str = ""
 
+    def to_dict(self) -> dict:
+        """Return a JSON-serializable dict representation."""
+        return {
+            "path": str(self.path) if self.path else "",
+            "root": str(self.root) if self.root else "",
+            "category": self.category,
+            "stem": self.stem,
+            "doc_type": self.doc_type,
+            "provider": self.provider,
+            "source_url": self.source_url,
+            "content": self.content,
+        }
+
 
 @dataclass
 class RtfmProvenanceSource:
@@ -372,6 +385,28 @@ class RtfmProvenanceSource:
     # Populated when a document was successfully fetched from the provider.
     content: str = ""
 
+    def to_dict(self) -> dict:
+        """Return a JSON-serializable dict representation."""
+        return {
+            "category": self.category,
+            "root_index": self.root_index,
+            "source_rel": self.source_rel,
+            "filename": self.filename,
+            "kind": self.kind,
+            "sections": self.sections,
+            "sha256": self.sha256,
+            "size": self.size,
+            "marker_order": self.marker_order,
+            "match_confidence": self.match_confidence,
+            "match_kind": self.match_kind,
+            "match_evidence": self.match_evidence,
+            "extraction_method": self.extraction_method,
+            "pages": self.pages,
+            "deduped_by": self.deduped_by,
+            "doc_type": self.doc_type,
+            "content": self.content,
+        }
+
 
 @dataclass
 class RtfmResult:
@@ -389,6 +424,27 @@ class RtfmResult:
     template_used: str = DEFAULT_TEMPLATE
     sources: list[RtfmProvenanceSource] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        """Return a JSON-serializable dict representation.
+
+        Converts Path objects to strings so this can be safely
+        passed through json.dumps in the CLI pipeline result.
+        """
+        return {
+            "release_key": self.release_key,
+            "basename": self.basename,
+            "written": self.written,
+            "routed_for_review": self.routed_for_review,
+            "review_reason": self.review_reason,
+            "bytes": self.bytes,
+            "rtfm_path": str(self.rtfm_path) if self.rtfm_path else None,
+            "provenance_path": str(self.provenance_path) if self.provenance_path else None,
+            "sections_present": self.sections_present,
+            "template_used": self.template_used,
+            "sources": [s.to_dict() for s in self.sources],
+            "notes": self.notes,
+        }
 
 
 # --- Text normalization -------------------------------------------------------

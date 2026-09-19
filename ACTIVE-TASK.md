@@ -1,38 +1,28 @@
-# ACTIVE-TASK.md — t_e40f31ab: GH-183 Real Document Association → Physical RTFM Oracle
+# ACTIVE-TASK.md — t_059c8cfe: GH-183 Fix real-QA document lookup persistence naming + RTFM truth
 
 ## Mode: IMPLEMENT
 
 ### BASE
-- SHA: 62e4b683255d5328463ab91fed1b3118e9686a1e (origin/main)
-- Worktree base: 7aedfc1c42db0bafefc813e6a34f05768a261336 (parent task t_f1143b2b)
+- SHA: 7a18608bf7dc610850b3d8749c97fa26ad84db47 (GH-183: Real document association → physical RTFM oracle)
+- Base tree: 99079be61d96f73260614cd29decf509a63bc2a7
+- Worktree: /home/dumbo/.hermes/kanban/boards/amiga-adf-library-builder/workspaces/t_059c8cfe
 
 ### CANDIDATE
 - SHA: (will be recorded on commit)
 
+## Product Failures to Fix
+1. Hacker/Lemon typed docs: eligible Hints/Solution/Cheat must be acquired as real content, associated/persisted, and become physical RTFM with provenance when no higher-authority manual exists
+2. Hot Rod: physical RTFM when usable source exists, otherwise exact actionable candidate/rejection/no-RTFM diagnostics
+3. Manual Lookup GUI operability: meaningful candidates/state and robust search/select/apply
+4. Persistence across restart: selected/overridden document association must persist across restart, reload in GUI, affect Preview/RTFM, and be reused downstream
+5. Export naming defect: displayed/NFO Title `Hacker` but physical folder `hacker US` — export directory must derive from authoritative DISPLAYED TITLE, preserving readable case except Windows sanitization/collision
+6. Preview/physical RTFM truth: never claim a path that does not exist
+
 ### Changes Made
-1. **`src/amiga_adf_library_builder/manual_lookup.py`**:
-   - Added `ManualDocument` dataclass with `doc_type`, `provider`, `url`, `title`, `content`
-   - Added `apply_manual_document()` — persists document via `canonical.claim_field(curation_override=True)` and `provenance` table
-   - Added `get_document_associations()` — retrieves persisted associations via `canonical.claims_for()`
-   - Added `document_to_rtfm_sources()` — reconstructs `RtfmSource` list from provenance records
-   - Fixed `fields_for_entity()` to include `rtfm_document` field
-   - Fixed return type annotation to `list[tuple[Provenance, str]]`
-   - Fixed `document_to_rtfm_sources` tuple unpacking order to `(prov, content)`
-
-2. **`src/amiga_adf_library_builder/rtfm.py`**:
-   - Fixed `_compose_sections` filter: `not s.path` → `(not s.path or str(s.path) in ("", "."))` to handle online sources (Path("") is truthy)
-   - Fixed size safety check: `str(s.path) == ""` → `str(s.path) in ("", ".")` to correctly skip file stat for online sources
-
-3. **`tests/test_gh183_manual_lookup_lifecycle.py`**:
-   - Replaced broken `_make_opener` patching with `_fake_text_get` function returning `(html, url)` tuples
-   - Fixed tuple unpacking in test assertions from `(content, prov)` to `(prov, content)` to match `get_document_associations` return type
-   - Fixed `claims_reopen[0][0]` → `claims_reopen[0][1]` for content access
-   - Updated `_make_release_group` to set `title` attribute and use `ReleaseGroup` properly
+(To be filled as implementation progresses)
 
 ### Test Results
-- All 3 tests in `test_gh183_manual_lookup_lifecycle.py`: **PASS**
-- All 33 tests in `test_gh183_corrective.py` + `test_gh183_manual_lookup_lifecycle.py`: **PASS**
-- All 120 tests across related test files: **PASS**
+(To be filled)
 
 ### Status
-COMPLETE — ready for commit
+IN PROGRESS

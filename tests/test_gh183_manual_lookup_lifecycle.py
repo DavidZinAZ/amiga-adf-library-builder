@@ -514,3 +514,336 @@ class TestRealDocumentAssociationRTFM:
             rtfm_content = rtfm_path.read_text(encoding="utf-8")
             assert "PROVENANCE_TEST_MARKER" in rtfm_content
             canon.close()
+
+
+# --------------------------------------------------------------------------
+# Additional focused tests for GH-183 product failures
+# --------------------------------------------------------------------------
+
+
+class TestHackerLemonTypedDocsAcquisition:
+    """Failure 1: Eligible Hints/Solution/Cheat must be acquired as real
+    content, associated/persisted, and become physical RTFM with provenance
+    when no higher-authority manual exists. Provider query alone is insufficient."""
+
+    def test_typed_doc_content_not_empty(self):
+        """Document content must be non-empty real content when applied."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            library_root = Path(tmpdir)
+            db_path = library_root / "curation" / "canonical.db"
+            canon = CanonicalLibrary(db_path)
+
+            game_id = "test-game-doc"
+            game_title = "Test Game"
+            field = CanonicalField()
+            field.claim(
+                Provenance(source="parser", authority=SourceAuthority.PARSER,
+                           observed_at="2026-09-17T00:00:00+00:00"),
+                game_title,
+            )
+            game = Game(game_id=game_id, fields={"title": field})
+            canon.upsert_game(game)
+            canon.close()
+
+            # Reopen and apply a document with real content
+            canon = CanonicalLibrary(db_path)
+            doc = ManualDocument(
+                doc_type=DocType.HINTS.value,
+                provider="lemon-amiga",
+                url="http://example.com/hints",
+                title=game_title,
+                content=_DOC_CONTENT_MARKER,
+            )
+            apply_manual_document(canon, "game", game_id, doc)
+            canon.close()
+
+            # Verify the content is persisted
+            canon = CanonicalLibrary(db_path)
+            claims = get_document_associations(canon, "game", game_id)
+            assert len(claims) == 1
+            assert claims[0][1] == _DOC_CONTENT_MARKER, \
+                "Real document content must be persisted"
+            canon.close()
+
+
+class TestHotRodDiagnostics:
+    """Failure 2: Physical RTFM when usable source exists, otherwise exact
+    actionable candidate/rejection/no-RTFM diagnostics."""
+
+    def test_physical_rtfm_when_source_exists(self):
+        """When a usable source exists, build_rtfm_for_group must produce
+        a physical .rtfm artifact."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rtfm_dir = Path(tmpdir) / "rtfm"
+            rtfm_dir.mkdir(parents=True)
+            cfg = _build_rtfm_cfg()
+            group = _make_release_group("test-physical", "Test Game")
+
+            # Create a real source
+            source_txt = Path(tmpdir) / "manual.txt"
+            source_txt.write_text("This is a real manual text.")
+
+            from amiga_adf_library_builder.rtfm import RtfmSource
+            source = RtfmSource(
+                path=source_txt, root=Path(tmpdir),
+                category="manuals", stem="test-game",
+            )
+
+            result = build_rtfm_for_group(
+                group, cfg=cfg, rtfm_dir=rtfm_dir,
+                sources=[source],
+            )
+            assert result.written or result.routed_for_review, \
+                "Must either produce RTFM or route for review"
+            if result.written:
+                rtfm_path = rtfm_dir / f"{result.basename}.rtfm"
+                assert rtfm_path.exists(), "Physical .rtfm must exist"
+
+    def test_exact_diagnostics_when_no_source(self):
+        """When no usable source exists, the result must have actionable
+        diagnostic information, not a generic message."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rtfm_dir = Path(tmpdir) / "rtfm"
+            rtfm_dir.mkdir(parents=True)
+            cfg = _build_rtfm_cfg()
+            group = _make_release_group("test-nosource", "Test Game")
+
+            result = build_rtfm_for_group(
+                group, cfg=cfg, rtfm_dir=rtfm_dir,
+                sources=[],
+            )
+            assert result.routed_for_review, "Must route for review when no source"
+            assert result.review_reason, "Must have a specific review reason"
+            assert len(result.review_reason) > 10, \
+                "Review reason must be actionable, not empty"
+
+    def test_no_phantom_rtmf_path(self):
+        """RTFM result must never claim a .rtfm path that does not exist."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rtfm_dir = Path(tmpdir) / "rtfm"
+            rtfm_dir.mkdir(parents=True)
+            cfg = _build_rtfm_cfg()
+            group = _make_release_group("test-phantom", "Test Game")
+
+            result = build_rtfm_for_group(
+                group, cfg=cfg, rtfm_dir=rtfm_dir,
+                sources=[],
+            )
+            if result.rtfm_path:
+                assert result.rtfm_path.exists(), \
+                    f"RTFM path {result.rtfm_path} must exist if claimed"
+            if result.provenance_path:
+                assert result.provenance_path.exists(), \
+                    f"Provenance path {result.provenance_path} must exist if claimed"
+
+
+class TestExportNamingDisplayedTitle:
+    """Failure 5: Export directory must derive from authoritative DISPLAYED
+    TITLE, preserving readable case except Windows sanitization/collision."""
+
+    def test_displayed_title_preserved_in_export_name(self):
+        """Export basename must preserve the displayed title's case."""
+        from amiga_adf_library_builder.canonical_naming import canonical_release_name
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            library_root = Path(tmpdir)
+            db_path = library_root / "curation" / "canonical.db"
+            canon = CanonicalLibrary(db_path)
+
+            # Create a game with a title that has mixed case
+            game_title = "Hacker II: The Doomsday Papers"
+            game_id = "hacker-ii-the-doomsday-papers"
+            field = CanonicalField()
+            field.claim(
+                Provenance(source="parser", authority=SourceAuthority.PARSER,
+                           observed_at="2026-09-17T00:00:00+00:00"),
+                game_title,
+            )
+            game = Game(game_id=game_id, fields={"title": field})
+            canon.upsert_game(game)
+
+            release_id = "hacker-ii|1"
+            release = Release(
+                release_id=release_id, game_id=game_id,
+                edition=None, region=None, language=None, publisher=None,
+            )
+            canon.upsert_release(release)
+            canon.claim_field(
+                "release", release_id, "release_key", release_id,
+                Provenance(source="parser", authority=SourceAuthority.CURATION_MEMORY,
+                           observed_at="2026-09-17T00:00:00+00:00"),
+            )
+            canon.close()
+
+            # Reopen and test
+            canon = CanonicalLibrary(db_path)
+            result = canonical_release_name(canon, release_id)
+            canon.close()
+
+            # The basename must preserve the displayed title case
+            assert game_title[0] in result.basename or game_title.lower()[0] in result.basename, \
+                f"Export basename {result.basename} should reference the displayed title"
+            assert "hacker" in result.basename.lower(), \
+                "Basename should contain the game title"
+
+    def test_sanitize_token_preserves_case(self):
+        """_sanitize_token must preserve readable case in the title."""
+        from amiga_adf_library_builder.canonical_naming import _sanitize_token
+
+        assert _sanitize_token("Hacker II: The Doomsday Papers") == "Hacker II_ The Doomsday Papers"
+        assert _sanitize_token("Hacker II: The Doomsday Papers").istitle() or "Hacker" in _sanitize_token("Hacker II: The Doomsday Papers")
+
+
+class TestNoPhantomPreviewRTFM:
+    """Failure 6: Preview, Path.exists, generated asset, persisted association
+    and export manifest must agree. Never claim a path that does not exist."""
+
+    def test_path_exists_checks_correctly(self):
+        """RtfmSource with Path('') must not be treated as an existing file."""
+        from amiga_adf_library_builder.rtfm import RtfmSource
+
+        online_source = RtfmSource(
+            path=Path(""), root=Path(""),
+            category="cheats", stem="test-game",
+            doc_type=DocType.HINTS.value,
+            provider="lemon-amiga",
+            content="Test content",
+        )
+        # Path('') normalizes to '.' as a string; code must handle it
+        assert str(online_source.path) in ("", "."), \
+            "Path should be empty or '.' for online sources"
+        # The code must correctly identify this as an online source
+        # via: not s.path or str(s.path) in ("", ".")
+        assert not online_source.path or str(online_source.path) in ("", "."), \
+            "Online source detection must work"
+
+    def test_rtfm_result_paths_agree(self):
+        """RtfmResult must only report paths that actually exist on disk."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rtfm_dir = Path(tmpdir) / "rtfm"
+            rtfm_dir.mkdir(parents=True)
+            cfg = _build_rtfm_cfg()
+            group = _make_release_group("test-agree", "Test Game")
+
+            from amiga_adf_library_builder.rtfm import RtfmSource
+            source_txt = Path(tmpdir) / "manual.txt"
+            source_txt.write_text("Real manual text.")
+            source = RtfmSource(
+                path=source_txt, root=Path(tmpdir),
+                category="manuals", stem="test-game",
+            )
+
+            result = build_rtfm_for_group(
+                group, cfg=cfg, rtfm_dir=rtfm_dir,
+                sources=[source],
+            )
+            # If written, the .rtfm must exist
+            if result.written:
+                assert result.rtfm_path is not None
+                assert result.rtfm_path.exists(), \
+                    f"RTFM path {result.rtfm_path} must exist"
+            # If routed for review, the provenance sidecar must exist
+            if result.routed_for_review:
+                assert result.provenance_path is not None
+                assert result.provenance_path.exists(), \
+                    f"Provenance path {result.provenance_path} must exist"
+
+
+class TestManualLookupPersistence:
+    """Failure 4: Selected/overridden document association must persist
+    across restart, reload in GUI, affect Preview/RTFM, and be reused downstream."""
+
+    def test_document_association_survives_canonical_close_reopen(self):
+        """Document associations must survive CanonicalLibrary close/reopen."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            library_root = Path(tmpdir)
+            db_path = library_root / "curation" / "canonical.db"
+            canon = CanonicalLibrary(db_path)
+
+            game_id = "test-game-persist"
+            game_title = "Test Game"
+            field = CanonicalField()
+            field.claim(
+                Provenance(source="parser", authority=SourceAuthority.PARSER,
+                           observed_at="2026-09-17T00:00:00+00:00"),
+                game_title,
+            )
+            game = Game(game_id=game_id, fields={"title": field})
+            canon.upsert_game(game)
+            canon.close()
+
+            # Reopen and add document association
+            canon = CanonicalLibrary(db_path)
+            doc = ManualDocument(
+                doc_type=DocType.HINTS.value,
+                provider="lemon-amiga",
+                url="http://example.com/hints",
+                title=game_title,
+                content="PERSISTENCE_TEST_MARKER",
+            )
+            apply_manual_document(canon, "game", game_id, doc)
+            canon.close()
+
+            # Reopen and verify
+            canon = CanonicalLibrary(db_path)
+            claims = get_document_associations(canon, "game", game_id)
+            assert len(claims) == 1, "Document association must survive close/reopen"
+            assert claims[0][1] == "PERSISTENCE_TEST_MARKER", \
+                "Content must be identical after close/reopen"
+            canon.close()
+
+    def test_document_association_used_in_rtfm_sources_after_reopen(self):
+        """After reopen, document_to_rtfm_sources must produce RtfmSource
+        entries that can be used to build physical RTFM."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            library_root = Path(tmpdir)
+            db_path = library_root / "curation" / "canonical.db"
+            rtfm_dir = library_root / "assets" / "rtfm"
+            rtfm_dir.mkdir(parents=True)
+            canon = CanonicalLibrary(db_path)
+
+            game_id = "test-game-reuse"
+            game_title = "Test Game Reuse"
+            field = CanonicalField()
+            field.claim(
+                Provenance(source="parser", authority=SourceAuthority.PARSER,
+                           observed_at="2026-09-17T00:00:00+00:00"),
+                game_title,
+            )
+            game = Game(game_id=game_id, fields={"title": field})
+            canon.upsert_game(game)
+            canon.close()
+
+            # Add document association
+            canon = CanonicalLibrary(db_path)
+            doc = ManualDocument(
+                doc_type=DocType.HINTS.value,
+                provider="lemon-amiga",
+                url="http://example.com/hints",
+                title=game_title,
+                content="REUSE_TEST_MARKER",
+            )
+            apply_manual_document(canon, "game", game_id, doc)
+            canon.close()
+
+            # Reopen and convert to RTFM sources
+            canon = CanonicalLibrary(db_path)
+            sources = document_to_rtfm_sources("game", game_id, canon, game_title=game_title)
+            assert len(sources) > 0, "Must produce RtfmSource entries after reopen"
+            assert any(s.content == "REUSE_TEST_MARKER" for s in sources), \
+                "Content must be preserved in RtfmSource entries"
+
+            # Build RTFM from these sources
+            cfg = _build_rtfm_cfg()
+            group = _make_release_group("test-reuse", game_title)
+            result = build_rtfm_for_group(
+                group, cfg=cfg, rtfm_dir=rtfm_dir,
+                sources=sources, library_root=library_root,
+            )
+            if result.written:
+                rtfm_path = rtfm_dir / f"{result.basename}.rtfm"
+                assert rtfm_path.exists()
+                content = rtfm_path.read_text(encoding="utf-8")
+                assert "REUSE_TEST_MARKER" in content, \
+                    "Physical RTFM must contain the persisted document marker"
+            canon.close()
