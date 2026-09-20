@@ -263,15 +263,14 @@ class TestPipelineCanonicalWiring:
             grouper_mod.group_records = original_group_records
         assert result is not None
         assert result.get("groups", 0) >= 0
-        # The canonical DB match should produce a name with the
-        # qualifier (Platinum Edition) rather than the fallback.
+        # The canonical DB match must preserve the displayed title alone.
         canonical_folders = [
             pg["canonical_proposed_name"]["basename"]
             for pg in result.get("per_group", [])
             if pg.get("canonical_proposed_name", {}).get("basename")
         ]
-        assert any("Platinum" in f for f in canonical_folders), (
-            f"expected canonical qualifier in folder; got {canonical_folders}"
+        assert "Test Game" in canonical_folders, (
+            f"expected canonical displayed title in folder; got {canonical_folders}"
         )
 
     def test_pipeline_fallback_when_no_canonical_db(self, tmp_path):
@@ -390,7 +389,7 @@ class TestExporterCanonicalWiring:
         staging = tmp_path / "staging" / "run1"
         basename, prov = _get_canonical_basename(grp, staging, library_root=tmp_path / "library")
         assert basename
-        assert "Platinum" in prov
+        assert "Test Game" in prov
         assert "fallback" not in prov
         # Explicit: canonical basename must differ from release_basename fallback
         # for this fixture, so the fallback branch can never satisfy this test.
@@ -416,7 +415,7 @@ class TestExporterCanonicalWiring:
         # No library_root => falls back without inspecting staging layout.
         basename, prov = _get_canonical_basename(grp, staging, library_root=None)
         assert basename
-        assert "fallback" in prov
+        assert "no canonical DB" in prov
 
 
 class TestExporterCanonicalIntegrationProductionLayout:
@@ -483,7 +482,7 @@ class TestExporterCanonicalIntegrationProductionLayout:
         # Compute canonical basename using the REAL library root.
         staging_root = library_root / "work" / "staging" / "run1"
         basename, prov = _get_canonical_basename(grp, staging_root, library_root=library_root)
-        assert "Platinum" in prov
+        assert "Test Game" in prov
         assert "fallback" not in prov
 
         # Export through the real path. export_release gets basename override.
@@ -507,7 +506,7 @@ class TestExporterCanonicalIntegrationProductionLayout:
         assert expected_file.read_bytes() == source_bytes, "exported bytes must match source"
 
         # Provenance assertions retained from the original test.
-        assert "Platinum" in prov
+        assert "Test Game" in prov
         assert "fallback" not in prov
 
 

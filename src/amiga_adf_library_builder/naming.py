@@ -95,7 +95,7 @@ def canonical_release_name(
 ) -> tuple[str, str]:
     """Return (canonical_basename, provenance) using canonical DB when available.
 
-    Falls back to :func:`release_basename` when the canonical DB is absent.
+    Uses the displayed group title when the canonical DB has no match.
     ``library_root`` is the explicit library root that hosts
     ``<library_root>/curation/canonical.db``. When ``None``, falls back
     without inferring a wrong path. Provenance is a human-readable string.
@@ -109,5 +109,35 @@ def canonical_release_name(
                 return _cn.basename, _cn.provenance_text
             finally:
                 _canon.close()
-    # Fallback to release_basename (preserves existing behavior).
-    return release_basename(group), "fallback: no canonical DB"
+    # A missing canonical DB must not reintroduce release qualifiers.
+    from .exporter import _sanitize_component
+    return _sanitize_component(group.title or "Unknown"), "displayed title: no canonical DB"
+
+
+def export_basenames(groups, library_root=None):
+    """Plan Windows-safe names independent of input order, without overwrites."""
+    import hashlib
+    from collections import defaultdict
+
+    names = {g.release_key: canonical_release_name(g, library_root)[0] for g in groups}
+    identities = defaultdict(set)
+    for key, name in names.items():
+        identities[name.casefold()].add(key)
+    # Reserve unambiguous titles first, including titles that resemble suffixes.
+    reserved = {name.casefold() for name in names.values()}
+    for key in sorted(names):
+        base = names[key]
+        if len(identities[base.casefold()]) < 2:
+            continue
+        digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+        length = 8
+        while True:
+            candidate = f"{base} [{digest[:length]}]"
+            if candidate.casefold() not in reserved:
+                break
+            length += 1
+            if length > len(digest):
+                raise ValueError("cannot resolve export name collision")
+        names[key] = candidate
+        reserved.add(candidate.casefold())
+    return names

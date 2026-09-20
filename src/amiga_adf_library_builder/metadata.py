@@ -1492,7 +1492,7 @@ def lemonamiga_discover_docs(
     game_url = f"https://www.lemonamiga.com/game/{slug}"
 
     try:
-        game_html, _ = _text_get(game_url, timeout=timeout, opener=opener)
+        game_html, final_url = _text_get(game_url, timeout=timeout, opener=opener)
     except Exception:
         return []
 
@@ -1504,7 +1504,8 @@ def lemonamiga_discover_docs(
     # Keep only entries with a recognized type.
     # Both /doc/ and /cheat/ links are now populated from
     # link text or explicit type mapping.
-    docs = [d for d in parser.doc_links if d.get("type") and d["type"] != "other"]
+    docs = [dict(d, url=urllib.parse.urljoin(final_url, d["url"]))
+            for d in parser.doc_links if d.get("type") and d["type"] != "other"]
     return docs
 
 

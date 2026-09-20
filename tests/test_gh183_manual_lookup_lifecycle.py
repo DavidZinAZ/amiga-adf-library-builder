@@ -690,9 +690,9 @@ class TestExportNamingDisplayedTitle:
         """_sanitize_token must preserve readable case in the title."""
         from amiga_adf_library_builder.canonical_naming import _sanitize_token
 
-        # Colons are preserved (only FAT32-illegal chars are replaced)
+        # Colons are invalid Windows path characters.
         result = _sanitize_token("Hacker II: The Doomsday Papers")
-        assert ":" in result, f"Colon must be preserved in '{result}'"
+        assert ":" not in result, f"Colon must be sanitized in '{result}'"
         assert "Hacker" in result, f"Title must be readable in '{result}'"
         # Other characters like spaces are preserved
         assert " " in result

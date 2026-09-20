@@ -200,12 +200,12 @@ class TestExportNamingDisplayedTitle:
         assert result == "Hot Rod", \
             f"Expected 'Hot Rod', got '{result}'"
 
-    def test_sanitize_token_preserves_colon(self):
-        """Colons in displayed titles must be preserved."""
+    def test_sanitize_token_replaces_colon(self):
+        """Windows-invalid colons must be replaced without changing title case."""
         from amiga_adf_library_builder.canonical_naming import _sanitize_token
         result = _sanitize_token("Hacker II: The Doomsday Papers")
-        assert ":" in result, \
-            f"Colon must be preserved in '{result}'"
+        assert ":" not in result, \
+            f"Colon must be sanitized in '{result}'"
 
     def test_sanitize_token_preserves_spaces(self):
         """Spaces in displayed titles must be preserved."""

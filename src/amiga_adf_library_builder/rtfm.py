@@ -384,6 +384,8 @@ class RtfmProvenanceSource:
     # Actual acquired document body content (for online typed docs).
     # Populated when a document was successfully fetched from the provider.
     content: str = ""
+    provider: str = ""
+    source_url: str = ""
 
     def to_dict(self) -> dict:
         """Return a JSON-serializable dict representation."""
@@ -405,6 +407,8 @@ class RtfmProvenanceSource:
             "deduped_by": self.deduped_by,
             "doc_type": self.doc_type,
             "content": self.content,
+            "provider": self.provider,
+            "source_url": self.source_url,
         }
 
 
@@ -1020,6 +1024,8 @@ def _compose_sections(
                 match_kind=sc.kind,
                 match_evidence=list(sc.evidence),
                 doc_type=getattr(src, "doc_type", None),
+                provider=src.provider or "",
+                source_url=src.source_url or "",
             )
         )
 
@@ -1067,6 +1073,8 @@ def _compose_sections(
                 match_kind=sc.kind,
                 match_evidence=list(sc.evidence),
                 doc_type=getattr(src, "doc_type", None),
+                provider=src.provider or "",
+                source_url=src.source_url or "",
             )
         )
 
@@ -1106,6 +1114,8 @@ def _compose_sections(
                 match_kind=sc.kind,
                 match_evidence=list(sc.evidence),
                 doc_type=getattr(src, "doc_type", None),
+                provider=src.provider or "",
+                source_url=src.source_url or "",
             )
         )
 
@@ -1156,6 +1166,8 @@ def _compose_sections(
                     extraction_method="deduped",
                     deduped_by=deduped_by,
                     doc_type=getattr(src, "doc_type", None),
+                    provider=src.provider or "",
+                    source_url=src.source_url or "",
                 )
             )
             skipped_notes.append(
@@ -1206,6 +1218,8 @@ def _compose_sections(
                     extraction_method=f"{kind_prefix}:unavailable",
                     pages=[p.__dict__ for p in res.pages],
                     doc_type=getattr(src, "doc_type", None),
+                    provider=src.provider or "",
+                    source_url=src.source_url or "",
                 )
             )
             skipped_notes.append(
@@ -1239,6 +1253,8 @@ def _compose_sections(
                 extraction_method=f"{kind_prefix}:{method_kind}",
                 pages=[p.__dict__ for p in res.pages],
                 doc_type=getattr(src, "doc_type", None),
+                provider=src.provider or "",
+                source_url=src.source_url or "",
             )
         )
 
@@ -1579,6 +1595,8 @@ def _provenance_source_from_scored(src: "RtfmSource", group, *, kind: str) -> "R
         match_kind=sc.kind,
         match_evidence=list(sc.evidence),
         doc_type=getattr(src, "doc_type", None),
+        provider=src.provider or "",
+        source_url=src.source_url or "",
     )
 
 
@@ -1619,6 +1637,7 @@ def build_rtfm_for_group(
     rtfm_dir: Path,
     sources: Optional[list[RtfmSource]] = None,
     library_root: Optional[Path] = None,
+    basename: Optional[str] = None,
 ) -> RtfmResult:
     """Build the ``.rtfm`` + provenance sidecar for one release group.
 
@@ -1641,7 +1660,8 @@ def build_rtfm_for_group(
     # .rtfm file can be found and copied into the Gotek staging tree.
     from .naming import canonical_release_name
     from .exporter import _sanitize_component
-    basename, _prov = canonical_release_name(group, library_root)
+    if basename is None:
+        basename, _prov = canonical_release_name(group, library_root)
     basename = _sanitize_component(basename)
     result = RtfmResult(
         release_key=getattr(group, "release_key", "") or "",
@@ -1668,7 +1688,21 @@ def build_rtfm_for_group(
         return result
 
     # Discover + SCORE sources (Issue #6: deterministic confidence scoring).
-    all_sources = sources if sources is not None else discover_sources(cfg)
+    all_sources = list(sources if sources is not None else discover_sources(cfg))
+    if library_root is not None:
+        from .canonical_naming import _load_canonical_library, identity_for_release_group
+        from .manual_lookup import document_to_rtfm_sources
+        canon = _load_canonical_library(library_root)
+        if canon is not None:
+            with canon:
+                identity = identity_for_release_group(canon, group)
+                if identity is not None:
+                    rid, gid = identity
+                    persisted = document_to_rtfm_sources("release", rid, canon, game_title=group.title)
+                    persisted += document_to_rtfm_sources("game", gid, canon, game_title=group.title)
+                    known = {(x.provider, x.source_url, x.doc_type, x.content) for x in all_sources}
+                    all_sources.extend(x for x in persisted
+                                       if (x.provider, x.source_url, x.doc_type, x.content) not in known)
     scored = [(s, score_source_match(s, group)) for s in all_sources]
     matched = [s for s, sc in scored if sc.matched]
     # Deterministic sort by (descending confidence, ascending canonical key) so
@@ -1855,6 +1889,7 @@ def lemonamiga_to_rtfm_sources(
     opener=None,
     config=None,
     doc_types: Optional[list[str]] = None,
+    library_root: Optional[Path] = None,
 ) -> list[RtfmSource]:
     """Query Lemon Amiga for typed documentation and convert to RtfmSource entries.
 
@@ -1874,6 +1909,8 @@ def lemonamiga_to_rtfm_sources(
     from .metadata import lemonamiga_discover_docs, lemonamiga_fetch_doc
     from .rtfm import DocType
 
+    if config is not None and not getattr(config, "enabled", True):
+        return []
     if not doc_types:
         doc_types = [
             DocType.HINTS.value, DocType.SOLUTION.value,
@@ -1951,7 +1988,27 @@ def lemonamiga_to_rtfm_sources(
             seen_keys.add(source_key)
 
             category = doc_type_to_category.get(doc_type_str, "cheats")
-            stem = f"{canonical_title} ({doc_type_str})"
+            stem = canonical_title
+            if library_root is not None:
+                from .canonical import CanonicalLibrary, Game, Release, Provenance, SourceAuthority, slugify_title
+                from .canonical_naming import identity_for_release_group
+                with CanonicalLibrary(Path(library_root) / "curation" / "canonical.db") as canon:
+                    identity = identity_for_release_group(canon, game)
+                    if identity is None:
+                        gid = slugify_title(canonical_title)
+                        canon.upsert_game(Game(game_id=gid))
+                        canon.claim_field("game", gid, "title", canonical_title,
+                                          Provenance(source="parser", authority=SourceAuthority.PARSER))
+                        canon.upsert_release(Release(release_id=release_key, game_id=gid))
+                        canon.claim_field("release", release_key, "release_key", release_key,
+                                          Provenance(source="parser", authority=SourceAuthority.PARSER))
+                    else:
+                        _, gid = identity
+                    canon.claim_field(
+                        "game", gid, "rtfm_document", body_content,
+                        Provenance(source="lemon-amiga", record_key=doc_type_str,
+                                   url=doc_url, authority=SourceAuthority.SEED),
+                    )
 
             sources.append(
                 RtfmSource(
@@ -1989,6 +2046,8 @@ def build_rtfm_all(
     ``library_root`` is passed through to ``build_rtfm_for_group`` so the
     canonical identity reaches the documentation pipeline (RC-3/RC-5).
     """
+    from .naming import export_basenames
+    names = export_basenames(groups, library_root)
     rtfm_dir = Path(rtfm_dir)
     # Discover once, then match per group (one shared .rtfm per group key).
     sources = discover_sources(cfg)
@@ -2005,7 +2064,7 @@ def build_rtfm_all(
             continue
         seen_keys.add(key)
         try:
-            results.append(build_rtfm_for_group(g, cfg=cfg, rtfm_dir=rtfm_dir, sources=sources, library_root=library_root))
+            results.append(build_rtfm_for_group(g, cfg=cfg, rtfm_dir=rtfm_dir, sources=sources, library_root=library_root, basename=names[g.release_key]))
         except RtfmDisabled:
             continue
         except Exception as exc:  # a single group failure must not abort the run

@@ -44,7 +44,7 @@ from .naming import release_basename
 from .nfo_render import render_gotek_nfo
 
 # FAT32-illegal characters that the firmware/gate cannot handle.
-_INVALID_FILENAME_CHARS = set('*?"<>|')
+_INVALID_FILENAME_CHARS = set('<>:"/\\|?*')
 
 
 def _get_canonical_basename(
@@ -77,6 +77,8 @@ class ExportResult:
     conflicts: list[str] = field(default_factory=list)
     skipped_quarantined: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    release_folders: dict[str, str] = field(default_factory=dict)
+    rtfm_exports: dict[str, str] = field(default_factory=dict)
     export_gate_open: bool = False
     export_gate_reason: str = ""
 
@@ -87,27 +89,19 @@ def _sanitize_component(name: str) -> str:
     Returns a non-empty safe component. Rejects path traversal / absolute
     components by collapsing them to a safe token.
     """
-    # Split on the OS path sep and on '/' (Gotek uses '/'); treat each piece.
-    pieces = name.replace("\\", "/").split("/")
-    cleaned_pieces = []
-    for piece in pieces:
-        if piece in ("", ".", ".."):
-            continue  # drop traversal / empty components
-        # Strip FAT32-illegal chars.
-        safe = "".join(ch if ch not in _INVALID_FILENAME_CHARS else "_" for ch in piece)
-        safe = safe.strip().strip(".").strip()
-        if safe:
-            cleaned_pieces.append(safe)
-    if not cleaned_pieces:
+    safe = "".join(
+        "_" if ch in _INVALID_FILENAME_CHARS or ord(ch) < 32 else ch
+        for ch in name
+    ).rstrip(" .")
+    if not safe:
         raise ValueError(f"release name resolves to nothing safe: {name!r}")
-    component = "_".join(cleaned_pieces)
-    # Fat32-safe overall guard.
-    component = "".join(
-        ch if ch not in _INVALID_FILENAME_CHARS else "_" for ch in component
-    )
-    if not component:
-        raise ValueError(f"release name resolves to nothing safe: {name!r}")
-    return component
+    # Windows reserves device names even when followed by an extension.
+    stem = safe.split(".", 1)[0].rstrip(" ").upper()
+    reserved = {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"}
+    reserved.update(f"{prefix}{n}" for prefix in ("COM", "LPT") for n in "123456789¹²³")
+    if stem in reserved:
+        safe = "_" + safe
+    return safe
 
 
 def _sanitize_run_id(run_id: str) -> str:
@@ -197,6 +191,8 @@ def export_release(
     release_key: Optional[str] = None,
     # Canonical naming: explicit library root (replaces staging_root.parent.parent).
     library_root: Optional[Path] = None,
+    source_basename: Optional[str] = None,
+    rtfm_paths: Optional[dict[str, Path]] = None,
 ) -> tuple[list[str], list[str], list[str]]:
     """Export one release group to the staging tree.
 
@@ -215,6 +211,7 @@ def export_release(
         # Use canonical naming when available; fall back only when canonical DB absent.
         basename, _prov = _get_canonical_basename(group, staging_root, library_root=library_root)
 
+    source_basename = source_basename or basename
     folder = root / basename
     written: list[str] = []
     unchanged: list[str] = []
@@ -255,9 +252,16 @@ def export_release(
             unchanged.append(str(dest))
 
     # NFO: prefer the enrichment artifact (rich metadata + provenance).
-    enriched_nfo = Path(nfo_dir) / f"{basename}.nfo" if nfo_dir is not None else None
+    enriched_nfo = Path(nfo_dir) / f"{source_basename}.nfo" if nfo_dir is not None else None
     if enriched_nfo is not None and enriched_nfo.is_file():
-        nfo_bytes = enriched_nfo.read_bytes()
+        nfo_text = enriched_nfo.read_text(encoding="utf-8")
+        # Retain the enrichment blurb but use the current authoritative title.
+        if nfo_text.startswith("Title:") and "Blurb:" in nfo_text:
+            nfo_bytes = render_gotek_nfo(
+                title=group.title, description=nfo_text.split("Blurb:", 1)[1].strip()
+            ).encode("utf-8")
+        else:
+            nfo_bytes = nfo_text.encode("utf-8")
     else:
         nfo_bytes = _build_nfo(group).encode("utf-8")
     nfo_dest = folder / f"{basename}.nfo"
@@ -289,8 +293,12 @@ def export_release(
                 rtfm_bytes = _p.read_bytes()
                 rtfm_src = _p
                 break
+    elif rtfm_paths is not None:
+        rtfm_src = rtfm_paths.get(group.release_key)
+        if rtfm_src is not None and rtfm_src.is_file():
+            rtfm_bytes = rtfm_src.read_bytes()
     else:
-        rtfm_src = Path(rtfm_dir) / f"{basename}.rtfm" if rtfm_dir is not None else None
+        rtfm_src = Path(rtfm_dir) / f"{source_basename}.rtfm" if rtfm_dir is not None else None
         if rtfm_src is not None and rtfm_src.is_file():
             rtfm_bytes = rtfm_src.read_bytes()
     if rtfm_bytes is not None:
@@ -318,7 +326,7 @@ def export_release(
     # a managed derivative.
     # (GH-136) If both processed and master are missing, fall back to
     # the staged library's manually-assigned artwork_front.
-    processed = Path(artwork_processed_dir) / f"{basename}.jpg" if artwork_processed_dir is not None else None
+    processed = Path(artwork_processed_dir) / f"{source_basename}.jpg" if artwork_processed_dir is not None else None
     artwork_data: Optional[bytes] = None
     try:
         if processed is not None and processed.is_file():
@@ -456,6 +464,7 @@ def export_all(
     staged_library: Optional[StagedLibrary] = None,
     # Canonical naming: explicit library root (replaces staging_root.parent.parent).
     library_root: Optional[Path] = None,
+    rtfm_paths: Optional[dict[str, Path]] = None,
 ) -> ExportResult:
     """Run the full Phase-5 export for a set of release groups.
 
@@ -488,6 +497,9 @@ def export_all(
         result.errors.append(f"export gate closed: {gate_reason}")
         return result
 
+    from .naming import export_basenames
+    export_names = export_basenames(groups, library_root)
+
     if require_artwork:
         missing = []
         for group in groups:
@@ -504,17 +516,8 @@ def export_all(
     (staging_root / "ADF").mkdir(parents=True, exist_ok=True)
     (staging_root / "DSK").mkdir(parents=True, exist_ok=True)
 
-    # Collision guard (mandatory silent-overwrite fix): two *distinct* release
-    # identities must never be allowed to converge on the same export folder.
-    # Map each sanitized folder path to the release_key that owns it. If a
-    # different release_key maps to a folder already claimed by another release,
-    # refuse to write it (record a clear conflict) instead of clobbering the
-    # other release's disk. A repeated release_key is a legitimate rerun and is
-    # allowed; release_basename already disambiguates version/language/alt_marker
-    # so most distinct releases get distinct folders, but FAT32 sanitization can
-    # still collapse two distinct human-readable names to one component, and this
-    # guard catches that residual case safely. (AR-005: release_basename is
-    # deprecated; canonical_release_name is the primary path.)
+    # The batch planner handles Windows case-insensitive collisions. Keep an
+    # ownership guard at the write boundary as a final no-overwrite check.
     folder_owner: dict[str, str] = {}
 
     for g in groups:
@@ -528,8 +531,10 @@ def export_all(
         # when DB available; falls back to release_basename(group).
         # (AR-005: release_basename is deprecated; use canonical path.)
         basename, _prov = _get_canonical_basename(g, staging_root, library_root=library_root)
+        source_basename = basename
+        basename = export_names[g.release_key]
         folder_path = str(staging_root / _ext_root(g) / basename)
-        owner = folder_owner.get(folder_path)
+        owner = folder_owner.get(folder_path.casefold())
         if owner is not None and owner != g.release_key:
             result.conflicts.append(
                 f"folder collision: {folder_path!r} already owned by release "
@@ -537,12 +542,14 @@ def export_all(
                 f"{g.release_key!r}"
             )
             continue
-        folder_owner[folder_path] = g.release_key
+        folder_owner[folder_path.casefold()] = g.release_key
 
         written, unchanged, conflicts = export_release(
             g,
             staging_root,
             basename=basename,
+            source_basename=source_basename,
+            rtfm_paths=rtfm_paths,
             original_dir=original_dir,
             artwork_original_dir=artwork_original_dir,
             artwork_processed_dir=artwork_processed_dir,
@@ -557,6 +564,10 @@ def export_all(
             # Canonical naming root.
             library_root=library_root,
         )
+        result.release_folders[g.release_key] = folder_path
+        for path in written + unchanged:
+            if Path(path).suffix.lower() == ".rtfm" and Path(path).is_file():
+                result.rtfm_exports[g.release_key] = path
         result.files_written.extend(written)
         result.files_unchanged.extend(unchanged)
         result.conflicts.extend(conflicts)

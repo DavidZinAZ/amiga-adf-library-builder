@@ -78,7 +78,8 @@ def test_panel_constructs_and_lists_entities(qapp, tmp_path, stores):
         tmp_path / "curation" / "canonical.db", None
     )
     assert panel._game_combo.count() >= 1
-    assert panel._game_combo.itemText(0) == "Turrican"
+    assert panel._game_combo.itemText(0) == "Turrican [g-turrican]"
+    assert panel._game_combo.itemData(0) == "g-turrican"
 
 
 def test_conflict_display_and_winner(qapp, tmp_path, stores):

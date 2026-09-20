@@ -465,6 +465,7 @@ def run_pipeline(
     # against the configured discovery roots; writes only under assets/rtfm.
     # A disabled/absent config yields rtfm_results=[] so the export phase is
     # unchanged. A failure must never break the run (degrade to no .rtfm).
+    rtfm_groups = list(groups)
     rtfm_results: list = []
     rtfm_dir = cfg.rtfm_dir
     manual_trace: dict[str, Any] = {
@@ -563,11 +564,10 @@ def run_pipeline(
                         g for g in groups
                         if not g.quarantine_reason
                     ]
-                    if _games_for_lem:
+                    if _games_for_lem and online:
                         lemonamiga_sources = lemonamiga_to_rtfm_sources(
                             _games_for_lem,
-                            config=None,  # Use defaults (lemonamiga enabled
-                            # via provider config if available)
+                            library_root=library_root,
                         )
                         _act(
                             f"RTFM phase: Lemon Amiga returned "
@@ -621,34 +621,6 @@ def run_pipeline(
                     }
                     for r in rtfm_results
                 ]
-                # GH-183 per-release diagnostics: include ALL releases
-                # so operators see every release's RTFM outcome, not
-                # just those with produced sidecars.
-                _rtfm_results_map: dict[str, dict] = {}
-                for _r in rtfm_results:
-                    _rk = getattr(_r, "release_key", "")
-                    if _rk:
-                        _rtfm_results_map.setdefault(_rk, {})[_r.basename] = _r.to_dict()
-                manual_trace["per_release"] = [
-                    {
-                        "release_key": g.release_key,
-                        "title": g.title,
-                        "basename": rtd.get("basename", ""),
-                        "written": rtd.get("written", False) if rtd else False,
-                        "routed_for_review": rtd.get("routed_for_review", True) if rtd else True,
-                        "review_reason": rtd.get("review_reason", "no RTFM source discovered") if rtd else "no RTFM source discovered",
-                        "output_path": rtd.get("output_path") if rtd else None,
-                        "sources_count": rtd.get("sources_count", 0) if rtd else 0,
-                        "doc_type": rtd.get("doc_type", "") if rtd else "",
-                        "provider_id_preserved": rtd.get("provider_id_preserved", False) if rtd else False,
-                        "no_rtfm_reason": (
-                            rtd.get("review_reason", "") if rtd and rtd.get("routed_for_review")
-                            else ""
-                        ),
-                    }
-                    for g in groups
-                    for rtd in [_rtfm_results_map.get(g.release_key, {})]
-                ]
                 for _r in rtfm_results:
                     if _r.written and _r.rtfm_path:
                         manual_trace["output_path"] = str(_r.rtfm_path)
@@ -663,22 +635,6 @@ def run_pipeline(
                     "rtfm_cfg.enabled=False; no manual roots or RTFM roots "
                     "present to auto-enable; operator explicitly disabled"
                 )
-                manual_trace["per_release"] = [
-                    {
-                        "release_key": g.release_key,
-                        "title": g.title,
-                        "basename": "",
-                        "written": False,
-                        "routed_for_review": True,
-                        "review_reason": "RTFM config disabled",
-                        "output_path": None,
-                        "sources_count": 0,
-                        "doc_type": "",
-                        "provider_id_preserved": False,
-                        "no_rtfm_reason": "RTFM config disabled in provider config",
-                    }
-                    for g in groups
-                ]
                 manual_trace["candidates"] = [
                     {
                         "release_key": g.release_key,
@@ -831,6 +787,8 @@ def run_pipeline(
             artwork_processed_dir=artwork_processed_dir,
             nfo_dir=nfo_dir,
             rtfm_dir=rtfm_dir,
+            rtfm_paths={r.release_key: r.rtfm_path for r in rtfm_results
+                        if r.written and r.rtfm_path and r.rtfm_path.is_file()},
             original_dir=original_dir,
             verify_only=verify_only,
             require_artwork=require_artwork,
@@ -955,7 +913,11 @@ def run_pipeline(
         _rk = getattr(_r, "release_key", "")
         if _rk:
             _rtfm_by_key.setdefault(_rk, []).append(_r.to_dict())
+    from .naming import export_basenames
+    planned_names = export_basenames(groups, library_root)
     for _pg in per_group:
+        _pg["folder"] = planned_names[_pg["release_key"]]
+        _pg["canonical_proposed_name"]["basename"] = _pg["folder"]
         _pg["rtfm_results"] = _rtfm_by_key.get(_pg["release_key"], [])
 
     # (GH-44) Run-level provider-attempt diagnostics: derive one structured
@@ -1096,11 +1058,15 @@ def run_pipeline(
         # why RTFM produced (or did not produce) output.
         "manual_trace": manual_trace,
     }
+    manual_trace["per_release"] = _rtfm_release_diagnostics(
+        rtfm_groups, rtfm_results, manual_trace, selected=include_manuals_rtfm,
+        export_requested=export, export_result=export_result, verify_only=verify_only,
+    )
     # Update export_status in manual_trace based on whether
     # RTFM output was actually copied to the export.
     if export_result is not None:
         manual_trace["export_status"] = (
-            "completed" if export_result.files_written else "skipped"
+            "completed" if export_result.rtfm_exports else "skipped"
         )
     return result
 
@@ -1414,3 +1380,56 @@ def _ensure_canonical_library(
         return CanonicalLibrary(db_path)
     except (OSError, sqlite3.Error, ValueError, TypeError):
         return None
+
+
+def _rtfm_release_diagnostics(groups, results, trace, *, selected,
+                              export_requested, export_result, verify_only):
+    """Report serialized results and verified physical state for every release."""
+    by_key = {r.release_key: r.to_dict() for r in results}
+    rows = []
+    for group in groups:
+        data = by_key.get(group.release_key, {})
+        path = data.get("rtfm_path")
+        exists = bool(path and Path(path).is_file())
+        written = bool(data.get("written") and exists)
+        provenance = data.get("provenance_path")
+        sources = data.get("sources", [])
+        types = sorted({s.get("doc_type") or s.get("category", "unknown") for s in sources})
+        reason = data.get("review_reason") or ""
+        if not written and not reason:
+            if data.get("written"):
+                reason = "generated RTFM output is missing"
+            elif not selected:
+                reason = "Manuals/RTFM deselected by operator"
+            else:
+                reason = trace.get("detail") or trace.get("enabled_reason") or "no RTFM source discovered"
+        exported = (export_result.rtfm_exports.get(group.release_key)
+                    if export_result is not None else None)
+        if not export_requested:
+            export_status = "not-requested"
+        elif verify_only:
+            export_status = "verify-only"
+        elif exported and Path(exported).is_file():
+            export_status = "exported"
+        elif export_result is not None and (not export_result.export_gate_open or export_result.errors):
+            export_status = "blocked"
+        else:
+            export_status = "not-exported"
+        rows.append({
+            "release_key": group.release_key, "title": group.title,
+            "basename": data.get("basename", ""), "written": written,
+            "routed_for_review": bool(data.get("routed_for_review")),
+            "review_reason": data.get("review_reason"),
+            "no_rtfm_reason": reason if not written else "",
+            "rtfm_path": path if exists else None,
+            "output_path": path if exists else None,
+            "output_exists": exists, "sources_count": len(sources),
+            "doc_types": types, "doc_type": ", ".join(types),
+            "sources": sources,
+            "provider_id_preserved": any(s.get("provider") and s.get("source_url") for s in sources),
+            "persistence_status": "persisted" if written else "not-written",
+            "provenance_persisted": bool(provenance and Path(provenance).is_file()),
+            "export_status": export_status,
+            "export_path": exported if export_status == "exported" else None,
+        })
+    return rows

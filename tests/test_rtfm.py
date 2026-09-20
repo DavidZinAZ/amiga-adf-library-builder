@@ -241,25 +241,17 @@ def test_build_rtfm_all_skips_duplicate_group_key(tmp_path):
 
 
 def test_variant_distinct_release_key_gets_distinct_basename(tmp_path):
-    # A crack/trainer variant carries a DISTINGUISHABLE release key (group token
-    # "cr SKR"), so release_basename correctly yields a distinct filename. The
-    # spec's "one shared .rtfm" rule applies to multi-disk sets sharing a
-    # release_key (tested elsewhere), not to arbitrarily distinct crack releases.
-    # The canonical-reuse MATCH still lets the variant's .rtfm borrow the same
-    # manual content; the artifact filename stays distinct by design.
+    # Distinct releases sharing a displayed title get collision suffixes only
+    # when the batch actually contains both releases.
     root = tmp_path / "instructions"
     _write_sources(root, {"Synthetic Quest III.txt": b"joypad"})
     base = _manual_group("Synthetic Quest III")
-    cfg = _cfg({"instructions": root})
-    srcs = rc.discover_sources(cfg)
-    res_base = rc.build_rtfm_for_group(base, cfg=cfg, rtfm_dir=tmp_path / "r", sources=srcs)
-    # A trainer variant resolves to a DISTINCT release basename (group token).
     variant = _group(["Synthetic Quest III (1992)(Acme)[cr SKR][t](Disk 1 of 1)"])
-    res_variant = rc.build_rtfm_for_group(variant, cfg=cfg, rtfm_dir=tmp_path / "r", sources=srcs)
-    # Basenames differ (distinct releases) yet BOTH still matched the same manual
-    # content via canonical-reuse, so both produce a .rtfm.
-    assert res_base.basename == "Synthetic Quest III"
-    assert res_variant.basename == "Synthetic Quest III cr SKR"
+    cfg = _cfg({"instructions": root})
+    res_base, res_variant = rc.build_rtfm_all([base, variant], cfg=cfg, rtfm_dir=tmp_path / "r")
+    assert res_base.basename != res_variant.basename
+    assert res_base.basename.startswith("Synthetic Quest III [")
+    assert res_variant.basename.startswith("Synthetic Quest III [")
     assert res_base.written and res_variant.written
     # Both emit content drawn from the same manual source.
     base_text = (tmp_path / "r" / f"{res_base.basename}.rtfm").read_text()

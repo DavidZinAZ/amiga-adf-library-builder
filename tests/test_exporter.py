@@ -57,12 +57,12 @@ def test_multidisk_set_writes_flat_folder_with_dash_n(tmp_path):
     folder = adf / folders[0]
     files = sorted(p.name for p in folder.iterdir())
     expected = [
-        "E.X.A.M.P.L.E. II Galactic Bureau cr SKR-1.adf",
-        "E.X.A.M.P.L.E. II Galactic Bureau cr SKR-2.adf",
-        "E.X.A.M.P.L.E. II Galactic Bureau cr SKR-3.adf",
-        "E.X.A.M.P.L.E. II Galactic Bureau cr SKR-4.adf",
-        "E.X.A.M.P.L.E. II Galactic Bureau cr SKR-5.adf",
-        "E.X.A.M.P.L.E. II Galactic Bureau cr SKR.nfo",
+        "E.X.A.M.P.L.E. II Galactic Bureau-1.adf",
+        "E.X.A.M.P.L.E. II Galactic Bureau-2.adf",
+        "E.X.A.M.P.L.E. II Galactic Bureau-3.adf",
+        "E.X.A.M.P.L.E. II Galactic Bureau-4.adf",
+        "E.X.A.M.P.L.E. II Galactic Bureau-5.adf",
+        "E.X.A.M.P.L.E. II Galactic Bureau.nfo",
     ]
     assert files == expected
 

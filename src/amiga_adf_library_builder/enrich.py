@@ -1304,6 +1304,24 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
         if _ss_success_note is not None:
             notes.append(_ss_success_note)
 
+    from .canonical_naming import _load_canonical_library, identity_for_release_group
+    from .canonical import SourceAuthority, Provenance
+    display_title = metadata.canonical_title if metadata else group.title
+    canon = _load_canonical_library(library_root) if library_root is not None else None
+    if canon is not None:
+        with canon:
+            identity = identity_for_release_group(canon, group)
+            if identity:
+                value, prov = canon.resolve_field("game", identity[1], "title")
+                if value and (metadata is None or prov.authority > SourceAuthority.PARSER):
+                    display_title = value
+                elif display_title:
+                    canon.claim_field("game", identity[1], "title", display_title,
+                                      Provenance(source=provider, authority=SourceAuthority.SEED))
+    group.title = display_title or group.title
+    if metadata is not None:
+        metadata.canonical_title = group.title
+
     master = None
     processed: Optional[Path] = None
     if include_artwork:

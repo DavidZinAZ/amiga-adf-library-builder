@@ -263,19 +263,16 @@ class TestMultiDiskOrdering:
 # ---------------------------------------------------------------------------
 
 class TestQualifierPolicy:
-    def test_qualifiers_appear_in_basename(self, tmp_path):
+    def test_qualifiers_do_not_change_displayed_title(self, tmp_path):
         db = tmp_path / "canonical.db"
         canon = _setup_canon(db)
         rid = canon.releases_for_game("test-game")[0]
         name = canonical_release_name(canon, rid)
-        assert "Platinum Edition" in name.basename
-        assert "USA" in name.basename
-        assert "EN" in name.basename
-        assert "Acme" in name.basename
+        assert name.basename == "Test Game"
         canon.close()
 
     def test_qualifier_policy_documentation_present(self):
-        assert "edition > region > language > publisher" in DOCUMENTED_QUALIFIER_POLICY
+        assert "displayed title only" in DOCUMENTED_QUALIFIER_POLICY
 
     def test_no_qualifiers_uses_title_only(self, tmp_path):
         db = tmp_path / "canonical.db"
@@ -466,9 +463,8 @@ class TestNoWriteCheckBuildOnly:
         canon.close()
 
 
-def test_canonical_fallback_emits_deprecation_warning(tmp_path):
-    """AR-005: When canonical_naming falls back to release_basename,
-    it must emit a DeprecationWarning."""
+def test_unmatched_canonical_uses_display_title(tmp_path):
+    """An unmatched release still exports its displayed title without qualifiers."""
     import warnings
     from amiga_adf_library_builder.canonical import CanonicalLibrary
     from amiga_adf_library_builder.canonical_naming import export_name_for_release_group
@@ -489,8 +485,8 @@ def test_canonical_fallback_emits_deprecation_warning(tmp_path):
         result = export_name_for_release_group(canon, grp)
         assert result.basename  # non-empty
         deprecation_warnings = [x for x in w if issubclass(x.category, DeprecationWarning)]
-        assert len(deprecation_warnings) >= 1
-        assert any("release_basename" in str(x.message) for x in deprecation_warnings)
+        assert result.basename == "Example Castle Quest"
+        assert deprecation_warnings == []
     canon.close()
 
 
