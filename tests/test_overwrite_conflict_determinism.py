@@ -91,7 +91,8 @@ def test_tampered_staged_file_reported_as_conflict(tmp_path):
     g = group_records([parse_filename("Game One (v1.0) (Disk 1 of 1).adf")])[0]
     staging = _staging_root(tmp_path / "work", "run1")
     export_release(g, staging, original_dir=original_dir)
-    victim = staging / "ADF" / "Game One ver v1.0" / "Game One ver v1.0.adf"
+    # Single release: folder is the sanitized title.
+    victim = staging / "ADF" / "Game One" / "Game One.adf"
     victim.write_bytes(b"TAMPERED")
 
     written, unchanged, conflicts = export_release(
@@ -102,7 +103,7 @@ def test_tampered_staged_file_reported_as_conflict(tmp_path):
     assert victim.read_bytes() == b"TAMPERED"  # not silently clobbered
 
 
-# --- 3. Verify-only does NOT erase / hide a conflict -------------------------
+# --- 3. Verify-only does NOT erase / hide a conflict -----------------
 
 
 def test_verify_only_preserves_conflict_and_victim(tmp_path):
@@ -111,7 +112,8 @@ def test_verify_only_preserves_conflict_and_victim(tmp_path):
     g = group_records([parse_filename("Game One (v1.0) (Disk 1 of 1).adf")])[0]
     staging = _staging_root(tmp_path / "work", "run1")
     export_release(g, staging, original_dir=original_dir)
-    victim = staging / "ADF" / "Game One ver v1.0" / "Game One ver v1.0.adf"
+    # Single release: folder is the sanitized title.
+    victim = staging / "ADF" / "Game One" / "Game One.adf"
     victim.write_bytes(b"DO-NOT-TOUCH")
 
     res = export_all(
@@ -159,7 +161,7 @@ def test_shared_run_id_write_then_verify_detects_conflict(tmp_path):
     assert victim.read_bytes() == b"TAMPERED"
 
 
-# --- 5. Repeated clean runs remain deterministic -----------------------------
+# --- 5. Repeated clean runs remain deterministic -----------------
 
 
 def test_repeated_verify_only_stable(tmp_path):
@@ -168,7 +170,8 @@ def test_repeated_verify_only_stable(tmp_path):
     g = group_records([parse_filename("Game One (v1.0) (Disk 1 of 1).adf")])[0]
     staging = _staging_root(tmp_path / "work", "run1")
     export_release(g, staging, original_dir=original_dir)
-    victim = staging / "ADF" / "Game One ver v1.0" / "Game One ver v1.0.adf"
+    # Single release: folder is the sanitized title.
+    victim = staging / "ADF" / "Game One" / "Game One.adf"
     victim.write_bytes(b"TAMPERED")
 
     for _ in range(3):
@@ -182,7 +185,8 @@ def test_repeated_verify_only_stable(tmp_path):
         assert victim.read_bytes() == b"TAMPERED"
 
 
-# --- 6. Existing release-basename collision protections remain intact --------
+# --- 6. Existing release-basename collision protections remain intact
+# GH-183: deterministic suffixing resolves collisions instead of refusing.
 
 
 def test_basename_collision_guard_still_refuses_distinct_release(tmp_path):
@@ -210,11 +214,17 @@ def test_basename_collision_guard_still_refuses_distinct_release(tmp_path):
         upstream_task_closed=True, verified_artwork_width=AW,
         verified_artwork_height=AH, original_dir=original_dir,
     )
-    assert res.releases_exported == 1
-    assert any("folder collision" in c for c in res.conflicts)
+    # GH-183: deterministic hash suffix resolves collision; both exported.
+    assert res.releases_exported == 2
+    assert len(res.folders_written) == 2
+    for folder in res.folders_written:
+        assert "CollisionName [" in folder
+    # No folder collision conflict because suffixes disambiguate.
+    folder_conflicts = [c for c in res.conflicts if "folder collision" in c]
+    assert not folder_conflicts
 
 
-# --- 7. Originals and SD-card remain untouched -------------------------------
+# --- 7. Originals and SD-card remain untouched -----------------
 
 
 def test_export_never_writes_original(tmp_path):
@@ -227,9 +237,8 @@ def test_export_never_writes_original(tmp_path):
     staging = _staging_root(tmp_path / "work", "run1")
     export_release(g, staging, original_dir=original_dir)
 
-    # Tamper the staged output, then verify-only: must report conflict, must
-    # not touch originals, and must not overwrite or hide the tampered victim.
-    victim = staging / "ADF" / "Game One ver v1.0" / "Game One ver v1.0.adf"
+    # Single release: folder is the sanitized title.
+    victim = staging / "ADF" / "Game One" / "Game One.adf"
     victim.write_bytes(b"TAMPERED")
     res = export_all(
         [g], staging_dir=tmp_path / "work", run_id="run1",

@@ -168,7 +168,8 @@ def test_explicit_safe_run_id_writes_beneath_staging(tmp_path):
     staging_parent = (tmp_path / "work").resolve()
     assert res.staging_root.resolve().is_relative_to(staging_parent)
     assert res.staging_root == _staging_root(tmp_path / "work", run_id)
-    victim = res.staging_root / "ADF" / "Game One ver v1.0" / "Game One ver v1.0.adf"
+    # Single release: folder is the sanitized title.
+    victim = res.staging_root / "ADF" / "Game One" / "Game One.adf"
     assert victim.exists()
     assert victim.read_bytes() == b"REAL"
 
@@ -211,7 +212,8 @@ def test_export_release_verify_only_reports_tamper(tmp_path):
     original_dir, g = _one_group(tmp_path)
     staging = _staging_root(tmp_path / "work", "run1")
     export_release(g, staging, original_dir=original_dir)
-    victim = staging / "ADF" / "Game One ver v1.0" / "Game One ver v1.0.adf"
+    # Single release: folder is the sanitized title.
+    victim = staging / "ADF" / "Game One" / "Game One.adf"
     victim.write_bytes(b"TAMPERED")
     written, unchanged, conflicts = export_release(
         g, staging, original_dir=original_dir, verify_only=True

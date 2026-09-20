@@ -61,14 +61,15 @@ def test_version_collision_preserves_both_releases(tmp_path):
     assert res.releases_exported == 2
     adf = staging / "ADF"
     folders = sorted(p.name for p in adf.iterdir() if p.is_dir())
-    # Two distinct, deterministic folders (no clobber).
-    assert "Game One ver v1.0" in folders
-    assert "Game One ver v2.0" in folders
+    # GH-183 contract: title-only basename with deterministic hash suffix
+    # when case-insensitive sanitized titles collide. No version qualifier.
     assert len(folders) == 2
-    v1 = adf / "Game One ver v1.0" / "Game One ver v1.0.adf"
-    v2 = adf / "Game One ver v2.0" / "Game One ver v2.0.adf"
-    assert v1.read_bytes() == b"VERSION_1_DISK"
-    assert v2.read_bytes() == b"VERSION_2_DISK"
+    for name in folders:
+        assert name.startswith("Game One [") and name.endswith("]"), name
+    for name in folders:
+        assert (adf / name / f"{name}.adf").is_file()
+    contents = {p.read_bytes() for p in adf.rglob("*.adf")}
+    assert contents == {b"VERSION_1_DISK", b"VERSION_2_DISK"}
 
 
 # --- B. Language collision --------------------------------------------------
@@ -85,10 +86,10 @@ def test_language_collision_preserves_both_releases(tmp_path):
     assert res.releases_exported == 2
     adf = staging / "ADF"
     folders = sorted(p.name for p in adf.iterdir() if p.is_dir())
+    # GH-183: no language qualifier in folder name; hash suffix disambiguates.
     assert len(folders) == 2
-    # Distinct folders carry the language token.
-    assert any("lang DE" in f for f in folders)
-    assert any("lang EN" in f for f in folders)
+    for name in folders:
+        assert name.startswith("Game One [") and name.endswith("]"), name
     contents = {p.read_bytes() for p in adf.rglob("*.adf")}
     assert contents == {b"DISK_DE", b"DISK_EN"}
 
@@ -107,9 +108,10 @@ def test_alt_marker_collision_preserves_both_releases(tmp_path):
     assert res.releases_exported == 2
     adf = staging / "ADF"
     folders = sorted(p.name for p in adf.iterdir() if p.is_dir())
+    # GH-183: no alt_marker qualifier in folder name; hash suffix disambiguates.
     assert len(folders) == 2
-    assert any("alt a" in f for f in folders)
-    assert any("alt a2" in f for f in folders)
+    for name in folders:
+        assert name.startswith("Game One [") and name.endswith("]"), name
     contents = {p.read_bytes() for p in adf.rglob("*.adf")}
     assert contents == {b"DISK_A", b"DISK_A2"}
 
@@ -120,9 +122,9 @@ def test_alt_marker_collision_preserves_both_releases(tmp_path):
 def test_sanitization_collision_refused_with_conflict(tmp_path):
     # Two distinct release identities whose human-readable basenames sanitize
     # to the SAME FAT32-safe folder component (same title, no disambiguating
-    # identity field). The residual collision guard must refuse the second
-    # distinct release (record a clear conflict) instead of clobbering the
-    # first. Both carry a real disk so the writer actually attempts the folder.
+    # identity field). Under GH-183 the deterministic suffixing resolves
+    # the collision by appending a hash, so both releases export with
+    # distinct folders instead of being refused.
     original_dir = tmp_path / "original"
     src1 = "CollisionOne (Disk 1 of 1).adf"
     src2 = "CollisionTwo (Disk 1 of 1).adf"
@@ -151,10 +153,14 @@ def test_sanitization_collision_refused_with_conflict(tmp_path):
         verified_artwork_height=artwork_mod.ARTWORK_MAX_H,
         original_dir=original_dir,
     )
-    # Both share the same title -> same basename -> same folder. Distinct keys.
-    assert res.releases_exported == 1, res.folders_written
-    assert res.conflicts, "expected a reported folder collision, got none"
-    assert any("folder collision" in c for c in res.conflicts)
+    # GH-183: deterministic hash suffix resolves collision; both exported.
+    assert res.releases_exported == 2, res.folders_written
+    assert len(res.folders_written) == 2
+    for folder in res.folders_written:
+        assert "CollisionName [" in folder
+    # No folder collision conflict because suffixes disambiguate.
+    folder_conflicts = [c for c in res.conflicts if "folder collision" in c]
+    assert not folder_conflicts
 
 
 # --- E. Same-release idempotency --------------------------------------------
@@ -170,9 +176,12 @@ def test_same_release_idempotent_rerun(tmp_path):
     tree1 = sorted(p.read_bytes() for p in (tmp_path / "staging" / "run1").rglob("*") if p.is_file())
     tree2 = sorted(p.read_bytes() for p in (tmp_path / "staging" / "run2").rglob("*") if p.is_file())
     assert tree1 == tree2
-    # Folder name carries the version, but is stable across reruns.
-    folder = tmp_path / "staging" / "run1" / "ADF" / "Game One ver v1.0"
-    assert (folder / "Game One ver v1.0.adf").read_bytes() == b"VERSION_1_DISK"
+    # GH-183: single release gets the sanitized title as folder name.
+    folder = tmp_path / "staging" / "run1" / "ADF"
+    folders = [p.name for p in folder.iterdir() if p.is_dir()]
+    assert len(folders) == 1
+    assert folders[0] == "Game One"
+    assert (folder / "Game One" / "Game One.adf").read_bytes() == b"VERSION_1_DISK"
 
 
 # --- F. Same-run verify-only does not clobber tampered same-release ---------
@@ -183,7 +192,8 @@ def test_same_run_verify_only_keeps_tampered(tmp_path):
     _write_original(original_dir, "Game One (v1.0) (Disk 1 of 1).adf", b"VERSION_1_DISK")
     g = group_records([parse_filename("Game One (v1.0) (Disk 1 of 1).adf")])[0]
     export_release(g, tmp_path / "staging" / "run1", original_dir=original_dir)
-    victim = tmp_path / "staging" / "run1" / "ADF" / "Game One ver v1.0" / "Game One ver v1.0.adf"
+    # Single release: folder is the sanitized title.
+    victim = tmp_path / "staging" / "run1" / "ADF" / "Game One" / "Game One.adf"
     victim.write_bytes(b"TAMPERED")
     written, unchanged, conflicts = export_release(
         g, tmp_path / "staging" / "run1", original_dir=original_dir, verify_only=True

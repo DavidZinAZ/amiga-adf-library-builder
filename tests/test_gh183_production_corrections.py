@@ -51,7 +51,8 @@ def test_diagnostics_match_physical_output_and_idempotent_export(tmp_path, monke
         assert hacker["no_rtfm_reason"] == ""
         assert Path(hacker["output_path"]).is_file()
         assert hacker["rtfm_path"] == hacker["output_path"]
-        assert hacker["persistence_status"] == "persisted"
+        assert hacker["persistence_status"] == "not-applicable"
+        assert hacker["canonical_associations_expected"] == 0
         assert hacker["provenance_persisted"] is True
         assert hacker["export_status"] == "exported"
         assert Path(hacker["export_path"]).read_bytes() == Path(hacker["rtfm_path"]).read_bytes()
@@ -61,7 +62,7 @@ def test_diagnostics_match_physical_output_and_idempotent_export(tmp_path, monke
         assert "no matching manual source" in missing["no_rtfm_reason"]
         assert missing["output_path"] is None
         assert missing["export_path"] is None
-        assert missing["persistence_status"] == "not-written"
+        assert missing["persistence_status"] == "not-applicable"
         assert result["rtfm"]["manual_trace"]["export_status"] == "completed"
 
 
@@ -195,7 +196,10 @@ def test_lemon_html_to_persisted_association_to_physical_rtfm(tmp_path, monkeypa
     assert row["written"] is True, row["no_rtfm_reason"]
     assert row["doc_types"] == [kind]
     assert row["sources_count"] == 1
-    assert row["provider_id_preserved"] is True
+    assert "provider_id_preserved" not in row
+    assert row["provider_source_preserved"] is True
+    assert row["persistence_status"] == "persisted"
+    assert row["canonical_associations_reloaded"] == 1
     assert marker in Path(row["rtfm_path"]).read_text()
     assert marker in Path(row["export_path"]).read_text()
     with CanonicalLibrary(root / "curation" / "canonical.db") as canon:
@@ -215,6 +219,7 @@ def test_lemon_html_to_persisted_association_to_physical_rtfm(tmp_path, monkeypa
     monkeypatch.setattr(metadata, "_text_get", lambda *a, **k: pytest.fail("offline acquisition"))
     restarted = trace(run_pipeline(cfg, replace(run, run_id="restart")))["Hacker"]
     assert restarted["written"] is True
+    assert restarted["persistence_status"] == "persisted"
     assert marker in Path(restarted["rtfm_path"]).read_text()
     assert marker in Path(restarted["export_path"]).read_text()
 

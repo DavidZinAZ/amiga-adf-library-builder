@@ -76,7 +76,7 @@ from typing import Iterable, Optional
 # They are pure helpers with no network/state dependency.
 from .local_media import _relative_to_root  # noqa: F401  (re-exported for tests)
 from .utils import sha256_file as _sha256_file  # noqa: F401  (re-exported for tests)
-from .utils import write_json_atomic
+from .utils import write_json_atomic, sha256_bytes
 
 # Issue #5: PDF/image text extraction layer (optional dependency, offline only).
 # Imported lazily inside the load path so the core library stays importable
@@ -1018,7 +1018,7 @@ def _compose_sections(
                 filename=src.stem,
                 kind=f"provider:{src.doc_type or 'other'}",
                 sections=[marker],
-                sha256="",
+                sha256=sha256_bytes(content_text.encode("utf-8")),
                 size=len(content_text.encode("utf-8")),
                 match_confidence=sc.confidence,
                 match_kind=sc.kind,
@@ -1577,6 +1577,9 @@ def _provenance_source_from_scored(src: "RtfmSource", group, *, kind: str) -> "R
         sha256_val = _sha256_file(src.path)
     except Exception:
         pass
+    if src.content and str(src.path) in ("", "."):
+        sha256_val = sha256_bytes(src.content.encode("utf-8"))
+        kind = f"provider:{src.doc_type or 'other'}"
     # Safe source_rel: handle empty paths for provider-sourced docs.
     try:
         source_rel = _relative_to_root(src.path, src.root)

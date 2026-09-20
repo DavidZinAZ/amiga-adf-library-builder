@@ -1061,12 +1061,14 @@ def run_pipeline(
     manual_trace["per_release"] = _rtfm_release_diagnostics(
         rtfm_groups, rtfm_results, manual_trace, selected=include_manuals_rtfm,
         export_requested=export, export_result=export_result, verify_only=verify_only,
+        library_root=library_root,
     )
     # Update export_status in manual_trace based on whether
     # RTFM output was actually copied to the export.
     if export_result is not None:
         manual_trace["export_status"] = (
-            "completed" if export_result.rtfm_exports else "skipped"
+            "completed" if any(row["export_status"] == "exported"
+                               for row in manual_trace["per_release"]) else "skipped"
         )
     return result
 
@@ -1383,7 +1385,8 @@ def _ensure_canonical_library(
 
 
 def _rtfm_release_diagnostics(groups, results, trace, *, selected,
-                              export_requested, export_result, verify_only):
+                              export_requested, export_result, verify_only,
+                              library_root=None):
     """Report serialized results and verified physical state for every release."""
     by_key = {r.release_key: r.to_dict() for r in results}
     rows = []
@@ -1426,10 +1429,69 @@ def _rtfm_release_diagnostics(groups, results, trace, *, selected,
             "output_exists": exists, "sources_count": len(sources),
             "doc_types": types, "doc_type": ", ".join(types),
             "sources": sources,
-            "provider_id_preserved": any(s.get("provider") and s.get("source_url") for s in sources),
-            "persistence_status": "persisted" if written else "not-written",
+            "provider_source_preserved": any(s.get("provider") and s.get("source_url") for s in sources),
+            **_canonical_document_persistence(group, sources, library_root),
             "provenance_persisted": bool(provenance and Path(provenance).is_file()),
             "export_status": export_status,
             "export_path": exported if export_status == "exported" else None,
         })
     return rows
+
+
+def _canonical_document_persistence(group, sources, library_root):
+    """Verify association-backed sources by reloading their exact canonical content.
+
+    This status is independent of RTFM generation, provenance, and export:
+    not-applicable: no inline document sources in this result (e.g. local manuals);
+    persisted: every document's provider, URL, type and content hash reload;
+    partial: only some reload; not-persisted: none reload;
+    unverified: the canonical store cannot be checked.
+    """
+    from .canonical import CanonicalLibrary
+    from .canonical_naming import identity_for_release_group
+    from .manual_lookup import get_document_associations
+    from .utils import sha256_bytes
+
+    documents = [s for s in sources if s.get("kind", "").startswith("provider:")]
+    state = {
+        "persistence_status": "not-applicable",
+        "canonical_associations_expected": len(documents),
+        "canonical_associations_reloaded": 0,
+        "persistence_detail": "no association-backed document sources in this result",
+    }
+    if not documents:
+        return state
+    if library_root is None:
+        state.update(persistence_status="unverified", persistence_detail="canonical library root unavailable")
+        return state
+    db_path = Path(library_root) / "curation" / "canonical.db"
+    if not db_path.is_file():
+        state.update(persistence_status="not-persisted", persistence_detail="canonical database missing")
+        return state
+    try:
+        # New connection: observing the generated file or a live in-memory
+        # document object cannot establish durable canonical persistence.
+        with CanonicalLibrary(db_path) as canon:
+            identity = identity_for_release_group(canon, group)
+            claims = []
+            if identity is not None:
+                rid, gid = identity
+                claims = get_document_associations(canon, "release", rid)
+                claims += get_document_associations(canon, "game", gid)
+            reloaded = {
+                (prov.source, prov.url, prov.record_key, sha256_bytes(content.encode("utf-8")))
+                for prov, content in claims if isinstance(content, str) and content.strip()
+            }
+    except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
+        state.update(persistence_status="unverified", persistence_detail=f"canonical reload failed: {exc}")
+        return state
+    count = sum(
+        (doc.get("provider"), doc.get("source_url"), doc.get("doc_type"), doc.get("sha256")) in reloaded
+        for doc in documents
+    )
+    status = "persisted" if count == len(documents) else "partial" if count else "not-persisted"
+    state.update(
+        persistence_status=status, canonical_associations_reloaded=count,
+        persistence_detail=f"{count}/{len(documents)} document associations reloaded with matching content",
+    )
+    return state
