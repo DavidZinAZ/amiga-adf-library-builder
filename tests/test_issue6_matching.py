@@ -165,7 +165,7 @@ def test_minor_spelling_routes_to_review(tmp_path):
     assert any(s["match_kind"] == "minor_spelling" for s in data["sources"])
 
 
-def test_two_distinct_high_confidence_near_tie_routes_to_review(tmp_path):
+def test_two_distinct_high_confidence_near_tie_routes_to_review(tmp_path, monkeypatch):
     # Two DIFFERENT manuals (distinct canonical keys) both match the group at
     # 1.00 -> a genuine >=2 near-tie -> route for review, emit nothing.
     root = tmp_path / "instructions"
@@ -174,13 +174,38 @@ def test_two_distinct_high_confidence_near_tie_routes_to_review(tmp_path):
         "Borealis Starfighter.txt": b"controls B",
     })
     g = _manual_group("Apidia Starfighter")
-    g.folder = "Borealis Starfighter"  # operator override -> basename differs
+    # Supply two equally strong identity resolutions at the scoring seam.
+    # Folder names no longer provide a second game identity under GH-183.
+    monkeypatch.setattr(rc, "score_source_match", lambda src, group:
+                        rc.MatchScore(True, 1.0, "exact", ["fixture_identity_resolution"]))
     cfg = _cfg({"instructions": root})
     srcs = rc.discover_sources(cfg)
     res = rc.build_rtfm_for_group(g, cfg=cfg, rtfm_dir=tmp_path / "rtfm", sources=srcs)
     assert res.routed_for_review
     assert not res.written
     assert res.rtfm_path is None or not res.rtfm_path.exists()
+    assert "near-tie" in res.review_reason
+    assert {s.filename for s in res.sources} == {"Apidia Starfighter.txt", "Borealis Starfighter.txt"}
+
+
+def test_folder_name_does_not_introduce_a_second_manual_identity(tmp_path):
+    root = tmp_path / "instructions"
+    _write_sources(root, {
+        "Apidia Starfighter.txt": b"controls A",
+        "Borealis Starfighter.txt": b"controls B",
+    })
+    g = _manual_group("Apidia Starfighter")
+    g.folder = "Borealis Starfighter"
+    cfg = _cfg({"instructions": root})
+    sources = rc.discover_sources(cfg)
+    scores = {s.stem: rc.score_source_match(s, g) for s in sources}
+    assert scores["Apidia Starfighter"].confidence == 1.0
+    assert not scores["Borealis Starfighter"].matched
+    result = rc.build_rtfm_for_group(g, cfg=cfg, rtfm_dir=tmp_path / "rtfm", sources=sources)
+    assert result.written and not result.routed_for_review
+    assert result.basename == "Apidia Starfighter"
+    assert "controls A" in result.rtfm_path.read_text()
+    assert "controls B" not in result.rtfm_path.read_text()
 
 
 # ---------------------------------------------------------------------------

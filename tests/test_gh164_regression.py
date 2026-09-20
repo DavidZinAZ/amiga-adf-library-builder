@@ -162,7 +162,7 @@ def test_disambiguation_produces_review_not_silent_notfound():
 
 @pytest.mark.parametrize("title,expected_contains", [
     ("Bubble Bobble-01", "bubblebobble"),
-    ("Ultima IV: Quest of the Avatar", "ultimaivquestoftheavatar"),
+    ("Ultima IV: Quest of the Avatar", "ultima0004questoftheavatar"),
     ("Neuromancer (video game)", "neuromancer"),
 ])
 def test_canonical_title_strips_ordinal_and_disambiguator(title, expected_contains):
@@ -170,6 +170,12 @@ def test_canonical_title_strips_ordinal_and_disambiguator(title, expected_contai
     result = canonical_title(title)
     assert expected_contains in result
     assert "-" not in result  # ordinal stripped
+
+
+def test_ultima_identity_unifies_numeral_notation_but_preserves_sequels():
+    title = canonical_title("Ultima IV: Quest of the Avatar")
+    assert title == canonical_title("Ultima 4: Quest of the Avatar")
+    assert title != canonical_title("Ultima V: Quest of the Avatar")
 
 
 # --- C8 fixture 6: local-media article movement via _score -------------

@@ -481,14 +481,21 @@ def validate_metadata_relevance(requested_title: str, record: "MetadataRecord",
         )
 
     # --- Different-game lookalike guard (issue #7) ---
-    # A high-ratio candidate that is NOT an exact identity but is merely the
+    # A candidate that is NOT an exact identity but is merely the
     # requested title extended by extra characters (a sequel number/word, an
-    # edition/version tail) is a *different* game. At ratio >= accept threshold
-    # the only way one normalized title extends another is such a tail, so
-    # rejecting is safe and exact titles still pass via the identity branch.
-    if (ratio >= _RELEVANCE_ACCEPT_RATIO and not exact_identity
-            and (candidate.startswith(target) and candidate != target
-                 or target.startswith(candidate) and target != candidate)):
+    # edition/version tail) is a *different* game. Numeral normalization pads
+    # sequel numbers (II -> 0002), which can lower the similarity ratio without
+    # changing that identity evidence. Numeric extensions are rejected in every
+    # fuzzy band; other uncertain extensions retain the existing review policy.
+    # Roman/Arabic equivalents still pass via the exact-identity branch.
+    extension = ""
+    if target and candidate:
+        if candidate.startswith(target):
+            extension = candidate[len(target):]
+        elif target.startswith(candidate):
+            extension = target[len(candidate):]
+    if (not exact_identity and extension
+            and (ratio >= _RELEVANCE_ACCEPT_RATIO or extension[0].isdigit())):
         evidence.append("different_game_substring")
         return RelevanceDecision(
             category="rejected", confidence=min(0.45, ratio),
@@ -968,9 +975,6 @@ class _HallOfLightDetailParser(HTMLParser):
                 parts = href.split("/")
                 if len(parts) >= 4:
                     self.game_id = parts[3] if parts[3] else ""
-            # Typed-document link discovery: /doc/{slug}/{id} or /cheat/{slug}/{id}
-            if self._in_docs_section and href.startswith("/doc/"):
-                self._parse_doc_link(href)
 
     def handle_endtag(self, tag: str) -> None:
         if self._skip_until_endtag:
