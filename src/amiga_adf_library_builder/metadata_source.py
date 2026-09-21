@@ -92,7 +92,7 @@ def _parse_disk_number(name: str) -> tuple[Optional[int], Optional[int]]:
     return None, None
 
 
-def parse_tosec_xml(dat_path: Path) -> list[SourceEntry]:
+def parse_tosec_xml(dat_path: Path, source_id: Optional[str] = None) -> list[SourceEntry]:
     """Parse a TOSEC-style XML DAT file.
 
     Handles the standard Logiqx DTD:
@@ -104,7 +104,8 @@ def parse_tosec_xml(dat_path: Path) -> list[SourceEntry]:
       </datafile>
     """
     entries: list[SourceEntry] = []
-    source_id = hashlib.sha256(str(dat_path.resolve()).encode("utf-8")).hexdigest()[:16]
+    if source_id is None:
+        source_id = hashlib.sha256(str(dat_path.resolve()).encode("utf-8")).hexdigest()[:16]
     try:
         tree = ET.parse(dat_path)
     except ET.ParseError as exc:
@@ -148,7 +149,7 @@ def parse_tosec_xml(dat_path: Path) -> list[SourceEntry]:
     return entries
 
 
-def parse_nointro_xml(dat_path: Path) -> list[SourceEntry]:
+def parse_nointro_xml(dat_path: Path, source_id: Optional[str] = None) -> list[SourceEntry]:
     """Parse a No-Intro XML DAT file.
 
     Format:
@@ -160,11 +161,16 @@ def parse_nointro_xml(dat_path: Path) -> list[SourceEntry]:
       </datafile>
     """
     # No-Intro uses the same structure as TOSEC; delegate.
-    return parse_tosec_xml(dat_path)
+    return parse_tosec_xml(dat_path, source_id=source_id)
 
 
-def parse_dat(dat_path: Path) -> list[SourceEntry]:
-    """Auto-detect DAT format and parse. Returns empty list on failure."""
+def parse_dat(dat_path: Path, source_id: Optional[str] = None) -> list[SourceEntry]:
+    """Auto-detect DAT format and parse. Returns empty list on failure.
+
+    When source_id is provided, it is used as the source identifier
+    for all parsed entries (needed for folder sources where multiple
+    DAT files belong to the same source).
+    """
     if not dat_path.is_file():
         logger.warning("DAT file not found: %s", dat_path)
         return []
@@ -182,8 +188,8 @@ def parse_dat(dat_path: Path) -> list[SourceEntry]:
         except OSError:
             head = ""
         if "no-intro" in head.lower() or "no_intro" in head.lower():
-            return parse_nointro_xml(dat_path)
-        return parse_tosec_xml(dat_path)
+            return parse_nointro_xml(dat_path, source_id=source_id)
+        return parse_tosec_xml(dat_path, source_id=source_id)
     # Unknown format: return empty (graceful degradation)
     logger.warning("Unknown DAT format: %s", dat_path)
     return []
@@ -323,9 +329,9 @@ class MetadataSourceManager:
         display_name = name or path.name
         # Parse entries
         if source_type == "dat":
-            entries = parse_dat(path)
+            entries = parse_dat(path, source_id=source_id)
         else:
-            entries, _ = self._scan_folder(path)
+            entries, _ = self._scan_folder(path, source_id=source_id)
         # Insert source + entries atomically
         try:
             cur = self._conn.cursor()
@@ -370,7 +376,7 @@ class MetadataSourceManager:
             self._conn.rollback()
             return None
 
-    def _scan_folder(self, folder: Path) -> tuple[list[SourceEntry], list[dict]]:
+    def _scan_folder(self, folder: Path, source_id: Optional[str] = None) -> tuple[list[SourceEntry], list[dict]]:
         """Scan a folder for DAT files recursively.
 
         Returns (entries, errors) where entries is the list of parsed
@@ -383,7 +389,7 @@ class MetadataSourceManager:
             return entries, errors
         for dat_file in folder.rglob("*.dat"):
             try:
-                parsed = parse_dat(dat_file)
+                parsed = parse_dat(dat_file, source_id=source_id)
                 if not parsed:
                     errors.append({
                         "file": str(dat_file),
@@ -444,10 +450,10 @@ class MetadataSourceManager:
         old_entry_count = row.entry_count
         # Parse new entries
         if source_type == "dat":
-            entries = parse_dat(path)
+            entries = parse_dat(path, source_id=source_id)
             errors = []
         else:
-            entries, errors = self._scan_folder(path)
+            entries, errors = self._scan_folder(path, source_id=source_id)
         sha = self._sha256_file(path) if source_type == "dat" else None
         # Last-known-good preservation: if we had entries before and now
         # have none, treat as failure and preserve old data

@@ -324,7 +324,7 @@ class MainWindow(QMainWindow):
         self._paths = portable_paths or PortablePaths()
         self._paths.ensure_all()
         self._metadata_manager = MetadataSourceManager(
-            self._paths.data_dir / "metadata_sources.db"
+            self._paths.metadata_sources_db
         )
         self._identity_store = FileIdentityStore(
             self._paths.data_dir / "identity.db"

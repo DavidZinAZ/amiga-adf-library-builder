@@ -320,7 +320,7 @@ def run_pipeline(
     if metadata_cache_dir:
         try:
             metadata_source_manager = MetadataSourceManager(
-                metadata_cache_dir / "metadata_sources.db"
+                cfg.metadata_sources_db
             )
         except Exception:
             metadata_source_manager = None

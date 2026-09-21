@@ -521,6 +521,7 @@ class UnifiedLookupDialog(QDialog):
                     cache_dir=paths_cfg.metadata_cache_dir,
                     curated_dir=paths_cfg.curated_metadata_dir,
                     config_path=source.config_path,
+                    db_path=paths_cfg.metadata_sources_db,
                 )
             except Exception:
                 ctx = LookupContext(
@@ -528,6 +529,7 @@ class UnifiedLookupDialog(QDialog):
                     release_key=self._entry.release_key,
                     title=self._entry.title or "",
                     disk_stems=[Path(f).stem for f in (self._entry.adf_files or [])],
+                    db_path=None,
                 )
 
         ctx.query = search_query
@@ -2499,6 +2501,7 @@ class PreviewWidget(QWidget):
                     cache_dir=paths_cfg.metadata_cache_dir,
                     curated_dir=paths_cfg.curated_metadata_dir,
                     config_path=source.config_path,
+                    db_path=paths_cfg.metadata_sources_db,
                 )
             except Exception:
                 base = LookupContext()

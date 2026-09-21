@@ -59,6 +59,16 @@ class PortablePaths:
         return self.base / "data"
 
     @property
+    def metadata_sources_db(self) -> Path:
+        """Single authoritative path for the metadata_sources SQLite index.
+
+        Falls back to data_dir/metadata_sources.db for portability.
+        When a library_root is configured, PathConfig.metadata_sources_db
+        is the preferred authoritative location.
+        """
+        return self.data_dir / "metadata_sources.db"
+
+    @property
     def logs_dir(self) -> Path:
         return self.base / "logs"
 

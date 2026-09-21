@@ -178,6 +178,19 @@ class PathConfig:
         return self.catalog_dir / "metadata-cache"
 
     @property
+    def data_dir(self) -> Path:
+        return self.library_root / "data"
+
+    @property
+    def metadata_sources_db(self) -> Path:
+        """Single authoritative path for the metadata_sources SQLite index.
+
+        All components (GUI, pipeline, lookup) use this same path,
+        eliminating template/runtime copy confusion.
+        """
+        return self.data_dir / "metadata_sources.db"
+
+    @property
     def curated_metadata_dir(self) -> Path:
         return self.catalog_dir / "metadata-curated"
 
