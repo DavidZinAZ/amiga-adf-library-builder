@@ -618,6 +618,19 @@ def run_pipeline(
                             }
                             for s in r.sources
                         ],
+                        # RC-5: typed doc type from first source (if any),
+                        # else the highest-priority source category.
+                        "doc_type": (
+                            r.sources[0].doc_type
+                            if r.sources and r.sources[0].doc_type
+                            else (r.sources[0].category if r.sources else "")
+                        ),
+                        # RC: whether the provider game ID was preserved
+                        # across identification (non-empty provider_url_canonical).
+                        "provider_id_preserved": any(
+                            s.match_kind and s.match_kind != "none"
+                            for s in (r.sources or [])
+                        ),
                     }
                     for r in rtfm_results
                 ]
