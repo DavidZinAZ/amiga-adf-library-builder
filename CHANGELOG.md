@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.26 — 2026-09-22
+
+### GH-183 Release
+
+- Merge GH-183 QA-qualified candidate (831849f) and CI provenance fix (74c47a5) into main.
+- Unify metadata_sources DB path and fix source_id mismatch.
+- Real document association to physical RTFM oracle (Lemon typed docs).
+- Manual Lookup persist -> Preview -> Export lifecycle.
+- Fix Hall of Light parsing and sequel rejection.
+- Fix RTFM JSON serialization and pipeline production failures.
+- CI: preserve exact Windows QA candidate artifact.
+- Version identity: 0.2.25 → 0.2.26 in pyproject.toml, AmigaADFGui.spec, tests/test_version_identity.py.
+
 ## 0.2.25 — 2026-09-17
 
 ### Windows User Test Release (post-Canonical-Identity-RTFM)

@@ -26,7 +26,7 @@ def _canonical_version() -> str:
 
 def test_pyproject_version_is_canonical():
     version = _canonical_version()
-    assert version == "0.2.25"
+    assert version == "0.2.26"
     assert isinstance(version, str)
 
 
@@ -116,7 +116,7 @@ def test_build_generates_version_info_with_correct_vers():
     from tools.build_windows import render_spec, _semver_to_tuple, _APPLICATION_VERSION
 
     # Semver mapping
-    assert _semver_to_tuple("0.2.25") == (0, 2, 25, 0)
+    assert _semver_to_tuple("0.2.26") == (0, 2, 26, 0)
     assert _semver_to_tuple("1.0") == (1, 0, 0, 0)
 
     spec = render_spec(
