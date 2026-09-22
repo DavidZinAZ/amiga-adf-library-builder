@@ -13,6 +13,11 @@ name: QA Windows real execution (Issue #15)
 
 on:
   workflow_dispatch:
+    inputs:
+      candidate_ref:
+        description: "Exact commit/ref to build and preserve as the QA candidate"
+        required: false
+        default: ""
   push:
     branches:
       - feat/issue15-windows-gui
@@ -35,6 +40,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_ref || github.sha }}
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
@@ -48,6 +55,21 @@ jobs:
 
       - name: Build onedir portable app (real artifact)
         run: python tools/build_windows.py --target onedir --clean
+
+      - name: Capture candidate provenance
+        shell: pwsh
+        run: |
+          $candidate = (git rev-parse HEAD).Trim()
+          $exe = "dist/AmigaADFLibraryBuilder/AmigaADFLibraryBuilder.exe"
+          if (-not (Test-Path -LiteralPath $exe)) {
+            throw "Built EXE not found: $exe"
+          }
+          New-Item -ItemType Directory -Force -Path "qa-windows-artifacts" | Out-Null
+          Set-Content -LiteralPath "qa-windows-artifacts/SOURCE-COMMIT.txt" -Value $candidate
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $exe).Hash.ToLower()
+          Set-Content -LiteralPath "qa-windows-artifacts/SHA256SUMS.txt" -Value "$hash *AmigaADFLibraryBuilder/AmigaADFLibraryBuilder.exe"
+          "source_commit=$candidate"
+          "exe_sha256=$hash"
 
       - name: Run real-Windows qualification driver
         env:
@@ -63,6 +85,7 @@ jobs:
         with:
           name: qa-windows-real-exec
           path: |
+            dist/AmigaADFLibraryBuilder/
             qa-windows-artifacts/
             C:\Users\runneradmin\Test Dir With Spaces\lib\logs\
           if-no-files-found: warn
