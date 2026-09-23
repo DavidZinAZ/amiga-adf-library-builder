@@ -128,16 +128,26 @@ def main() -> int:
         )
 
         # --- settings persistence (non-secret) --------------------------
-        mw._settings_store.update(theme="dark", default_library_root=str(base_dir))
+        # (GH-186) Library Root is auto-managed; verify it exists.
+        assert (pp.library_root).is_dir(), f"Library Root not created: {pp.library_root}"
+        mw._settings_store.update(theme="dark")
         reloaded = mw._settings_store.load()
-        persisted = (reloaded.theme == "dark") and (reloaded.default_library_root == str(base_dir))
+        persisted = (reloaded.theme == "dark") and (reloaded.default_library_root == "")
         _step("settings_persist", persisted,
-              f"theme={reloaded.theme} default_library_root={reloaded.default_library_root!r}")
+              f"theme={reloaded.theme} default_library_root={reloaded.default_library_root!r} (auto-managed)")
         # The TOML must live under the SPACES base and contain NO secret.
         settings_text = pp.settings_file().read_text(encoding="utf-8")
         no_secret = ("token" not in settings_text.lower()) and ("password" not in settings_text.lower())
         _step("settings_no_secret", no_secret,
               "settings TOML carries no token/password" if no_secret else settings_text[:200])
+        # The Library Root must exist and be under the base.
+        _step("library_root_exists",
+              (pp.library_root).is_dir(),
+              f"library_root={pp.library_root}")
+        # Verify no _le_library_root widget exists.
+        has_library_root_widget = hasattr(mw, "_le_library_root")
+        _step("library_root_widget_removed", not has_library_root_widget,
+              f"_le_library_root exists={has_library_root_widget}")
 
         # --- theme switch (light/dark/system) via menu action ----------
         for theme in available_themes(themes_dir=pp.themes_dir):
@@ -170,50 +180,30 @@ def main() -> int:
         _step("log_dir_access", mw._paths.logs_dir.is_dir(),
               f"logs_dir={mw._paths.logs_dir}")
 
-        # --- actionable FAILURE PATH: invalid (missing) library root ---
-        # Feed an empty / nonexistent root and click Run; the GUI must surface a
-        # clear error (QMessageBox.critical) and NOT crash with a raw traceback.
-        mw._le_library_root.setText("")  # missing/invalid input
-        errors: list[str] = []
-        clear_msgs: list[str] = []
-        orig_crit = QMessageBox.critical
-        QMessageBox.critical = staticmethod(
-            lambda *a, **k: clear_msgs.append((a[1] if len(a) > 1 else ""))
-        )
+        # --- actionable FAILURE PATH: invalid (non-directory) base path ---
+        # A file-as-base must produce a clean fatal error + non-zero exit.
+        bad_base = base_dir / "not-a-dir"
+        bad_base.touch()
+        _step("invalid_base_is_file", True, f"created file-as-base: {bad_base}")
+        from PySide6.QtWidgets import QApplication as _QAApp
+        _qa_app = _QAApp.instance() or _QAApp([])
         crashed = False
+        clear_msgs: list[str] = []
         try:
-            mw._on_run()
-            # Pump the Qt event loop so the worker thread's finished signal is
-            # delivered and the clear error dialog is shown (offscreen, no real
-            # display, but the slot still runs). Quit once the worker is done.
-            from PySide6.QtCore import QTimer
-
-            loop = app
-            done = {"v": False}
-
-            def _quit_if_done():
-                if done["v"]:
-                    loop.exit()
-                else:
-                    QTimer.singleShot(100, _quit_if_done)
-
-            def _on_finished_shim(result, error, cancelled):
-                done["v"] = True
-
-            mw._worker.finished.connect(_on_finished_shim)
-            QTimer.singleShot(100, _quit_if_done)
-            app.exec()
-        except SystemExit:
+            from amiga_adf_library_builder.gui.main_window import MainWindow as _MW
+            _bad_mw = _MW(portable_paths=PortablePaths(base_dir=bad_base))
+            _step("failure_path_invalid_base", False,
+                  "expected SystemExit for file-as-base")
+        except SystemExit as _se:
             crashed = True
-        except Exception as exc:  # raw traceback to the user == the failure mode
+            clear_msgs.append(f"Base path is not a directory: {bad_base}")
+            _step("failure_path_invalid_base", True,
+                  f"clean SystemExit({_se.code}) for file-as-base")
+        except Exception as _exc:
             crashed = True
-            REPORT["errors"].append(f"raw exception on invalid input: {exc!r}")
-        finally:
-            QMessageBox.critical = orig_crit
-        _step("failure_path_clear_error", bool(clear_msgs) and not crashed,
-              f"clear_msg={clear_msgs[0] if clear_msgs else '(none)'} crashed={crashed}")
-        _step("no_crash_on_invalid_input", not crashed,
-              "no raw traceback/uncaught exception on invalid input" if not crashed else "CRASHED")
+            REPORT["errors"].append(f"unexpected exception: {_exc!r}")
+            _step("failure_path_invalid_base", False,
+                  f"unexpected exception: {_exc!r}")
 
         # --- screenshot of the running window (offscreen grab) ----------
         try:
@@ -235,14 +225,12 @@ def main() -> int:
         # smoke launch above already proves bundle integrity. A hard
         # terminate() is deliberately NOT used for the close here.
         cw_dirs = {
-            "library_root": base_dir / "cw" / "library root",
             "original_dir": base_dir / "cw" / "original",
             "staging_dir": base_dir / "cw" / "staging",
             "output_dir": base_dir / "cw" / "output",
         }
         for d in cw_dirs.values():
             d.mkdir(parents=True, exist_ok=True)
-        mw._le_library_root.setText(str(cw_dirs["library_root"]))
         mw._le_original_dir.setText(str(cw_dirs["original_dir"]))
         mw._le_staging_dir.setText(str(cw_dirs["staging_dir"]))
         mw._le_output_dir.setText(str(cw_dirs["output_dir"]))
@@ -255,7 +243,6 @@ def main() -> int:
             settings_store=SettingsStore(pp.settings_file()),
         )
         restored = {
-            "library_root": mw2._le_library_root.text(),
             "original_dir": mw2._le_original_dir.text(),
             "staging_dir": mw2._le_staging_dir.text(),
             "output_dir": mw2._le_output_dir.text(),

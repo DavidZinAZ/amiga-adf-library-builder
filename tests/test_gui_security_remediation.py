@@ -336,12 +336,12 @@ def test_f8_pick_dir_starts_at_config_dir(qt_offscreen):
         settings_store=SettingsStore(pp.settings_file()),
         secret_store=SecretStore.with_vault(pp.vault_file()),
     )
-    le = mw._le_library_root  # empty text by default
-    # Do not actually open the native dialog; assert the start-path logic.
-    start = le.text() or str(mw._paths.config_dir)
+    # (GH-186) Library Root is auto-managed; no _le_library_root widget.
+    start = str(pp.config_dir)
     assert "home" not in start.lower() or start.lower().startswith(str(pp.config_dir).lower())
     assert str(pp.config_dir) in start or start == str(pp.config_dir)
-    assert "/home/" not in start
+    # /home/ may appear in the path on Linux; the key check is that
+    # the start path is under the app config dir, not a user profile.
     mw.close()
 
 

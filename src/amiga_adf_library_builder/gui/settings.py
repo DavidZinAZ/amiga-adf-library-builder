@@ -120,9 +120,17 @@ def _clean_manual_root_entries(raw: Any) -> list[str]:
 
 @dataclass
 class Settings:
-    """Plain dataclass of non-sensitive GUI settings (no secrets)."""
+    """Plain dataclass of non-sensitive GUI settings (no secrets).
+
+    .. deprecated::
+        ``default_library_root`` is retained for backward compatibility
+        with existing settings files but is ignored at runtime. Library
+        Root is now auto-managed as ``<app-base>/Library-Root`` (GH-186).
+    """
 
     theme: str = "system"
+    # (GH-186) Deprecated: auto-managed as <app-base>/Library-Root.
+    # Retained for backward-compatible settings file loading only.
     default_library_root: str = ""
     default_original_dir: str = ""
     default_staging_dir: str = ""
@@ -182,7 +190,9 @@ class Settings:
     def as_dict(self) -> dict:
         out: dict[str, Any] = {
             "theme": self.theme,
-            "default_library_root": self.default_library_root,
+            # (GH-186) default_library_root is auto-managed; only persist
+            # when explicitly set by a legacy settings file (non-empty).
+            **({"default_library_root": self.default_library_root} if self.default_library_root else {}),
             "default_original_dir": self.default_original_dir,
             "default_staging_dir": self.default_staging_dir,
             "default_output_dir": self.default_output_dir,
@@ -307,9 +317,17 @@ class Settings:
 
 @dataclass
 class Preset:
-    """A named, saved non-sensitive settings profile (no secrets)."""
+    """A named, saved non-sensitive settings profile (no secrets).
+
+    .. deprecated::
+        ``library_root`` is retained for backward compatibility
+        with existing preset files but is ignored at runtime. Library
+        Root is now auto-managed as ``<app-base>/Library-Root`` (GH-186).
+    """
 
     name: str = ""
+    # (GH-186) Deprecated: auto-managed as <app-base>/Library-Root.
+    # Retained for backward-compatible preset file loading only.
     library_root: str = ""
     original_dir: str = ""
     staging_dir: str = ""

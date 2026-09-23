@@ -80,6 +80,15 @@ class PortablePaths:
     def themes_dir(self) -> Path:
         return self.base / "themes"
 
+    @property
+    def library_root(self) -> Path:
+        """The auto-created Library-Root directory beside the app executable.
+
+        Always ``self.base / "Library-Root"``. Created automatically at
+        MainWindow startup; never derived from CWD or user profile paths.
+        """
+        return self.base / "Library-Root"
+
     def all_dirs(self) -> list[Path]:
         return [
             self.config_dir,
