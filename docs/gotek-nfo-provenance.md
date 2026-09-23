@@ -1,5 +1,7 @@
 # Gotek-facing NFO format and durable provenance (Gotek NFO contract)
 
+> **Reference status:** Current stable NFO/provenance reference for the v0.2.26 documentation set.
+
 This document defines the contract for the Gotek Touchscreen Interface display
 `.nfo` files and where the detailed source / metadata / manual-approval
 provenance is kept so that it survives outside the final SD-card layout.
@@ -30,7 +32,7 @@ Rules:
    no duplicate enrichment-mode fields, no project banner or separator.
 
 This matches the upstream Gotek "Labelled" NFO form documented in
-`docs/upstream-gotek-requirements.md` §5.
+`docs/archive/research/upstream-gotek-requirements.md` §5.
 
 ## 2. Durable provenance — outside the NFO
 

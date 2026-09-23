@@ -91,7 +91,7 @@ Current reference material includes:
 - [Quick Start](docs/QUICKSTART.md)
 - [Command Reference](docs/COMMANDS.md)
 - [Data Layout](docs/DATA-LAYOUT.md)
-- [Migration Guide](docs/MIGRATION.md)
+- [Migration Guide](docs/archive/migrations/portable-path-migration.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Windows Build Reference](docs/BUILD-Windows.md)
 - [Architecture](docs/ARCHITECTURE.md)

@@ -1790,7 +1790,7 @@ Existing internal references include:
 
 ```text
 docs/ARCHITECTURE.md
-docs/ARCHITECTURE-windows-gui.md
+docs/archive/architecture/ARCHITECTURE-windows-gui-Issue15.md
 docs/STATE-OWNERSHIP-MAP.md
 docs/architecture-review/
 ```
