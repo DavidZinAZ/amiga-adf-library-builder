@@ -1,5 +1,7 @@
 # Command Reference
 
+> **Reference status:** Current CLI reference for v0.2.26. Reviewed as part of the 2026-09-22 documentation cleanup.
+
 All normal commands (`scan`, `build`, `export`, `verify-export-gate`,
 `list-quarantine`, `approve`, `list-approvals`, `inspect-approval`, `revoke`)
 accept the same portable path-resolution flags and **never prompt for paths**:

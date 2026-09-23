@@ -1,65 +1,54 @@
 # Amiga ADF Library Builder
 
-A preservation-first command-line tool that scans an Amiga disk-image collection, groups multi-disk releases, enriches them with metadata and artwork, and builds a reviewable Gotek staging tree.
+**Amiga ADF Library Builder** is a preservation-first Windows application and Python CLI for organizing Amiga disk-image collections, grouping multi-disk releases, enriching them with metadata/artwork/manual information, curating ambiguous results, and producing reviewable Gotek-oriented output.
 
-This project is designed as a companion utility for the excellent [Gotek Touchscreen Interface (GTi)](https://github.com/mesarim/Gotek-Touchscreen-interface). It helps prepare, organize, enrich, and export libraries in a layout that GTi can use; it is not a replacement for or fork of GTi.
+The project is designed as a companion utility for the [Gotek Touchscreen Interface (GTi)](https://github.com/mesarim/Gotek-Touchscreen-interface). It prepares and curates libraries for Gotek-oriented use; it is not a replacement for or fork of GTi.
 
-> **Important:** the application never writes directly to the SD-card output during `export`. It writes to a run-owned staging directory so the result can be reviewed before publishing.
+> **Preservation rule:** source/original `.adf` and `.dsk` files are treated as immutable input. Review and curation happen in application-managed state before deliberate export.
 
-## Download Windows App
+## Download the Windows app
 
-**No Python required.** The standalone Windows application is distributed as a portable ZIP and a single EXE.
+**No Python required.** The normal Windows release is available in two forms:
 
-### Quick start
-1. Go to the [latest release](https://github.com/DavidZinAZ/amiga-adf-library-builder/releases/latest).
-2. Download either:
-   - **`amiga-adf-gui-portable.zip`** — extract anywhere, run `AmigaADFLibraryBuilder/AmigaADFLibraryBuilder.exe`
-   - **`amiga-adf-gui.exe`** — single portable executable, run directly
-3. No installation, no Python, no dependencies. All runtime state (config, cache, logs) stays under the portable folder.
+- **`amiga-adf-gui-portable.zip`** — recommended portable folder build.
+- **`amiga-adf-gui.exe`** — single-file portable executable.
 
-Each release page shows the version tag, release notes, and the exact source commit the artifacts were built from.
+Download them from the project's **latest GitHub release**. Each release identifies the version and source commit used to build the artifacts.
 
-## What it does
+## Windows workflow at a glance
 
-- scans immutable `.adf` and `.dsk` originals;
-- parses title, disk number, edition, chipset, crack group, and related release markers;
-- groups complete disk sets and quarantines ambiguous/incomplete groups;
-- enriches accepted releases with online metadata and artwork when `--online` is used;
-- caches metadata, provenance, artwork masters, and processed JPGs;
-- writes concise Gotek-compatible `.nfo` files while preserving detailed provenance separately;
-- creates a Gotek-compatible staging tree under `<library_root>/work/staging/<run-id>`;
-- preserves source disk images byte-for-byte.
+The current GUI includes these primary workspaces:
 
-## Configuration
+- **Library** — choose the library/source and working locations.
+- **Options** — control online lookup, metadata refresh, artwork/manual behavior, matching thresholds, and related run options.
+- **Providers** — configure optional provider integrations.
+- **LaunchBox media** — configure local artwork/manual folders.
+- **Preview & Curation** — review releases, filter state, inspect details, accept/reject, move/merge ADFs, perform lookup, and persist curation decisions.
+- **Diagnostics** — inspect runtime/provider/configuration state.
+- **Metadata Sources** — review metadata-source configuration/state.
+- **Manual Lookup** — explicitly search/browse sources and persist a selected result into the normal Preview → Export lifecycle.
 
-The tool no longer hard-codes any host path. You point it at a **library root** and it derives every working directory beneath it (`original/`, `work/staging/`, `output/`, `unknown/`, `config/manual-approvals/`, `reports/`, `logs/`). The cache defaults to the XDG cache (`~/.cache/amiga-adf-library-builder`).
+Build/review first, then export deliberately using the Run / Export controls and safety acknowledgement.
 
-Configuration is discovered in this order (highest → lowest precedence):
+## Core capabilities
 
-1. an explicit CLI flag (`--library-root`, `--original-dir`, …);
-2. an environment variable (`AMIGA_ADF_LIBRARY_ROOT`, `AMIGA_ADF_ORIGINAL_DIR`, …);
-3. an explicit `--config <file.toml>`;
-4. the XDG per-user config `~/.config/amiga-adf-library-builder/config.toml`;
-5. an optional system-wide config `/etc/amiga-adf-library-builder/config.toml`;
-6. safe built-in defaults (only once a library root is supplied).
+- Read-only scanning of `.adf` and `.dsk` originals.
+- Canonical Game → Release → Disk identity model with persistent hash identity.
+- Multi-disk grouping and ambiguity/quarantine handling.
+- Online and offline/local metadata lookup.
+- Artwork discovery, preservation, processing, and provenance.
+- RTFM/manual discovery and association.
+- Persistent curation memory and review state.
+- Multi-select, move, merge, accept/reject, undo/redo-oriented curation workflows.
+- 1G1R selection for Gotek export when desired.
+- Reviewable staging/export behavior with explicit safety gates.
+- Portable Windows builds and a full Python CLI/core for automation and development.
 
-If no library configuration is found, commands print:
+## Quick start
 
-```text
-No library configuration found.
+For normal Windows use, start with **[docs/QUICKSTART.md](docs/QUICKSTART.md)**. Python is only required when you intentionally use the CLI from source or develop the project.
 
-Run:
-  amiga-adf-library-builder init
-
-Or provide:
-  --config /path/to/config.toml
-```
-
-### Quick start
-
-#### 1. Install for development
-
-From the repository root (the directory containing this README):
+For CLI/development installation:
 
 ```bash
 python3 -m venv .venv
@@ -67,138 +56,62 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -e '.[artwork,dev]'
 ```
 
-#### 2. Initialize a library
-
-Choose a directory to own all library data (originals, staging, output, approvals, logs). It need not live on the same host as the checkout.
+Then initialize a library root:
 
 ```bash
 .venv/bin/amiga-adf-library-builder init \
   --library-root /path/to/my-amiga-library
 ```
 
-This writes a TOML config (per-user by default) and prints the resolved layout. To write to an explicit file, add `--config /path/to/config.toml`. Place immutable source images in `<library_root>/original`.
+## Data and safety model
 
-#### 3. Build an enriched staging tree
-
-```bash
-RUN_ID="enriched-$(date +%Y%m%d-%H%M%S)"
-
-.venv/bin/amiga-adf-library-builder export \
-  --library-root /path/to/my-amiga-library \
-  --online \
-  --refresh-metadata \
-  --require-artwork \
-  --export-gate-acknowledged \
-  --run-id "$RUN_ID" \
-  --json
-```
-
-The output appears under `<library_root>/work/staging/<run-id>`. Review the generated `.nfo` and `.jpg` files before publishing anything to the SD card.
-
-#### Inspect the resolved configuration
-
-```bash
-.venv/bin/amiga-adf-library-builder config show
-.venv/bin/amiga-adf-library-builder config validate
-```
-
-## Common commands
-
-Show help:
-
-```bash
-.venv/bin/amiga-adf-library-builder --help
-.venv/bin/amiga-adf-library-builder export --help
-```
-
-Offline build using cached metadata only:
-
-```bash
-.venv/bin/amiga-adf-library-builder build \
-  --library-root /path/to/my-amiga-library \
-  --json
-```
-
-Verify an existing staging run without writing:
-
-```bash
-.venv/bin/amiga-adf-library-builder export \
-  --library-root /path/to/my-amiga-library \
-  --export-gate-acknowledged \
-  --verify-only \
-  --run-id '<existing-run-id>' \
-  --json
-```
-
-Run tests:
-
-```bash
-TMPDIR="$PWD/.pytest-tmp" .venv/bin/python -m pytest -q
-```
-
-## Manual approvals (special-only releases)
-
-Quarantined *special-only* release keys can be approved for publication with a
-reviewed CLI workflow (URL allowlist, SHA-256 binding + safe-fail, revocation,
-merge, and NFO source-link provenance). The operator commands and record handling
-are documented in [`docs/COMMANDS.md`](./docs/COMMANDS.md).
-
-```bash
-# list quarantined groups
-.venv/bin/amiga-adf-library-builder list-quarantine
-
-# approve a special-only key (hashes computed read-only from original/)
-.venv/bin/amiga-adf-library-builder approve \
-  --release-key examplequestiii \
-  --title "Example Quest III" \
-  --folder "Example Quest III" \
-  --source-url "https://www.lemonamiga.com/games/details.php?id=example" \
-  --role metadata --allow-incomplete --reason "example operator approval"
-
-# re-run the pipeline to apply approvals
-.venv/bin/amiga-adf-library-builder build --library-root /path/to/my-amiga-library --export-gate-acknowledged
-```
-
-## Data layout
+A configured library root owns the application's working data. Typical locations include:
 
 ```text
 <library_root>/
-├── original/                 immutable source ADF/DSK files
-├── catalog/
-│   ├── metadata-cache/       provider results and provenance
-│   └── metadata-curated/     operator overrides
-├── assets/
-│   ├── artwork-original/     preserved downloaded masters
-│   ├── artwork-processed/    Gotek-sized JPG derivatives
-│   └── nfo/                  generated rich NFO files
-├── unknown/                  ambiguous/incomplete groups
-├── work/staging/<run-id>/    reviewable Gotek output
+├── original/                 immutable ADF/DSK source collection
+├── catalog/                  provider/cache/curated metadata state
+├── assets/                   artwork and generated metadata/manual assets
+├── unknown/                  unresolved/quarantined material
+├── work/staging/             reviewable staging runs
 ├── output/                   generated output
-├── config/manual-approvals/  manual approval records
-├── reports/                  run reports
+├── config/                   application/operator configuration records
+├── reports/                  reports
 └── logs/                     logs
 ```
 
-`cache_dir` defaults to `~/.cache/amiga-adf-library-builder` and is overridable.
-
-## Safety model
-
-- `original/` is never modified.
-- Online access is opt-in with `--online`.
-- `--require-artwork` prevents staging output when accepted releases lack JPG artwork.
-- `export` writes only to a new run-owned staging tree.
-- Existing SD-card folders are not overwritten by the application.
-- Ambiguous groups are quarantined instead of guessed.
+The exact state ownership is more detailed than this summary; see the documentation index and data-layout reference.
 
 ## Documentation
 
-- [Quick start](docs/QUICKSTART.md)
-- [Command reference](docs/COMMANDS.md)
-- [Data and cache layout](docs/DATA-LAYOUT.md)
-- [Migration guide](docs/MIGRATION.md)
-- [Troubleshooting](docs/TROUBLESHOOTING.md)
+Start at **[docs/README.md](docs/README.md)** for the current documentation map.
 
-Additional documents under `docs/` describe Gotek export behavior, NFO/provenance handling, local-media integration, test-corpus expectations, and other implementation details.
+Current reference material includes:
+
+- [Quick Start](docs/QUICKSTART.md)
+- [Command Reference](docs/COMMANDS.md)
+- [Data Layout](docs/DATA-LAYOUT.md)
+- [Migration Guide](docs/archive/migrations/portable-path-migration.md)
+- [Troubleshooting](docs/TROUBLESHOOTING.md)
+- [Windows Build Reference](docs/BUILD-Windows.md)
+- [Architecture](docs/ARCHITECTURE.md)
+
+The documentation refresh is adding a full User Guide, Installation Guide, Windows GUI Walkthrough, Metadata/Provider Guide, expanded Troubleshooting Guide, and consolidated Developer Guide.
+
+## Project philosophy
+
+The application favors reviewable, explainable behavior over aggressive guessing:
+
+- originals are not rewritten;
+- ambiguous identity or grouping is surfaced for review;
+- online access is explicit/configurable;
+- provider/cache/provenance state is kept separate from source disks;
+- final export is deliberate and gated;
+- curation decisions are intended to persist across reruns instead of forcing the operator to repeat the same work.
+
+## Credits, development history, security, and contribution
+
+The existing project acknowledgements, AI-assisted-development disclosure, security policy, contribution policy, license, and detailed command examples from the current README should be retained below the revised product/usage sections when this replacement is applied. This file intentionally replaces only the stale product-facing upper portion rather than deleting project-history content.
 
 ## Credits and acknowledgements
 

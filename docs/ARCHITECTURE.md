@@ -1,126 +1,163 @@
 # Architecture
 
-## Code repository
+**Current baseline:** Amiga ADF Library Builder v0.2.26<br>
+**Reviewed:** 2026-09-22
 
-`<REPO_ROOT>`
+This document describes the current high-level architecture. Historical design,
+issue, and architecture-review documents are retained under [`archive/`](archive/).
 
-## Persistent data root
+## Core rule: one shared engine
 
-`<LIBRARY_ROOT>`
-
-```text
-original/                      # IMMUTABLE intake (never written by app)
-work/                          # temporary/scratch writes
-catalog/                      # persistent catalogue (JSON or SQLite)
-assets/
-  artwork-original/           # masters as downloaded / sourced
-  artwork-processed/          # resized Gotek-suitable copies
-  nfo/                        # generated .nfo metadata
-review/                       # human-review queue with explanations
-unknown/                      # quarantined ambiguous/incomplete files + reasons
-rejected/                     # explicitly rejected material
-logs/                         # run logs, hashes, provenance
-```
-
-## Generated SD-card root
-
-`<SD_CARD_ROOT>`
+The CLI and Windows GUI are two front ends over the same core pipeline.
 
 ```text
-ADF/
-  <Unique Game or Release Name>/
-    <Unique Game or Release Name>-1.adf
-    <Unique Game or Release Name>-2.adf
-    <Unique Game or Release Name>.jpg
-    <Unique Game or Release Name>.nfo
-
-DSK/
-  <Unique Game or Release Name>/
-    <Unique Game or Release Name>-1.dsk
-    <Unique Game or Release Name>-2.dsk
-    <Unique Game or Release Name>.jpg
-    <Unique Game or Release Name>.nfo
+CLI arguments ───────┐
+                     ├─> resolved paths/config ─> shared core pipeline
+Windows GUI state ───┘
 ```
 
-Note: during a build, the exporter does **not** write here directly. It writes
-to a run-owned staging directory `work/staging/<run-id>/ADF|DSK`, which is the
-only directory a rollback may delete. The verified staging tree is copied to
-this root **only at publish time (Phase 10)**, after qualification is green. This
-keeps rollback cleanup scoped to a single run and protects the shared card roots
-from any broad deletion.
+The GUI must not independently reimplement scanning, parsing, grouping,
+metadata reconciliation, export rules, or preservation checks.
 
-## Domain hierarchy (internal model)
+## Main runtime layers
 
-`Game → official version/edition → release group → dump variant → disk & role`
+### Presentation
 
-The internal model is rich; the **export** collapses it to a single folder per
-unique release name so it never breaks the Gotek flat layout.
+- `cli.py` — command-line interface.
+- `gui/` — PySide6 Windows GUI.
+- `gui/main_window.py` — main UI and run orchestration.
+- `gui/state.py` — maps GUI controls into shared path/pipeline configuration.
+- `gui/worker.py` — background pipeline execution and cooperative cancellation.
 
-## Pipeline stages
+### Intake and identity
 
-1. **Scan** — read-only walk of `original/`; record name, path, size, SHA-256.
-   No write to `original/`.
-2. **Parse** — extract title, year, publisher, chipset, language, version,
-   release group, trainer flag, alternate marker, disk number, total disks,
-   special-disk role from the filename (and disk contents where needed).
-3. **Group** — cluster files into release sets by normalized title + edition +
-   group + variant; order disks by parsed ordinal; reject mixing incompatible
-   releases.
-4. **Enrich** (offline default; `--online` enables) — online-sourced metadata,
-   cover art, provenance; cached for reuse.
-5. **Export** — write the Gotek single-level tree; never overwrite existing
-   output silently; idempotent.
-6. **Quarantine** — unresolved/incomplete material routed to `review/`+`unknown/`
-   with a human-readable explanation.
+- `scanner.py` — read-only discovery and hashing.
+- `parser.py` — filename/release token parsing.
+- `grouper.py` — disk/release grouping.
+- `file_identity.py` — durable file identity and curation memory.
+- `canonical.py` — canonical Game / Release / Disk model.
+- `canonical_naming.py` / `naming.py` — canonical/export naming.
 
-## Module layout (proposed, under `src/amiga_adf_library_builder/`)
+### Metadata and enrichment
 
-- `cli.py` — argparse entry (`init`, `scan`, future `build`, `--online`, `--dry-run`)
-- `initializer.py` — safe managed-directory creation (exists)
-- `scanner.py` — intake walk + hashing
-- `parser.py` — filename → structured record
-- `grouper.py` — clustering / ordering
-- `catalog.py` — persistent catalogue + cache
-- `enrich.py` — metadata/artwork (offline NFO; `--online` hook to online providers)
-- `igdb.py` — optional IGDB metadata/artwork provider (OPTIONAL, DISABLED by default)
-- `exporter.py` — Gotek tree writer
-- `quarantine.py` — review/unknown routing
-- `playmatch.py` — optional Playmatch ROM-hash identity resolver (OPTIONAL, DISABLED by default)
-- `hasheous.py` — optional Hasheous ROM-hash identity resolver (OPTIONAL, DISABLED by default)
-- `local_media.py` — local-media artwork provider (offline, read-only)
-- `rtfm.py` — deterministic manual sidecar build (offline, NO-AI)
-- `metadata.py` — online metadata providers (Wikipedia, RAWG) + cache/provenance
-- `artwork.py` — artwork processing / resize
-- `nfo_render.py` — Gotek-facing NFO rendering
-- `manual_approvals.py` — operator manual approvals
-- `naming.py` — release basename generation
-- `paths.py` — portable path configuration
-- `models.py` — core data models
-- `logging_utils.py` — structured logging / redaction
-- `exporter_guard.py` — export safety gate
-- `activity_log.py` — live activity log (issue #21)
-- `gui/` — PySide6 Windows GUI (optional extra)
+- `metadata.py` — shared metadata records, cache, relevance validation, and
+  lower-level online metadata sources.
+- `lookup_workflow.py` — shared online/offline/alternate lookup workflow.
+- `metadata_source.py` — indexed DAT/local metadata sources.
+- `local_media.py` — read-only local artwork/media matching.
+- provider modules such as `igdb.py`, `screenscraper.py`,
+  `retroachievements.py`, `playmatch.py`, `hasheous.py`, and `retrokit.py`.
+- `rtfm.py` / `rtfm_docs.py` — manual/document pipeline.
+- `artwork.py` — artwork processing.
+- `nfo_render.py` — Gotek-facing NFO rendering.
 
-## Safety properties
+### State, selection, and export
 
-- No application write targets `original/`.
-- Initialization is idempotent.
-- Existing output is never overwritten silently.
-- Temporary writes use `work/`.
-- Network operations require `--online`.
-- Paths derived from filenames or online data are sanitized.
-- Hashes are recorded and re-verifiable (integrity / preservation proof).
+- `library_state.py` — staged Preview & Curation state.
+- `manual_approvals.py` — operator approval records.
+- `selection.py` — selection/1G1R logic.
+- `exporter.py` — staging/final export mechanics.
+- `exporter_guard.py` — export safety gate.
+- `quarantine.py` — unresolved/ambiguous material.
+- `activity_log.py` / `logging_utils.py` — activity logging and redaction.
 
-## Architecture review documents
+## Canonical identity
 
-- `docs/architecture-review/findings.md` — GH-141 findings catalog
-  (AR-001 … AR-012)
-- `docs/architecture-review/final-review.md` — GH-141 final verdict
-  and P1–P5 remediation priorities
-- `docs/architecture-review/remediation-ledger.md` — post-remediation
-  ledger covering all AR dispositions, commit lineage, preserved
-  invariants, and v0.2.17 baseline
-- `docs/architecture-review/architecture-truth-map.md` — 6-store
-  truth map
-- `docs/STATE-OWNERSHIP-MAP.md` — authoritative per-fact ownership
-  table (GH-145)
+The canonical hierarchy is:
+
+```text
+Game
+└── Release
+    └── Disk
+```
+
+Raw filenames are evidence, not the final identity model. Provider results,
+indexed local metadata, hashes, and operator curation can all contribute claims.
+Operator-authoritative decisions are intended to survive normal refreshes.
+
+## Persistent state ownership
+
+No single store owns every fact. Current major stores include:
+
+| Store | Primary responsibility |
+|---|---|
+| catalog/cache files | scan/group/provider cache data |
+| `library_state` | staged Preview & Curation state |
+| file identity DB | durable file identity / curation memory |
+| `canonical.db` | Game / Release / Disk identity and claims |
+| `metadata_sources.db` | indexed DAT/local metadata sources |
+| manual approval records | explicit operator approvals |
+| GUI settings | non-sensitive GUI preferences |
+| GUI secret vault | credentials only |
+
+See [STATE-OWNERSHIP-MAP.md](STATE-OWNERSHIP-MAP.md) for the current operator/developer map.
+
+## Pipeline shape
+
+The shared pipeline is conceptually:
+
+```text
+Scan
+  -> Parse
+  -> Group
+  -> Resolve canonical identity
+  -> Enrich metadata/artwork/manuals
+  -> Apply persistent curation
+  -> Validate
+  -> Stage/export
+  -> Report/quarantine unresolved material
+```
+
+Ambiguous identity should be surfaced for review rather than guessed.
+
+## Windows GUI
+
+The released Windows GUI is a normal supported interface, not a future design.
+Its current tabs are:
+
+- Library
+- Options
+- Providers
+- LaunchBox media
+- Preview & Curation
+- Diagnostics
+- Metadata Sources
+- Manual Lookup
+
+For user-facing behavior see
+[WINDOWS-GUI-WALKTHROUGH.md](WINDOWS-GUI-WALKTHROUGH.md).
+
+## Portable application state vs library data
+
+The frozen GUI keeps application state under its portable application base:
+
+```text
+config/
+data/
+logs/
+cache/
+themes/
+```
+
+The Amiga library root is separate. It contains preservation source data,
+catalog/curation state, generated assets, staging/output, reports, and logs as
+configured.
+
+See [DATA-LAYOUT.md](DATA-LAYOUT.md).
+
+## Safety invariants
+
+- original ADF/DSK source files are never ordinary write targets;
+- online access is explicit/configurable;
+- ambiguous matches go to review;
+- secrets remain separate from ordinary settings and are redacted from logs;
+- final export is explicit and gated;
+- run-owned staging is used before final publication;
+- provenance is retained for metadata, artwork, manuals, and operator decisions;
+- GUI and CLI behavior should converge on shared core code.
+
+## Historical architecture material
+
+Issue-era GUI design, remediation reviews, and older architecture snapshots are
+preserved under [`archive/architecture/`](archive/architecture/) and
+[`archive/architecture-review/`](archive/architecture-review/).
