@@ -322,7 +322,19 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(MIN_WINDOW_SIZE)
 
         self._paths = portable_paths or PortablePaths()
+        # (GH-186) Validate base path and auto-create Library-Root.
+        if not self._paths.base.is_dir():
+            logger.critical(
+                "Invalid portable base path: %s is not a directory",
+                self._paths.base,
+            )
+            raise SystemExit(
+                f"Invalid base path: {self._paths.base} is not a directory"
+            )
         self._paths.ensure_all()
+        self._library_root = self._paths.library_root
+        self._library_root.mkdir(parents=True, exist_ok=True)
+        logger.info("Library Root: %s", self._library_root)
         self._metadata_manager = MetadataSourceManager(
             self._paths.metadata_sources_db
         )
@@ -362,6 +374,8 @@ class MainWindow(QMainWindow):
         self._build_widgets()
         self._apply_settings_to_widgets()
         self._build_menu()
+        # (GH-186) Show the resolved Library Root in Diagnostics.
+        self._append_diag(f"Library Root: {self._library_root}")
         # (Issue #21) run state for the live Diagnostics log.
         self._run_in_progress = False
         self._run_mode = "build"
@@ -591,23 +605,17 @@ class MainWindow(QMainWindow):
     def _build_paths_tab(self) -> QWidget:
         w = QWidget(self)
         layout = QVBoxLayout(w)
-        self._le_library_root = QLineEdit(self)
         self._le_original_dir = QLineEdit(self)
         self._le_staging_dir = QLineEdit(self)
         self._le_output_dir = QLineEdit(self)
-        layout.addLayout(
-            self._dir_row(
-                "Library root",
-                self._le_library_root,
-                "The top-level folder containing your ADF collection.",
-            )
-        )
+        # (GH-186) Library Root is auto-managed; the Library root
+        # textbox and Choose button are removed from this tab.
         layout.addLayout(
             self._dir_row(
                 "Original disks (read-only)",
                 self._le_original_dir,
                 "Where the original .adf files live. This folder is never "
-                "modified — leave it blank to use the default location.",
+                "modified — leave blank to use the default location.",
             )
         )
         layout.addLayout(
@@ -1204,17 +1212,12 @@ class MainWindow(QMainWindow):
         return panel
 
     def _manual_lookup_db_path(self) -> Path:
-        """Canonical DB path: <configured library_root>/curation/canonical.db.
+        """Canonical DB path: <auto-managed Library-Root>/curation/canonical.db.
 
         Matches the path the pipeline writes (pipeline._persist_canonical_
-        library), so the panel browses the same store the run produces. Falls
-        back to the portable app data dir when no library root is configured.
+        library), so the panel browses the same store the run produces.
         """
-        library_root = self._le_library_root.text().strip() if \
-            hasattr(self, "_le_library_root") else ""
-        if library_root:
-            return Path(library_root) / "curation" / "canonical.db"
-        return self._paths.data_dir / "curation" / "canonical.db"
+        return self._library_root / "curation" / "canonical.db"
 
     def _refresh_manual_lookup_panel(self) -> None:
         """Reload the Manual Lookup panel after a run completes (best-effort)."""
@@ -1643,10 +1646,11 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "Help",
-            "1. On the Library tab, point the Library root at your ADF "
-            "collection (the other folders can stay at their defaults).\n"
-            "2. On the Options tab, turn on any options you need (all "
-            "optional; offline is the default).\n"
+            "1. On the Library tab, the Library Root is created "
+            "automatically beside AmigaADFLibraryBuilder.exe. "
+            "Original ADF disks go under Library-Root/original.\n"
+            "2. On the Options tab, turn on any options you need "
+            "(all optional; offline is the default).\n"
             "3. Choose Build or Export in the Run area and press Run.\n"
             "Exporting asks for a final confirmation before writing files. "
             "Online metadata sources are optional and off by default.",
@@ -1744,7 +1748,7 @@ class MainWindow(QMainWindow):
         try:
             state = self._state_from_widgets()
             changes: dict = {
-                "default_library_root": state.library_root,
+                # (GH-186) Library Root is auto-managed; not persisted.
                 "default_original_dir": state.original_dir,
                 "default_staging_dir": state.staging_dir,
                 "default_output_dir": state.output_dir,
@@ -1777,6 +1781,10 @@ class MainWindow(QMainWindow):
             geometry = self._current_persist_geometry()
             if geometry is not None:
                 changes["window_geometry"] = geometry
+            # (GH-186) Clear the legacy default_library_root from the
+            # settings object so it is NOT serialized. Library Root
+            # is auto-managed as <app-base>/Library-Root.
+            self._settings.default_library_root = ""
             self._settings_store.update(**changes)
             return True
         except Exception as exc:  # pragma: no cover - filesystem failure path
@@ -1785,7 +1793,7 @@ class MainWindow(QMainWindow):
 
     def _state_from_widgets(self) -> GuiState:
         state = GuiState(
-            library_root=self._le_library_root.text().strip(),
+            library_root=str(self._library_root),
             original_dir=self._le_original_dir.text().strip(),
             staging_dir=self._le_staging_dir.text().strip(),
             output_dir=self._le_output_dir.text().strip(),
@@ -1834,7 +1842,7 @@ class MainWindow(QMainWindow):
         # restored into the fields, but the user is told so visibly instead of
         # silently. No modal, no clearing, no crash.
         folder_fields = (
-            (self._le_library_root, s.default_library_root),
+            # (GH-186) Library Root is auto-managed; not restored from settings.
             (self._le_original_dir, s.default_original_dir),
             (self._le_staging_dir, s.default_staging_dir),
             (self._le_output_dir, s.default_output_dir),

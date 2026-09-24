@@ -49,7 +49,7 @@ EXPECTED_LABELS = (
     # unmistakable safety acknowledgement (see test_gui_issue43_export_controls).
     "I understand this run will write files",
     "Remember these settings",
-    "Library root",
+    # (GH-186) Library Root is auto-managed; no textbox in the UI.
     "Original disks (read-only)",
     "Export work folder",
     "Export destination",

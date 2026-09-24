@@ -49,7 +49,11 @@ def _make_window(base_dir: Path) -> MainWindow:
 
 
 def _fill_folders(mw: MainWindow, base_dir: Path) -> dict:
-    """Populate the 4 folder fields with fresh tmp dirs + option state."""
+    """Populate the folder fields with fresh tmp dirs + option state.
+
+    (GH-186) Library Root is auto-managed; _le_library_root no longer
+    exists. Only the remaining three folder fields are populated.
+    """
     dirs = {
         "library_root": base_dir / "lib",
         "original_dir": base_dir / "lib" / "original",
@@ -58,7 +62,6 @@ def _fill_folders(mw: MainWindow, base_dir: Path) -> dict:
     }
     for d in dirs.values():
         d.mkdir(parents=True, exist_ok=True)
-    mw._le_library_root.setText(str(dirs["library_root"]))
     mw._le_original_dir.setText(str(dirs["original_dir"]))
     mw._le_staging_dir.setText(str(dirs["staging_dir"]))
     mw._le_output_dir.setText(str(dirs["output_dir"]))
@@ -88,7 +91,8 @@ def test_close_persists_folder_defaults_reopen_restores(qt_offscreen):
 
     pp = PortablePaths(base_dir=base)
     table = _read_gui_table(pp.settings_file())
-    assert table["default_library_root"] == expected["library_root"]
+    # (GH-186) Library Root is auto-managed; not persisted.
+    assert "default_library_root" not in table
     assert table["default_original_dir"] == expected["original_dir"]
     assert table["default_staging_dir"] == expected["staging_dir"]
     assert table["default_output_dir"] == expected["output_dir"]
@@ -97,7 +101,8 @@ def test_close_persists_folder_defaults_reopen_restores(qt_offscreen):
 
     # Reopen a fresh window on the SAME settings file.
     mw2 = _make_window(base)
-    assert mw2._le_library_root.text() == expected["library_root"]
+    # (GH-186) Library Root is auto-managed; no _le_library_root widget.
+    assert not hasattr(mw2, "_le_library_root")
     assert mw2._le_original_dir.text() == expected["original_dir"]
     assert mw2._le_staging_dir.text() == expected["staging_dir"]
     assert mw2._le_output_dir.text() == expected["output_dir"]
@@ -133,7 +138,13 @@ def test_run_and_close_call_sites_write_identical_settings(qt_offscreen):
     for key in SETTINGS_KEYS:
         if key == "window_geometry":
             continue
+        # (GH-186) default_library_root is auto-managed and not persisted.
+        if key == "default_library_root":
+            continue
         assert table_a[key] == table_b[key], f"parity broken on {key!r}"
+    # (GH-186) default_library_root is auto-managed, not persisted.
+    assert "default_library_root" not in table_a
+    assert "default_library_root" not in table_b
     for table in (table_a, table_b):
         assert table["window_geometry"], (
             "window_geometry must be persisted by both call sites (Issue #18)"
@@ -157,7 +168,8 @@ def test_missing_persisted_path_still_shown_and_flagged(qt_offscreen):
 
     mw2 = _make_window(base)
     # Fields are still populated (no silent clear).
-    assert mw2._le_library_root.text() == expected["library_root"]
+    # (GH-186) Library Root is auto-managed; no _le_library_root widget.
+    assert not hasattr(mw2, "_le_library_root")
     assert mw2._le_original_dir.text() == expected["original_dir"]
     assert mw2._le_staging_dir.text() == expected["staging_dir"]
     assert mw2._le_output_dir.text() == expected["output_dir"]

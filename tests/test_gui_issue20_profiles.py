@@ -72,7 +72,10 @@ def main_window(qt_offscreen: Path):
 
 
 def _set_folder_fields(mw, lib, orig, staging, output) -> None:
-    mw._le_library_root.setText(lib)
+    # (GH-186) Library Root is auto-managed; no _le_library_root widget.
+    # Set the internal _library_root so _preset_from_widgets() returns
+    # the correct value for the Preset's library_root field.
+    mw._library_root = Path(lib)
     mw._le_original_dir.setText(orig)
     mw._le_staging_dir.setText(staging)
     mw._le_output_dir.setText(output)
@@ -146,7 +149,8 @@ def test_load_named_profile_applies_paths_and_toggles(main_window, tmp_path: Pat
 
     assert mw._load_profile("Home") is True
 
-    assert mw._le_library_root.text() == lib
+    # (GH-186) Library Root is auto-managed; not restored from widgets.
+    assert not hasattr(mw, "_le_library_root")
     assert mw._le_original_dir.text() == lib + "/original"
     assert mw._le_staging_dir.text() == lib + "/work/staging"
     assert mw._le_output_dir.text() == lib + "/output"
@@ -191,7 +195,8 @@ def test_load_named_profile_round_trip_values_match(main_window, tmp_path: Path)
 
     reloaded = mw2._settings_store.get().presets["Round"]
     assert reloaded.as_dict() == preset.as_dict()
-    assert mw2._le_library_root.text() == preset.library_root
+    # (GH-186) Library Root is auto-managed; no _le_library_root widget.
+    assert not hasattr(mw2, "_le_library_root")
     assert mw2._cb_online.isChecked() is preset.online
     mw2.close()
 
@@ -225,7 +230,8 @@ def test_load_missing_paths_reported_cleanly_not_destructive(
         lambda parent, title, text: warnings.append((title, text)),
     )
     assert mw._load_profile("Ghost") is True
-    assert mw._le_library_root.text() == ghost
+    # (GH-186) Library Root is auto-managed; no _le_library_root widget.
+    assert not hasattr(mw, "_le_library_root")
     assert mw._le_output_dir.text() == ghost + "/output"
     # Warning surfaced (modal box + status label carry the same report).
     assert warnings, "expected a QMessageBox.warning for the missing paths"
@@ -253,7 +259,8 @@ def test_load_unknown_profile_leaves_widgets_untouched(
         lambda parent, title, text: errors.append((title, text)),
     )
     assert mw._load_profile("no-such-profile") is False
-    assert mw._le_library_root.text() == "/keep/me"
+    # (GH-186) Library Root is auto-managed; no _le_library_root widget.
+    assert not hasattr(mw, "_le_library_root")
     assert errors and "no-such-profile" in errors[0][1]
 
 
@@ -296,7 +303,8 @@ def test_last_used_settings_coexist_with_presets(main_window, tmp_path: Path):
     mw._settings_store.save_preset(_make_preset("Lone", lib))
     store1 = SettingsStore(pp.settings_file())
     s1 = store1.load()
-    assert s1.default_library_root == lib
+    # (GH-186) default_library_root is auto-managed, not persisted.
+    assert "default_library_root" not in s1.as_dict()
     assert s1.online is True
     assert "Lone" in s1.presets
 
@@ -305,7 +313,8 @@ def test_last_used_settings_coexist_with_presets(main_window, tmp_path: Path):
     assert mw._load_profile("Lone") is True
     store2 = SettingsStore(pp.settings_file())
     s2 = store2.load()
-    assert s2.default_library_root == lib
+    # (GH-186) default_library_root is auto-managed, not persisted.
+    assert "default_library_root" not in s2.as_dict()
     assert s2.online is True  # _make_preset sets online=True
     assert s2.require_artwork is True
     assert s2.include_artwork is False
