@@ -219,6 +219,33 @@ def main() -> int:
         except Exception as exc:
             _step("screenshot", False, f"grab failed: {exc}")
 
+        # --- (GH-187) Library tab: exactly two folder rows, renamed label --
+        # Verify the GUI no longer exposes _le_output_dir and the staging row
+        # label reads "ADF Library Export Folder" (not "Export work folder" or
+        # "Export destination").
+        has_output_dir_widget = hasattr(mw, "_le_output_dir")
+        _step("gh187_no_output_dir_widget", not has_output_dir_widget,
+              f"_le_output_dir exists={has_output_dir_widget}")
+
+        # Collect all visible label texts from the MainWindow tree
+        from PySide6.QtWidgets import QLabel
+        label_texts: set[str] = set()
+        for lbl in mw.findChildren(QLabel):
+            txt = lbl.text()
+            if txt:
+                label_texts.add(txt)
+
+        has_adf_export_folder = "ADF Library Export Folder" in label_texts
+        has_export_destination = any("Export destination" in t for t in label_texts)
+        has_export_work_folder = any("Export work folder" in t for t in label_texts)
+
+        _step("gh187_label_adf_export_folder", has_adf_export_folder,
+              f"'ADF Library Export Folder' in labels={has_adf_export_folder}")
+        _step("gh187_label_no_export_dest", not has_export_destination,
+              f"'Export destination' absent from labels={not has_export_destination}")
+        _step("gh187_label_no_export_work", not has_export_work_folder,
+              f"'Export work folder' absent={not has_export_work_folder}")
+
         # --- close WITHOUT run -> reopen -> widget-level restore ----------
         # The literal Issue #17 repro on the real runtime: select folders (>=1
         # containing a SPACE), close the app via its NORMAL close path
@@ -238,7 +265,7 @@ def main() -> int:
             d.mkdir(parents=True, exist_ok=True)
         mw._le_original_dir.setText(str(cw_dirs["original_dir"]))
         mw._le_staging_dir.setText(str(cw_dirs["staging_dir"]))
-        mw._le_output_dir.setText(str(cw_dirs["output_dir"]))
+        # (GH-187) _le_output_dir removed — output_dir no longer exposed in GUI
         mw.show()  # window is visible before the normal close
         mw.close()  # NORMAL close path: closeEvent -> _persist_defaults
         # Reopen: a FRESH MainWindow on the same settings file (the one the
@@ -247,21 +274,23 @@ def main() -> int:
             portable_paths=pp,
             settings_store=SettingsStore(pp.settings_file()),
         )
+        # (GH-187) Only check original + staging; output_dir is no longer a widget.
         restored = {
             "original_dir": mw2._le_original_dir.text(),
             "staging_dir": mw2._le_staging_dir.text(),
-            "output_dir": mw2._le_output_dir.text(),
         }
-        expected_cw = {k: str(v) for k, v in cw_dirs.items()}
+        expected_cw = {
+            "original_dir": str(cw_dirs["original_dir"]),
+            "staging_dir": str(cw_dirs["staging_dir"]),
+        }
         match = restored == expected_cw
         _step(
             "close_without_run_restore",
             match,
             f"close_without_run_exercised={match} "
-            f"library_root={str(pp.library_root)!r} "
             f"original_dir={restored['original_dir']!r} "
             f"staging_dir={restored['staging_dir']!r} "
-            f"output_dir={restored['output_dir']!r}",
+            f"output_dir=(widget removed in GH-187)",
         )
         if match:
             REPORT["close_without_run_exercised"] = True
@@ -772,7 +801,12 @@ def main() -> int:
                                      "lb_multi_mappings_added", "lb_check_roots_diagnostic",
                                      "lb_mappings_persist_reopen",
                                      "lb_missing_path_retained_diagnostic",
-                                     "lb_backend_missing_root_diagnostic"))
+                                     "lb_backend_missing_root_diagnostic",
+                                     # (GH-187) export folder simplification
+                                     "gh187_no_output_dir_widget",
+                                     "gh187_label_adf_export_folder",
+                                     "gh187_label_no_export_dest",
+                                     "gh187_label_no_export_work"))
     return 1 if hard_fail else 0
 
 
