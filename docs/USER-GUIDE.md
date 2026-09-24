@@ -173,7 +173,7 @@ The Library tab defines where the application reads and writes data.
 
 The most important setting is the **Library Root**.
 
-Other paths may include the original disk source, export work/staging folder, and export destination.
+Other paths may include the original disk source and ADF Library Export Folder.
 
 ### Recommended approach
 
@@ -191,17 +191,14 @@ D:\AmigaLibrary\original
 
 The application can derive most working paths from the library root.
 
-### Export work folder
+### ADF Library Export Folder
 
-The export work folder is a scratch/staging location used while preparing output.
+The ADF Library Export Folder is where finished export/library files are written.
 
-It is not your preservation source.
+It is the real output location — the folder where the completed library is placed.
 
-### Export destination
+---
 
-The export destination is where finished files are written when you perform an actual export.
-
-Review this path carefully before enabling export.
 
 ---
 
@@ -1130,7 +1127,7 @@ Before a final export, confirm all of the following:
 
 - Correct Library Root
 - Correct Original Disks path
-- Correct Export Destination
+- Correct ADF Library Export Folder
 - No unexpected Needs Review releases
 - No unintended Ghost releases selected for output
 - Important releases have the expected metadata

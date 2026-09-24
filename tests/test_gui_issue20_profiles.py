@@ -71,14 +71,13 @@ def main_window(qt_offscreen: Path):
     mw.close()
 
 
-def _set_folder_fields(mw, lib, orig, staging, output) -> None:
+def _set_folder_fields(mw, lib, orig, staging) -> None:
     # (GH-186) Library Root is auto-managed; no _le_library_root widget.
     # Set the internal _library_root so _preset_from_widgets() returns
     # the correct value for the Preset's library_root field.
     mw._library_root = Path(lib)
     mw._le_original_dir.setText(orig)
     mw._le_staging_dir.setText(staging)
-    mw._le_output_dir.setText(output)
 
 
 def _make_preset(name: str, lib: str) -> Preset:
@@ -106,7 +105,7 @@ def test_save_named_profile_round_trips_to_fresh_store(main_window, tmp_path: Pa
     mw, pp = main_window
     lib = str(tmp_path / "lib")
     (tmp_path / "lib" / "original").mkdir(parents=True)
-    _set_folder_fields(mw, lib, lib + "/original", lib + "/work", lib + "/output")
+    _set_folder_fields(mw, lib, lib + "/original", lib + "/work")
     mw._cb_online.setChecked(True)
     mw._cb_artwork.setChecked(True)
     mw._cb_include_artwork.setChecked(False)
@@ -126,7 +125,8 @@ def test_save_named_profile_round_trips_to_fresh_store(main_window, tmp_path: Pa
     assert p.library_root == lib
     assert p.original_dir == lib + "/original"
     assert p.staging_dir == lib + "/work"
-    assert p.output_dir == lib + "/output"
+    # (GH-187) output_dir is no longer exposed by the GUI; Preset gets empty string.
+    assert p.output_dir == ""
     assert p.online is True
     assert p.require_artwork is True
     assert p.include_artwork is False
@@ -142,7 +142,7 @@ def test_load_named_profile_applies_paths_and_toggles(main_window, tmp_path: Pat
     mw._settings_store.save_preset(_make_preset("Home", lib))
 
     # Disturb the widgets first, so a successful load must visibly change them.
-    _set_folder_fields(mw, "/somewhere/else", "", "", "")
+    _set_folder_fields(mw, "/somewhere/else", "", "")
     mw._cb_online.setChecked(False)
     mw._cb_artwork.setChecked(False)
     mw._cb_include_artwork.setChecked(True)
@@ -153,7 +153,6 @@ def test_load_named_profile_applies_paths_and_toggles(main_window, tmp_path: Pat
     assert not hasattr(mw, "_le_library_root")
     assert mw._le_original_dir.text() == lib + "/original"
     assert mw._le_staging_dir.text() == lib + "/work/staging"
-    assert mw._le_output_dir.text() == lib + "/output"
     assert mw._cb_online.isChecked() is True
     assert mw._cb_artwork.isChecked() is True
     assert mw._cb_include_artwork.isChecked() is False
@@ -231,8 +230,8 @@ def test_load_missing_paths_reported_cleanly_not_destructive(
     )
     assert mw._load_profile("Ghost") is True
     # (GH-186) Library Root is auto-managed; no _le_library_root widget.
-    assert not hasattr(mw, "_le_library_root")
-    assert mw._le_output_dir.text() == ghost + "/output"
+    # (GH-187) output_dir is no longer exposed in the GUI; no widget to check.
+    assert not hasattr(mw, "_le_output_dir")
     # Warning surfaced (modal box + status label carry the same report).
     assert warnings, "expected a QMessageBox.warning for the missing paths"
     assert warnings[0][0] == "Load Profile"
@@ -251,7 +250,7 @@ def test_load_unknown_profile_leaves_widgets_untouched(
     from amiga_adf_library_builder.gui import main_window as mw_module
 
     mw, _pp = main_window
-    _set_folder_fields(mw, "/keep/me", "", "", "")
+    _set_folder_fields(mw, "/keep/me", "", "")
     errors: list[tuple[str, str]] = []
     monkeypatch.setattr(
         mw_module.QMessageBox,
@@ -270,7 +269,7 @@ def test_saved_profile_file_contains_no_secret(main_window, tmp_path: Path):
     lib = str(tmp_path / "library4")
     mw._settings_store.save_preset(_make_preset("Clean", lib))
     # Also exercise the Save Profile As collection path end to end.
-    _set_folder_fields(mw, lib, lib + "/original", lib + "/work", lib + "/out")
+    _set_folder_fields(mw, lib, lib + "/original", lib + "/work")
     preset = mw._preset_from_widgets()
     preset.name = "Clean2"
     mw._settings_store.save_preset(preset)
@@ -295,7 +294,7 @@ def test_last_used_settings_coexist_with_presets(main_window, tmp_path: Path):
         (tmp_path / "lib5" / sub).mkdir(parents=True, exist_ok=True)
 
     # Automatic last-used persistence still runs and writes the [gui] table.
-    _set_folder_fields(mw, lib, lib + "/original", lib + "/work", lib + "/output")
+    _set_folder_fields(mw, lib, lib + "/original", lib + "/work")
     mw._cb_online.setChecked(True)
     assert mw._persist_defaults() is True
 
@@ -349,7 +348,7 @@ def test_preset_from_widgets_never_reads_secret_store(main_window):
     """Security: the collect path builds a Preset without SecretStore access."""
     mw, _pp = main_window
     lib = str(Path("/tmp") / "profile-test-lib")
-    _set_folder_fields(mw, lib, "", "", "")
+    _set_folder_fields(mw, lib, "", "")
     # Spy on the secret store: any read during collection is a failure.
     original = mw._secret_store
     calls = []

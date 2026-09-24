@@ -134,6 +134,8 @@ class Settings:
     default_library_root: str = ""
     default_original_dir: str = ""
     default_staging_dir: str = ""
+    # (GH-187) Deprecated: no longer exposed in the GUI; retained for
+    # backward-compatible settings file loading only.
     default_output_dir: str = ""
     online: bool = False
     refresh_metadata: bool = False
@@ -331,6 +333,8 @@ class Preset:
     library_root: str = ""
     original_dir: str = ""
     staging_dir: str = ""
+    # (GH-187) Deprecated: no longer exposed in the GUI; retained for
+    # backward-compatible preset file loading only.
     output_dir: str = ""
     online: bool = False
     refresh_metadata: bool = False

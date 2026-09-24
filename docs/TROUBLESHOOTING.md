@@ -846,7 +846,7 @@ Export the library
 I understand this run will write files
 Check only
 Require artwork before export
-Export destination
+ADF Library Export Folder
 ```
 
 Possible causes:
@@ -875,7 +875,7 @@ Check-only validates without writing final files.
 
 ---
 
-# 41. Export destination is wrong
+# 41. Export folder not set
 
 Do not run export.
 
