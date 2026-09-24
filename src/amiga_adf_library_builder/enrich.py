@@ -78,6 +78,9 @@ class EnrichResult:
     provider: str = ""
     artwork_missing: bool = False
     events: list = field(default_factory=list)
+    # DAT/local metadata results per release, with source identifiers.
+    # Each entry: {"source_id", "source_name", "match_type", "title", "matched"}.
+    dat_results: list = field(default_factory=list)
     # Cross-provider fail-safe flag. Set True when two enabled hash-first identity
     # providers (Playmatch + Hasheous) resolve the SAME sha256 to DISAGREEING
     # exact-hash identities; the group is routed to manual review rather than
@@ -897,12 +900,13 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
     # (GH-164 RC4) DAT/local metadata participation.
     # Queryed after exact-hash providers and before online metadata,
     # with identity outranking fuzzy online title matches.
+    # Each disk's sha256 is queried independently so multi-disk
+    # releases can match on any disk.
     _dat_events: list[EnrichEvent] = []
-    _dat_source_id: str = ""
+    _dat_results: list[dict] = []  # per-disk match results with source info
     if metadata_source_manager is not None:
         try:
             _act("Checking DAT/local metadata sources…")
-            # Emit dat_loaded event once per run (counted via source manager)
             _sources = metadata_source_manager.list_sources()
             _enabled_sources = [s for s in _sources if s.enabled]
             if _enabled_sources:
@@ -911,18 +915,24 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                     detail=f"dat_loaded sources={len(_enabled_sources)} entries={sum(s.entry_count for s in _enabled_sources)}",
                     cache="hit", ok=True,
                 ))
-                # Query by sha256 first (exact-hash precedence)
-                _sha = None
+                # Query by sha256 for each disk (exact-hash precedence)
+                _sha_matches = []
                 for _rec in scans.values():
                     _sha = getattr(_rec, "sha256", None)
                     if _sha:
-                        break
-                _dat_matches = []
-                if _sha:
-                    _dat_matches = metadata_source_manager.lookup_by_sha256(_sha)
-                if _dat_matches:
-                    _dat_entry = _dat_matches[0]
-                    _dat_source_id = _dat_entry.source_id
+                        _disk_matches = metadata_source_manager.lookup_by_sha256(_sha)
+                        if _disk_matches:
+                            for _entry in _disk_matches:
+                                _sha_matches.append({
+                                    "entry": _entry,
+                                    "sha256": _sha,
+                                    "source_id": _entry.source_id,
+                                    "source_name": _entry.source_id,
+                                    "match_type": "sha256",
+                                })
+                if _sha_matches:
+                    # Use the first sha256 match; track all for diagnostics
+                    _dat_entry = _sha_matches[0]["entry"]
                     metadata = MetadataRecord(
                         canonical_title=_dat_entry.title or lookup_title or group.title or "Unknown",
                         description=_dat_entry.title,
@@ -932,11 +942,19 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                     )
                     metadata.provider = "dat"
                     metadata.confidence = 1.0
-                    _dat_events.append(EnrichEvent(
-                        category=EnrichCategory.DAT,
-                        detail=f"dat_hash_match source={_dat_entry.source_id} title={_dat_entry.title!r}",
-                        cache="hit", ok=True,
-                    ))
+                    for _m in _sha_matches:
+                        _dat_events.append(EnrichEvent(
+                            category=EnrichCategory.DAT,
+                            detail=f"dat_hash_match source={_m['source_id']} title={_m['entry'].title!r} disk_sha256={_m['sha256'][:8]}",
+                            cache="hit", ok=True,
+                        ))
+                        _dat_results.append({
+                            "source_id": _m["source_id"],
+                            "source_name": _m["source_name"],
+                            "match_type": "sha256",
+                            "title": _m["entry"].title,
+                            "matched": True,
+                        })
                     _act(f"DAT hash match: {_dat_entry.title}")
                 else:
                     # Fallback: title-based lookup
@@ -945,18 +963,31 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                     )
                     if _title_matches:
                         _dat_entry = _title_matches[0]
-                        _dat_source_id = _dat_entry.source_id
                         _dat_events.append(EnrichEvent(
                             category=EnrichCategory.DAT,
                             detail=f"dat_title_candidate source={_dat_entry.source_id} title={_dat_entry.title!r}",
                             cache="hit", ok=True,
                         ))
+                        _dat_results.append({
+                            "source_id": _dat_entry.source_id,
+                            "source_name": _dat_entry.source_id,
+                            "match_type": "title",
+                            "title": _dat_entry.title,
+                            "matched": True,
+                        })
                     else:
                         _dat_events.append(EnrichEvent(
                             category=EnrichCategory.DAT,
                             detail="dat_no_match",
                             cache="miss", ok=True,
                         ))
+                        _dat_results.append({
+                            "source_id": "",
+                            "source_name": "",
+                            "match_type": "",
+                            "title": "",
+                            "matched": False,
+                        })
             else:
                 _dat_events.append(EnrichEvent(
                     category=EnrichCategory.DAT,
@@ -1506,7 +1537,7 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
     _review_items = _build_review_items(events)
     return EnrichResult(nfo_path, master, processed, processed is None, notes, metadata_path, provider, processed is None, events, needs_manual_review=needs_manual_review,
                         metadata_confidence=(metadata.confidence if metadata is not None else None),
-                        review_items=_review_items)
+                        review_items=_review_items, dat_results=_dat_results)
 
 
 def enrich_all(groups: list[ReleaseGroup], *, nfo_dir: Path, scans: list[ScanRecord],

@@ -102,6 +102,20 @@ def _xdg_cache_path() -> Path:
     return (base / XDG_CACHE_REL).resolve()
 
 
+def _portable_cache_path(library_root: Path) -> Path:
+    """Resolve cache for portable/packaged builds.
+
+    When the AMIGA_ADF_PORTABLE environment variable is set, the cache
+    lives under the library_root/data/cache instead of the user profile
+    (~/.cache). This ensures the packaged Windows GUI uses a cache
+    adjacent to the executable that is deterministic and not silently
+    shared across installations.
+    """
+    if os.environ.get("AMIGA_ADF_PORTABLE"):
+        return _derive(library_root, "data", "cache").resolve()
+    return _xdg_cache_path()
+
+
 def _resolve(value: object) -> Path:
     """Resolve ``value`` to an absolute, symlink-resolved ``Path``.
 
@@ -291,7 +305,7 @@ def _build_config(
     )
     reports = _opt_resolve(explicit.get("reports_dir")) or _derive(root, "reports")
     logs = _opt_resolve(explicit.get("logs_dir")) or _derive(root, "logs")
-    cache = _opt_resolve(explicit.get("cache_dir")) or _xdg_cache_path()
+    cache = _opt_resolve(explicit.get("cache_dir")) or _portable_cache_path(root)
 
     cfg = PathConfig(
         library_root=root,

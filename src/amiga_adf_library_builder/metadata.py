@@ -340,6 +340,26 @@ class LemonAmigaConfig:
         )
 
 
+_ARTICLES_SET = frozenset({"the", "a", "an"})
+
+def _strip_subtitle(title: str) -> str:
+    """Strip subtitle and leading article for matching.
+
+    Returns the main title portion before any subtitle separator,
+    with a leading article removed so that ``"The X"`` and
+    ``"X"`` normalize identically. This is generic.
+    """
+    # Match colon or em-dash surrounded by optional spaces, not inside parens.
+    m = re.search(r"\s*(?:[:—‑–])\s", title)
+    if m and m.start() > 2:
+        title = title[:m.start()].strip()
+    # Strip leading article for article-movement symmetry.
+    words = title.split()
+    if len(words) >= 2 and words[0].lower() in _ARTICLES_SET:
+        title = " ".join(words[1:])
+    return title
+
+
 def _norm(value: str) -> str:
     # Delegate to canonical_title for universal roman/arabic,
     # article-movement, and disambiguator normalization.
@@ -408,9 +428,19 @@ def validate_metadata_relevance(requested_title: str, record: "MetadataRecord",
       * a near-miss but different game -> rejected (reason ``different_game``).
     """
     evidence: list[str] = []
-    target = _norm(requested_title)
-    candidate = _norm(canonical_title(record.canonical_title or requested_title))
+    # Strip subtitles from both requested title and candidate before
+    # normalization so that "Bard's Tale III" matches
+    # "The Bard's Tale III: Thief of Fate" deterministically.
+    # This is generic — subtitles are not title-specific.
+    target = _norm(_strip_subtitle(requested_title))
+    candidate_raw = _strip_subtitle(record.canonical_title or requested_title)
+    candidate = _norm(candidate_raw)
     ratio = SequenceMatcher(None, target, candidate).ratio() if (target or candidate) else 0.0
+
+    # Track subtitle evidence for explainable diagnostics.
+    subtitle_stripped = (candidate_raw != (record.canonical_title or requested_title))
+    if subtitle_stripped:
+        evidence.append("subtitle_stripped")
 
     # --- Strong positive: canonical identity (possibly with edition suffix) ---
     exact_identity = (target != "" and candidate != "" and (

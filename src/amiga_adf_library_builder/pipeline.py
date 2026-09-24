@@ -452,7 +452,6 @@ def run_pipeline(
             )
             if igdb_cfg.enabled:
                 # Credentials from environment / SecretStore
-                import os
                 client_id = os.environ.get("IGDB_CLIENT_ID", "").strip()
                 client_secret = os.environ.get("IGDB_CLIENT_SECRET", "").strip()
                 if client_id and client_secret:
@@ -482,7 +481,6 @@ def run_pipeline(
             )
             if ss_cfg.enabled:
                 # Credentials from environment / SecretStore
-                import os
                 dev_id = os.environ.get("SCREENSCRAPER_DEV_ID", "").strip()
                 dev_password = os.environ.get("SCREENSCRAPER_DEV_PASSWORD", "").strip()
                 softname = os.environ.get("SCREENSCRAPER_SOFTNAME", "AmigaADFLibraryBuilder").strip()
@@ -516,7 +514,6 @@ def run_pipeline(
                 load_retroachievements_config(retroachievements_config_path)
             )
             if ra_cfg.enabled:
-                import os
                 ra_api_key = os.environ.get("RETROACHIEVEMENTS_API_KEY", "").strip()
                 if ra_api_key:
                     retroachievements_provider = ra_mod.RetroAchievementsProvider(
@@ -1045,6 +1042,25 @@ def run_pipeline(
         _pg["canonical_proposed_name"]["basename"] = _pg["folder"]
         _pg["rtfm_results"] = _rtfm_by_key.get(_pg["release_key"], [])
 
+    # (GH-192) Add DAT/local metadata diagnostics to per_group.
+    # Each enrich result carries dat_results with per-source match info.
+    for _pg in per_group:
+        _rk = _pg["release_key"]
+        # Find the matching EnrichResult by index (enrich_results aligns with groups)
+        _idx = None
+        for _i, _g in enumerate(groups):
+            if _g.release_key == _rk:
+                _idx = _i
+                break
+        if _idx is not None and _idx < len(enrich_results):
+            _er = enrich_results[_idx]
+            _dat = getattr(_er, "dat_results", [])
+            _pg["dat_results"] = _dat
+            _pg["dat_attempts"] = len(_dat)
+            _pg["dat_matches"] = sum(1 for d in _dat if d.get("matched"))
+            _pg["dat_no_match"] = sum(1 for d in _dat if not d.get("matched"))
+            _pg["dat_source_ids"] = list(set(d.get("source_id", "") for d in _dat if d.get("source_id")))
+
     # (GH-44) Run-level provider-attempt diagnostics: derive one structured
     # attempt per (provider, release) from the events above, then roll the
     # attempts up into per-provider success/failure counts, sanitized error
@@ -1081,12 +1097,81 @@ def run_pipeline(
             "error": "diagnostics roll-up failed",
         }
 
+    # Build release_key-indexed diagnostic maps to eliminate
+    # positional coupling between release groups and their results.
+    # (GH-192 Defect 3: each release heading owns its own metadata,
+    # NFO, artwork, notes, and provider provenance.)
+    _rk_provider_map: dict[str, str] = {}
+    _rk_metadata_map: dict[str, str] = {}
+    _rk_nfo_map: dict[str, str] = {}
+    _rk_artwork_map: dict[str, str] = {}
+    _rk_identified_map: dict[str, bool] = {}
+    _rk_unresolved_map: dict[str, bool] = {}
+    _rk_review_map: dict[str, bool] = {}
+    _rk_exact_map: dict[str, bool] = {}
+    _rk_fuzzy_map: dict[str, bool] = {}
+    _rk_notes_map: dict[str, list[str]] = {}
+    for _g, _r in zip(groups, enrich_results):
+        _rk = str(_g.release_key)
+        if _r.provider:
+            _rk_provider_map[_rk] = _r.provider
+        if _r.metadata_path:
+            _rk_metadata_map[_rk] = str(_r.metadata_path)
+        if _r.nfo_path:
+            _rk_nfo_map[_rk] = str(_r.nfo_path)
+        if _r.artwork_resized:
+            _rk_artwork_map[_rk] = str(_r.artwork_resized)
+        _rk_notes_map[_rk] = list(_r.notes)
+        _conf = _r.metadata_confidence or 0.0
+        if _conf >= 0.90:
+            _rk_identified_map[_rk] = True
+            _rk_exact_map[_rk] = True
+        else:
+            _rk_identified_map[_rk] = False
+            _rk_exact_map[_rk] = False
+        if not _r.metadata_path and not _r.nfo_path and not _r.artwork_master:
+            _rk_unresolved_map[_rk] = True
+        else:
+            _rk_unresolved_map[_rk] = False
+        if _r.needs_manual_review or _r.review_items:
+            _rk_review_map[_rk] = True
+        else:
+            _rk_review_map[_rk] = False
+        if _conf < 0.90 or (_r.needs_manual_review and not _conf):
+            _rk_fuzzy_map[_rk] = True
+        else:
+            _rk_fuzzy_map[_rk] = False
+
+    # (GH-192 Defect 4) Cache portability diagnostics.
+    # Expose the resolved cache path so operators can verify
+    # whether the portable or user-profile cache is in use.
+    _cache_path_str = str(cfg.cache_dir)
+    _is_portable = bool(os.environ.get("AMIGA_ADF_PORTABLE"))
+
     result: dict = {
         "run_id": run_id,
         "online": online,
         # (GH-24) The operator's per-type selection is recorded for observability.
         "include_artwork": bool(include_artwork),
         "include_manuals_rtfm": bool(include_manuals_rtfm),
+        # (GH-192 Defect 4) Cache portability diagnostics.
+        "resolved_cache_dir": _cache_path_str,
+        "portable_cache_mode": _is_portable,
+        "cache_hit_source": "user_profile" if not _is_portable else "portable_library",
+        # (GH-192 Defect 3) Release-key-indexed maps replace flat lists
+        # to prevent positional coupling between releases and diagnostics.
+        "release_keys": list(str(g.release_key) for g in groups),
+        "release_metadata_providers": _rk_provider_map,
+        "release_metadata_records": _rk_metadata_map,
+        "release_nfo_written": _rk_nfo_map,
+        "release_artwork_resized": _rk_artwork_map,
+        "release_enrichment_notes": _rk_notes_map,
+        "release_identified": _rk_identified_map,
+        "release_unresolved": _rk_unresolved_map,
+        "release_review_required": _rk_review_map,
+        "release_exact_or_authoritative": _rk_exact_map,
+        "release_fuzzy_or_manual": _rk_fuzzy_map,
+        # Flat compatibility lists (deprecated, keyed maps above are authoritative)
         "metadata_providers": [r.provider for r in enrich_results],
         "metadata_records": [str(r.metadata_path) for r in enrich_results if r.metadata_path],
         "files_scanned": len(scans),
@@ -1105,7 +1190,6 @@ def run_pipeline(
         "review_routed": quarantine_summary["review"],
         "review_routed_count": len(quarantine_summary["review"]),
         "review_items_count": len(_all_review_items),
-        # (GH-164 RC7) Result semantics: split identified vs unresolved
         "identified": [
             r.metadata_path or r.nfo_path
             for r in enrich_results
@@ -1122,7 +1206,6 @@ def run_pipeline(
         ],
         "provider_failures": provider_diagnostics.get("totals", {}).get("error", 0),
         "dat_failures": len(_all_review_items),
-        # (GH-164 RC7) Split between authoritative and fuzzy matches
         "exact_or_authoritative": [
             str(g.release_key) for g, r in zip(groups, enrich_results)
             if r.metadata_confidence and r.metadata_confidence >= 0.90
