@@ -213,3 +213,12 @@
 - Replaced skeletal exported NFO generation with rich cached enrichment output.
 - Bundled curated records for the four currently accepted releases.
 - Added online-provider and cache tests.
+
+## Unreleased
+
+### GH-187 — Simplify export folder configuration
+
+- Removed redundant "Export destination" row from the Library tab; the GUI no longer exposes or persists `output_dir`.
+- Renamed "Export work folder" to "ADF Library Export Folder" to accurately describe where finished export/library files are written.
+- Existing configured export paths are preserved; `default_output_dir` and `Preset.output_dir` fields retained for backward compatibility.
+- The CLI `--output-dir` flag and `output_dir` config key remain unchanged (valid-but-unused in the current pipeline).

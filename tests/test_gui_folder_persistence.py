@@ -58,13 +58,11 @@ def _fill_folders(mw: MainWindow, base_dir: Path) -> dict:
         "library_root": base_dir / "lib",
         "original_dir": base_dir / "lib" / "original",
         "staging_dir": base_dir / "work" / "staging",
-        "output_dir": base_dir / "out",
     }
     for d in dirs.values():
         d.mkdir(parents=True, exist_ok=True)
     mw._le_original_dir.setText(str(dirs["original_dir"]))
     mw._le_staging_dir.setText(str(dirs["staging_dir"]))
-    mw._le_output_dir.setText(str(dirs["output_dir"]))
     mw._cb_online.setChecked(True)
     mw._cb_refresh.setChecked(True)
     return {k: str(v) for k, v in dirs.items()}
@@ -95,7 +93,6 @@ def test_close_persists_folder_defaults_reopen_restores(qt_offscreen):
     assert "default_library_root" not in table
     assert table["default_original_dir"] == expected["original_dir"]
     assert table["default_staging_dir"] == expected["staging_dir"]
-    assert table["default_output_dir"] == expected["output_dir"]
     assert table["online"] is True
     assert table["refresh_metadata"] is True
 
@@ -105,7 +102,6 @@ def test_close_persists_folder_defaults_reopen_restores(qt_offscreen):
     assert not hasattr(mw2, "_le_library_root")
     assert mw2._le_original_dir.text() == expected["original_dir"]
     assert mw2._le_staging_dir.text() == expected["staging_dir"]
-    assert mw2._le_output_dir.text() == expected["output_dir"]
     assert mw2._cb_online.isChecked() is True
     mw2.close()
 
@@ -160,11 +156,9 @@ def test_missing_persisted_path_still_shown_and_flagged(qt_offscreen):
     mw1.show()
     mw1.close()
 
-    # Delete two of the four persisted directories (simulate another machine).
+    # Delete the persisted staging directory (simulate another machine).
     gone_staging = Path(expected["staging_dir"])
-    gone_output = Path(expected["output_dir"])
     gone_staging.rmdir()
-    gone_output.rmdir()
 
     mw2 = _make_window(base)
     # Fields are still populated (no silent clear).
@@ -172,12 +166,10 @@ def test_missing_persisted_path_still_shown_and_flagged(qt_offscreen):
     assert not hasattr(mw2, "_le_library_root")
     assert mw2._le_original_dir.text() == expected["original_dir"]
     assert mw2._le_staging_dir.text() == expected["staging_dir"]
-    assert mw2._le_output_dir.text() == expected["output_dir"]
     # The graceful/visible signal names exactly the missing paths.
     status = mw2._status_label.text()
     assert "Persisted path(s) not found" in status
     assert str(gone_staging) in status
-    assert str(gone_output) in status
     # Paths that DO exist must not be flagged.
     assert expected["library_root"] not in status
     assert expected["original_dir"] not in status

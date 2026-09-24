@@ -89,6 +89,11 @@ def test_settings_file_contains_no_secret(tmp_path: Path):
     # Defensive: a settings file must never carry secret-shaped keys.
     for forbidden in ("token", "api_key", "secret", "password", "bearer"):
         assert forbidden not in text.lower(), f"secret key leaked into settings: {forbidden}"
+    # (GH-187) default_output_dir still loads from file (back-compat)
+    # but is no longer exposed as a GUI widget.
+    s2 = store.load()
+    assert hasattr(s2, "default_output_dir")
+    assert s2.default_output_dir == "/data/lib/output"
 
 
 def test_settings_default_is_system_theme(tmp_path: Path):

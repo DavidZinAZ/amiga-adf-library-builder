@@ -51,8 +51,7 @@ EXPECTED_LABELS = (
     "Remember these settings",
     # (GH-186) Library Root is auto-managed; no textbox in the UI.
     "Original disks (read-only)",
-    "Export work folder",
-    "Export destination",
+    "ADF Library Export Folder",
 )
 
 #: Buttons that open a dialog/folder picker must end with an ellipsis.

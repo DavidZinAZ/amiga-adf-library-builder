@@ -347,7 +347,6 @@ Confirm the resolved source/original directory points to the location containing
 Before running an export, also verify:
 
 - Export work/staging path
-- Export destination
 
 For your first run, use **Build the library**, not a final export.
 

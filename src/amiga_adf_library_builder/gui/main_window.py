@@ -588,7 +588,7 @@ class MainWindow(QMainWindow):
         self._cb_gate.stateChanged.connect(self._update_export_state_display)
         self._cb_verify.stateChanged.connect(self._update_export_state_display)
         self._cb_artwork.stateChanged.connect(self._update_export_state_display)
-        self._le_output_dir.textChanged.connect(self._update_export_state_display)
+        # output_dir no longer exposed in GUI; export writes to staging_dir
 
     def _dir_row(self, label: str, line_edit: QLineEdit, tooltip: str = "") -> QHBoxLayout:
         row = QHBoxLayout()
@@ -607,7 +607,6 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(w)
         self._le_original_dir = QLineEdit(self)
         self._le_staging_dir = QLineEdit(self)
-        self._le_output_dir = QLineEdit(self)
         # (GH-186) Library Root is auto-managed; the Library root
         # textbox and Choose button are removed from this tab.
         layout.addLayout(
@@ -620,19 +619,13 @@ class MainWindow(QMainWindow):
         )
         layout.addLayout(
             self._dir_row(
-                "Export work folder",
+                "ADF Library Export Folder",
                 self._le_staging_dir,
-                "A scratch area where export files are prepared before the "
-                "final export. Safe to delete — it is rebuilt on every export. "
-                "Leave blank to use the default location.",
-            )
-        )
-        layout.addLayout(
-            self._dir_row(
-                "Export destination",
-                self._le_output_dir,
-                "Where the finished export files are written. Leave blank to "
-                "use the default location.",
+                "Where the finished export/library files are written. "
+                "This is the real output location — the folder where the "
+                "completed library is placed. Safe to delete — it is "
+                "rebuilt on every export. Leave blank to use the default "
+                "location.",
             )
         )
         layout.addStretch(1)
@@ -1796,7 +1789,7 @@ class MainWindow(QMainWindow):
             library_root=str(self._library_root),
             original_dir=self._le_original_dir.text().strip(),
             staging_dir=self._le_staging_dir.text().strip(),
-            output_dir=self._le_output_dir.text().strip(),
+            output_dir="",
             online=self._cb_online.isChecked(),
             refresh_metadata=self._cb_refresh.isChecked(),
             require_artwork=self._cb_artwork.isChecked(),
@@ -1845,7 +1838,6 @@ class MainWindow(QMainWindow):
             # (GH-186) Library Root is auto-managed; not restored from settings.
             (self._le_original_dir, s.default_original_dir),
             (self._le_staging_dir, s.default_staging_dir),
-            (self._le_output_dir, s.default_output_dir),
         )
         missing: list[str] = []
         for line_edit, value in folder_fields:
@@ -1896,11 +1888,11 @@ class MainWindow(QMainWindow):
         """Update the pre-run export state summary label and destination preview."""
         # Update destination preview
         if self._mode_export.isChecked():
-            output_dir = self._le_output_dir.text().strip()
-            if output_dir:
-                self._export_dest_label.setText(f"Export destination: {output_dir}")
+            staging_dir = self._le_staging_dir.text().strip()
+            if staging_dir:
+                self._export_dest_label.setText(f"ADF Library Export Folder: {staging_dir}")
             else:
-                self._export_dest_label.setText("Export destination: (using default from configuration)")
+                self._export_dest_label.setText("ADF Library Export Folder: (using default from configuration)")
         else:
             self._export_dest_label.setText("")
 
@@ -1935,8 +1927,8 @@ class MainWindow(QMainWindow):
             return
 
         will_export = True
-        if will_export and not self._le_output_dir.text().strip():
-            reasons.append("output directory not set (the default will be used)")
+        if will_export and not self._le_staging_dir.text().strip():
+            reasons.append("export folder not set (the default will be used)")
 
         if will_export:
             self._export_state_label.setText(

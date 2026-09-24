@@ -106,8 +106,7 @@ The visible path controls include:
 ```text
 Library Root
 Original Disks
-Export work folder
-Export destination
+ADF Library Export Folder
 ```
 
 Each path row has a:
@@ -164,17 +163,17 @@ Treat this as read-only source material.
 
 ---
 
-## 4.3 Export work folder
+## 4.3 ADF Library Export Folder
 
-This is the staging/scratch location used while export output is being prepared.
+This is the real output location — the folder where finished export/library files are written.
 
-The interface describes it as a work area that can be rebuilt.
+The interface describes it as the folder where the completed library is placed.
 
 It should not point at your original disk directory.
 
 ---
 
-## 4.4 Export destination
+## 4.4 ADF Library Export Folder
 
 This is where final exported files are written when actual export mode is enabled.
 
@@ -2053,7 +2052,7 @@ This provides provenance for which release was selected during export.
 
 ---
 
-# 79. Export destination preview
+# 79. ADF Library Export Folder preview
 
 The GUI shows the resolved export destination in the Run / Export area.
 
@@ -2211,7 +2210,7 @@ Confirm:
 ```text
 Library Root is correct
 Original Disks path is correct
-Export destination is correct
+ADF Library Export Folder is correct
 Needs Review queue is understood
 Missing Artwork is acceptable or resolved
 Missing RTFM is acceptable or resolved
