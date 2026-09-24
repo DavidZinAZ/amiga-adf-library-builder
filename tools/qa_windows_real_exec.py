@@ -70,6 +70,11 @@ def main() -> int:
     # ------------------------------------------------------------------ #
     # 1) LAUNCH the real standalone exe (clean Windows launch, offscreen)
     # ------------------------------------------------------------------ #
+    # QA_GUI_BASE is an explicit portable-base override. GH-186 now treats
+    # an explicitly supplied base as operator-owned and requires that base
+    # directory itself to exist; the application creates its managed
+    # children, not the base itself.
+    base_dir.mkdir(parents=True, exist_ok=True)
     if exe.is_file():
         env = dict(os.environ)
         env["AMIGA_ADF_GUI_BASE"] = str(base_dir)
@@ -253,7 +258,7 @@ def main() -> int:
             "close_without_run_restore",
             match,
             f"close_without_run_exercised={match} "
-            f"library_root={restored['library_root']!r} "
+            f"library_root={str(pp.library_root)!r} "
             f"original_dir={restored['original_dir']!r} "
             f"staging_dir={restored['staging_dir']!r} "
             f"output_dir={restored['output_dir']!r}",
@@ -430,8 +435,8 @@ def main() -> int:
         pp_gh86.ensure_all()
         cfg_gh86 = build_path_config_from_gui_state(state)
         ensure_managed_directories(cfg_gh86)
-        kwargs_gh86 = build_pipeline_kwargs(state, cfg_gh86)
-        result_gh86 = run_pipeline(**kwargs_gh86)
+        run_cfg_gh86, kwargs_gh86 = build_pipeline_kwargs(state, cfg_gh86)
+        result_gh86 = run_pipeline(run=run_cfg_gh86, **kwargs_gh86)
         gh86_report["library_populated"] = bool(result_gh86.get("per_group"))
         _gh86_step("gh86_populated_pipeline", gh86_report["library_populated"],
                     f"groups={result_gh86.get('groups', 0)}")
@@ -580,8 +585,8 @@ def main() -> int:
         pp_gh90.ensure_all()
         cfg_gh90 = build_path_config_from_gui_state(state)
         ensure_managed_directories(cfg_gh90)
-        kwargs_gh90 = build_pipeline_kwargs(state, cfg_gh90)
-        result_gh90 = run_pipeline(**kwargs_gh90)
+        run_cfg_gh90, kwargs_gh90 = build_pipeline_kwargs(state, cfg_gh90)
+        result_gh90 = run_pipeline(run=run_cfg_gh90, **kwargs_gh90)
         pipeline_ok = bool(result_gh90.get("per_group"))
         _gh90_step("gh90_pipeline_populated", pipeline_ok, f"groups={result_gh90.get('groups', 0)}")
 
