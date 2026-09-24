@@ -97,23 +97,26 @@ def test_language_collision_preserves_both_releases(tmp_path):
 # --- C. Alternate-marker collision ------------------------------------------
 
 
-def test_alt_marker_collision_preserves_both_releases(tmp_path):
-    original_dir = tmp_path / "original"
-    _write_original(original_dir, "Game One [a] (Disk 1 of 1).adf", b"DISK_A")
-    _write_original(original_dir, "Game One [a2] (Disk 1 of 1).adf", b"DISK_A2")
-    res, staging = _export_paired(
-        original_dir,
-        ["Game One [a] (Disk 1 of 1).adf", "Game One [a2] (Disk 1 of 1).adf"],
+def test_alt_marker_same_release_not_split(tmp_path):
+    """GH-190: Different alt markers ([a] vs [a2]) on the same game must
+    NOT split into separate releases. They are disk provenance, not
+    release identity.
+
+    Regression test for GH-190: pre-fix, _build_release_key() included
+    alt_marker, causing [a] and [a2] to create different release keys.
+    """
+    from amiga_adf_library_builder.parser import parse_filename
+    from amiga_adf_library_builder.grouper import group_records
+
+    r1 = parse_filename("Game One [a] (Disk 1 of 1).adf")
+    r2 = parse_filename("Game One [a2] (Disk 1 of 1).adf")
+    groups = group_records([r1, r2])
+    assert len(groups) == 1, (
+        f"GH-190: Different alt markers must NOT split releases. "
+        f"Expected 1 group, got {len(groups)}"
     )
-    assert res.releases_exported == 2
-    adf = staging / "ADF"
-    folders = sorted(p.name for p in adf.iterdir() if p.is_dir())
-    # GH-183: no alt_marker qualifier in folder name; hash suffix disambiguates.
-    assert len(folders) == 2
-    for name in folders:
-        assert name.startswith("Game One [") and name.endswith("]"), name
-    contents = {p.read_bytes() for p in adf.rglob("*.adf")}
-    assert contents == {b"DISK_A", b"DISK_A2"}
+    assert len(groups[0].records) == 2
+    assert groups[0].alt_marker == "a"  # first record's alt_marker preserved
 
 
 # --- D. Sanitization collision (residual FAT32-collapse guard) --------------

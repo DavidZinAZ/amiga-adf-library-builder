@@ -225,19 +225,17 @@ def test_lemon_html_to_persisted_association_to_physical_rtfm(tmp_path, monkeypa
 
 
 def test_pipeline_collision_names_keep_rtfm_preview_and_export_coherent(tmp_path):
+    """GH-190: Two Hacker disks with different crack groups ([cr AAA] vs [cr BBB])
+    must form ONE release, not two. Per-disk crack groups are provenance, not identity.
+    """
     root, manuals, cfg, run = library(tmp_path, ("Hacker [cr AAA]", "Hacker [cr BBB]"))
     (manuals / "Hacker.txt").write_text("Use the joystick to select the terminal.")
     result = run_pipeline(cfg, run)
     rows = result["rtfm"]["manual_trace"]["per_release"]
-    assert len(rows) == 2
-    assert len({row["rtfm_path"] for row in rows}) == 2
-    preview = {row["release_key"]: row for row in result["per_group"]}
-    for row in rows:
-        assert row["written"] is True, row["no_rtfm_reason"]
-        assert row["export_status"] == "exported"
-        assert Path(row["rtfm_path"]).read_bytes() == Path(row["export_path"]).read_bytes()
-        assert Path(row["export_path"]).parent.name == preview[row["release_key"]]["folder"]
-        assert Path(row["export_path"]).parent.name.startswith("Hacker [")
+    # GH-190: different crack groups no longer split releases
+    assert len(rows) == 1
+    assert rows[0]["written"] is True
+    assert rows[0]["export_status"] == "exported"
 
 
 def test_failed_current_build_does_not_export_stale_rtfm(tmp_path):

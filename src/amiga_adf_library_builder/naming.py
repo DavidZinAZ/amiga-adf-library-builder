@@ -41,7 +41,7 @@ def release_basename(group: ReleaseGroup) -> str:
     silent-overwrite defect): the basename must preserve enough of the release
     identity that two *distinct* release groups never converge on the same
     export folder or ``.adf`` filename. The grouper's ``release_key`` is built
-    from ``title + edition + chipset + group + language + version + alt_marker``;
+    from ``title + edition + chipset + language + version``;
     the export basename now carries the same human-readable identity fields so a
     release differing only by ``language`` / ``version`` / ``alt_marker`` (or any
     combination) produces a distinct, deterministic, FAT32-safe name instead of

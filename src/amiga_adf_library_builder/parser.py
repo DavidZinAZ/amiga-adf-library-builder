@@ -42,6 +42,8 @@ _YEAR_RE = re.compile(r"^\d{3}[xX]$|^\d{4}$")
 _DISK_NUM_RE = re.compile(r"\(Disk\s+(\d+)\s+of\s+(\d+)\)", re.IGNORECASE)
 # Letter multidisk convention.
 _DISK_LETTER_RE = re.compile(r"Disk[_ ]?([A-Za-z])\b", re.IGNORECASE)
+# Bare multidisk convention: "Disk N" or "DiskN" at end of stem (no "of M").
+_DISK_BARE_RE = re.compile(r"Disk\s*(\d+)\s*$", re.IGNORECASE)
 # Edition qualifier: a single word immediately before "Edition"
 # (e.g. "Platinum Edition", "Gold Edition"). Keeps the surrounding title intact.
 _EDITION_RE = re.compile(r"([A-Za-z0-9']+\s+Edition)\s*$", re.IGNORECASE)
@@ -139,6 +141,12 @@ def parse_filename(filename: str) -> ParsedRecord:
         rec.disk_number = int(dm.group(1))
         rec.total_disks = int(dm.group(2))
 
+    # Bare multidisk convention: "Disk N" or "DiskN" at end of stem (no "of M").
+    bare_dm = _DISK_BARE_RE.search(stem)
+    if bare_dm and rec.disk_number is None:
+        rec.disk_number = int(bare_dm.group(1))
+        bare = _DISK_BARE_RE.sub("", bare).strip(" _-")
+
     # Tokenize for special-disk role detection (underscore/hyphen are separators).
     tokens = [t for t in _TOKEN_RE.split(bare) if t]
     role_hit = _detect_special_role(tokens)
@@ -165,14 +173,18 @@ def parse_filename(filename: str) -> ParsedRecord:
 
 
 def _build_release_key(rec: ParsedRecord) -> str:
-    """Clustering identity: distinguishes editions, groups, languages, versions."""
+    """Clustering identity: distinguishes editions, platforms, versions, languages.
+
+    Per-disk crack/group/trainer/dump/copy-method/scene annotations and
+    alt markers (e.g. [a], [b2 dump]) are DISK PROVENANCE and must NOT
+    participate in release identity. Two disks from the same game with
+    different per-disk annotations must cluster into one release.
+    """
     parts = [
         _norm(rec.title),
         _norm(rec.edition),
-        _norm(rec.group),
         _norm(rec.chipset),
         _norm(rec.language),
         _norm(rec.version),
-        _norm(rec.alt_marker),
     ]
     return "|".join(parts)
