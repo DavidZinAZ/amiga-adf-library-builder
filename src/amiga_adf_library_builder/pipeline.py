@@ -75,6 +75,46 @@ def _run_id() -> str:
     return f"{stamp}-{os.getpid()}-{seq:05d}"
 
 
+def _find_staged_entry(
+    staged_library: Optional[StagedLibrary],
+    group_release_key: str,
+    group_title: Optional[str] = None,
+) -> Optional[StagedReleaseEntry]:
+    """Find a StagedReleaseEntry matching a group, with fallback by title.
+
+    First attempts a direct ``release_key`` lookup. If that fails (e.g.
+    after GH-190 changed the release-key composition by removing
+    ``group`` and ``alt_marker``), falls back to matching by normalized
+    title so curation decisions survive the key change.
+
+    Returns the matched entry, or ``None``.
+    """
+    if staged_library is None:
+        return None
+
+    # Direct key lookup (fast path — works when keys haven't changed).
+    entry = staged_library.releases.get(group_release_key)
+    if entry is not None:
+        return entry
+
+    # Fallback: match by normalized title.  GH-190 removed group/alt_marker
+    # from _build_release_key, so the release_key changed but the title
+    # component is still present in both the group and the staged entry.
+    if group_title:
+        norm_title = _norm(group_title)
+        for candidate in staged_library.releases.values():
+            if candidate.title and _norm(candidate.title) == norm_title:
+                return candidate
+
+    return None
+
+
+def _norm(text: str | None) -> str:
+    """Lowercase, strip non-alphanumeric characters for comparison."""
+    import re as _re
+    return _re.sub(r"[^a-z0-9]", "", (text or "").lower())
+
+
 def _sync_group_membership(
     groups: list[ReleaseGroup],
     staged_library: Optional[StagedLibrary],
@@ -103,7 +143,7 @@ def _sync_group_membership(
             filename_to_record[rec.source_filename] = rec
 
     for group in groups:
-        entry = staged_library.releases.get(group.release_key)
+        entry = _find_staged_entry(staged_library, group.release_key, group.title)
         if entry is None:
             continue
 
@@ -180,7 +220,7 @@ def _apply_curation(
     updated_decisions = dict(decisions) if decisions else {}
 
     for group in groups:
-        entry = library.releases.get(group.release_key)
+        entry = _find_staged_entry(library, group.release_key, group.title)
         if entry is None:
             continue
 
