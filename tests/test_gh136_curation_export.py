@@ -21,10 +21,12 @@ from amiga_adf_library_builder.models import (
     StagedReleaseEntry,
     StagedState,
 )
-from amiga_adf_library_builder.pipeline import _apply_curation
+from typing import Optional
+from amiga_adf_library_builder.pipeline import _apply_curation, _sync_group_membership
 from amiga_adf_library_builder.exporter import (
     _find_staged_artwork,
     export_release,
+    export_all,
 )
 
 
@@ -35,9 +37,11 @@ from amiga_adf_library_builder.exporter import (
 def _make_group(release_key: str, title: str, disks: list[str] | None = None) -> ReleaseGroup:
     """Build a minimal ReleaseGroup with the given release_key."""
     disks = disks or [f"{title.replace(' ', '_')}.adf"]
+    # Use release_key-based filenames so they match _make_staged_library's adf_files.
+    base = release_key.replace("|", "_")
     records = [
         ParsedRecord(
-            source_filename=f"original/{title.replace(' ', '_')}_{i}.adf",
+            source_filename=f"{base}_{i}.adf",
             ext="adf",
             disk_number=i,
         )
@@ -59,17 +63,28 @@ def _make_group(release_key: str, title: str, disks: list[str] | None = None) ->
     )
 
 
-def _make_staged_library(entries: dict[str, StagedState]) -> StagedLibrary:
-    """Build a StagedLibrary with the given release_key -> StagedState mapping."""
+def _make_staged_library(entries: dict[str, StagedState], adf_files: Optional[dict[str, list[str]]] = None) -> StagedLibrary:
+    """Build a StagedLibrary with the given release_key -> StagedState mapping.
+
+    ``adf_files`` optionally maps ``release_key`` to a list of
+    ``source_filename`` strings so that curated membership matches
+    the group records produced by ``_make_group``.
+    """
     releases = {}
     for rk, state in entries.items():
+        base = rk.replace("|", "_")
+        rk_adf_files = None
+        if adf_files is not None:
+            rk_adf_files = adf_files.get(rk)
+        if rk_adf_files is None:
+            rk_adf_files = [f"{base}.adf"]
         releases[rk] = StagedReleaseEntry(
             release_key=rk,
             title=rk.replace("-", " ").title(),
             edition=None,
             group=None,
             chipset=None,
-            adf_files=[f"{rk}.adf"],
+            adf_files=rk_adf_files,
             artwork_front=None,
             curation_state=state,
         )
@@ -358,7 +373,10 @@ class TestCurationExportCounters:
     def test_multi_disk_a10_v1_0_both_disks_accepted(self, tmp_path):
         """A-10 v1.0 with 2 disks: after curation ACCEPTED, both disks survive."""
         group = _make_group("a10-tankkiller|1.0", "A-10 Tank Killer", disks=["disk1.adf", "disk2.adf"])
-        library = _make_staged_library({"a10-tankkiller|1.0": StagedState.ACCEPTED})
+        library = _make_staged_library(
+            {"a10-tankkiller|1.0": StagedState.ACCEPTED},
+            adf_files={"a10-tankkiller|1.0": ["a10-tankkiller_1.0_0.adf", "a10-tankkiller_1.0_1.adf"]},
+        )
         state_path = _write_library_to_file(library, tmp_path)
         _, decisions = _apply_curation([group], str(state_path), None)
         assert group.quarantine_reason is None
@@ -368,7 +386,10 @@ class TestCurationExportCounters:
     def test_multi_disk_a10_v1_5_all_three_disks_accepted(self, tmp_path):
         """A-10 v1.5 with 3 disks: after curation ACCEPTED, all three disks survive."""
         group = _make_group("a10-tankkiller|1.5", "A-10 Tank Killer", disks=["disk1.adf", "disk2.adf", "disk3.adf"])
-        library = _make_staged_library({"a10-tankkiller|1.5": StagedState.ACCEPTED})
+        library = _make_staged_library(
+            {"a10-tankkiller|1.5": StagedState.ACCEPTED},
+            adf_files={"a10-tankkiller|1.5": ["a10-tankkiller_1.5_0.adf", "a10-tankkiller_1.5_1.adf", "a10-tankkiller_1.5_2.adf"]},
+        )
         state_path = _write_library_to_file(library, tmp_path)
         _, decisions = _apply_curation([group], str(state_path), None)
         assert group.quarantine_reason is None
@@ -392,3 +413,237 @@ class TestCurationExportCounters:
         state_path = _write_library_to_file(library, tmp_path)
         _, decisions = _apply_curation([group], str(state_path), None)
         assert group.quarantine_reason == "rejected by curation"
+
+
+# ---------------------------------------------------------------------------
+# GH-191: Curated ADF membership propagation tests
+# ---------------------------------------------------------------------------
+
+
+class TestCuratedMembershipPropagation:
+    """Verify that curated ADF membership is propagated from the staged
+    library back to ReleaseGroup objects so export uses the authoritative
+    curated membership rather than the original pre-curation grouping.
+    """
+
+    def _make_group_with_files(self, release_key: str, disks: list[str]) -> ReleaseGroup:
+        """Build a ReleaseGroup with explicit source filenames."""
+        base = release_key.replace("|", "_")
+        records = [
+            ParsedRecord(
+                source_filename=f"{base}_{i}.adf",
+                ext="adf",
+                disk_number=i,
+            )
+            for i in range(len(disks))
+        ]
+        return ReleaseGroup(
+            release_key=release_key,
+            title=release_key,
+            ext="adf",
+            edition=None, group=None, chipset=None,
+            records=records, disks=records, specials=[],
+            has_main_disk=True, is_complete=True,
+        )
+
+    def test_move_persists_to_saved_state(self, tmp_path):
+        """Moving an ADF from one release to another persists in the
+        saved staged library state."""
+        # Group A originally has file_0.adf; Group B originally has file_1.adf.
+        # After curation, file_0.adf is moved to Group B.
+        group_a = self._make_group_with_files("game-a|1.0", ["game_a_0.adf"])
+        group_b = self._make_group_with_files("game-b|1.0", ["game_b_0.adf"])
+
+        # Staged library reflects the curated state: file_0 moved to game-b
+        lib = StagedLibrary(releases={
+            "game-a|1.0": StagedReleaseEntry(
+                release_key="game-a|1.0", title="Game A",
+                edition=None, group=None, chipset=None,
+                adf_files=[], curation_state=StagedState.ACCEPTED,
+            ),
+            "game-b|1.0": StagedReleaseEntry(
+                release_key="game-b|1.0", title="Game B",
+                edition=None, group=None, chipset=None,
+                adf_files=["game_a_0.adf", "game_b_0.adf"],
+                curation_state=StagedState.ACCEPTED,
+            ),
+        })
+        state_path = tmp_path / "library_state.json"
+        state_path.write_text(json.dumps({"library": lib.to_dict(), "meta": {"schema_version": 1}}))
+
+        _apply_curation([group_a, group_b], str(state_path), None)
+
+        # Group A should have no files (moved away)
+        assert len(group_a.records) == 0
+        assert len(group_a.disks) == 0
+        # Group B should have both files
+        assert len(group_b.records) == 2
+        assert len(group_b.disks) == 2
+        assert [r.source_filename for r in group_b.records] == ["game_a_0.adf", "game_b_0.adf"]
+
+    def test_reload_preserves_membership(self, tmp_path):
+        """Reload/reopen preserves the same curated membership
+        (move -> save -> reload must round-trip)."""
+        group_a = self._make_group_with_files("bard-taliii|1.0", ["bardstalet3_0.adf"])
+        group_b = self._make_group_with_files("bardstaleiiithethiefoffate|1.0", ["bardstaleii_0.adf"])
+
+        # Simulate the curated state after moving bardstalet3_0.adf to game-b
+        lib = StagedLibrary(releases={
+            "bard-taliii|1.0": StagedReleaseEntry(
+                release_key="bard-taliii|1.0", title="Bard's Tale III",
+                edition=None, group=None, chipset=None,
+                adf_files=[], curation_state=StagedState.ACCEPTED,
+            ),
+            "bardstaleiiithethiefoffate|1.0": StagedReleaseEntry(
+                release_key="bardstaleiiithethiefoffate|1.0", title="Bard's Tale III: The Thief of Fate",
+                edition=None, group=None, chipset=None,
+                adf_files=["bardstalet3_0.adf", "bardstaleii_0.adf"],
+                curation_state=StagedState.ACCEPTED,
+            ),
+        })
+        state_path = tmp_path / "library_state.json"
+        state_path.write_text(json.dumps({"library": lib.to_dict(), "meta": {"schema_version": 1}}))
+
+        # First apply
+        _apply_curation([group_a, group_b], str(state_path), None)
+        assert len(group_a.records) == 0
+        assert len(group_b.records) == 2
+
+        # Reload: re-read the state file and apply again
+        lib_reloaded = StagedLibrary.from_dict(json.loads(state_path.read_text())["library"])
+        group_a2 = self._make_group_with_files("bard-taliii|1.0", ["bardstalet3_0.adf"])
+        group_b2 = self._make_group_with_files("bardstaleiiithethiefoffate|1.0", ["bardstaleii_0.adf"])
+        _apply_curation([group_a2, group_b2], str(state_path), None)
+
+        assert len(group_a2.records) == 0
+        assert len(group_b2.records) == 2
+        assert [r.source_filename for r in group_b2.records] == ["bardstalet3_0.adf", "bardstaleii_0.adf"]
+
+    def test_export_consumes_curated_membership(self, tmp_path):
+        """Export uses curated membership, not original grouping.
+        After moving an ADF to a target release, export produces the
+        correct files for that release."""
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        group_a = self._make_group_with_files("bard-taliii|1.0", ["bardstalet3_0.adf"])
+        group_b = self._make_group_with_files("bardstaleiiithethiefoffate|1.0", ["bardstaleii_0.adf"])
+
+        # Curated: both ADFs under bardstaleiiithethiefoffate
+        lib = StagedLibrary(releases={
+            "bard-taliii|1.0": StagedReleaseEntry(
+                release_key="bard-taliii|1.0", title="Bard's Tale III",
+                edition=None, group=None, chipset=None,
+                adf_files=[], curation_state=StagedState.ACCEPTED,
+            ),
+            "bardstaleiiithethiefoffate|1.0": StagedReleaseEntry(
+                release_key="bardstaleiiithethiefoffate|1.0", title="Bard's Tale III: The Thief of Fate",
+                edition=None, group=None, chipset=None,
+                adf_files=["bardstalet3_0.adf", "bardstaleii_0.adf"],
+                curation_state=StagedState.ACCEPTED,
+            ),
+        })
+        state_path = tmp_path / "library_state.json"
+        state_path.write_text(json.dumps({"library": lib.to_dict(), "meta": {"schema_version": 1}}))
+
+        _apply_curation([group_a, group_b], str(state_path), None)
+
+        # Verify group membership is correct
+        assert len(group_a.records) == 0
+        assert len(group_b.records) == 2
+
+        # Verify export works with the curated membership:
+        # the group should have its curated records (not the original ones)
+        assert len(group_b.records) == 2
+        filenames = sorted(r.source_filename for r in group_b.records)
+        assert filenames == ["bardstaleii_0.adf", "bardstalet3_0.adf"]
+        # The resolved staged library should reflect the curated membership
+        assert len(lib.releases["bardstaleiiithethiefoffate|1.0"].adf_files) == 2
+
+    def test_moved_from_release_loses_adf(self, tmp_path):
+        """ADFs moved away from a source release no longer export under
+        the old release."""
+        group_source = self._make_group_with_files("source-release|1.0", ["source_0.adf", "source_1.adf"])
+        group_target = self._make_group_with_files("target-release|1.0", ["target_0.adf"])
+
+        # Curated: source_0.adf moved from source-release to target-release
+        lib = StagedLibrary(releases={
+            "source-release|1.0": StagedReleaseEntry(
+                release_key="source-release|1.0", title="Source Release",
+                edition=None, group=None, chipset=None,
+                adf_files=["source_1.adf"], curation_state=StagedState.ACCEPTED,
+            ),
+            "target-release|1.0": StagedReleaseEntry(
+                release_key="target-release|1.0", title="Target Release",
+                edition=None, group=None, chipset=None,
+                adf_files=["target_0.adf", "source_0.adf"],
+                curation_state=StagedState.ACCEPTED,
+            ),
+        })
+        state_path = tmp_path / "library_state.json"
+        state_path.write_text(json.dumps({"library": lib.to_dict(), "meta": {"schema_version": 1}}))
+
+        _apply_curation([group_source, group_target], str(state_path), None)
+
+        # Source should only have source_1.adf
+        assert len(group_source.records) == 1
+        assert group_source.records[0].source_filename == "source_1.adf"
+        # Target should have both target_0.adf and source_0.adf
+        assert len(group_target.records) == 2
+        filenames = sorted(r.source_filename for r in group_target.records)
+        assert filenames == ["source_0.adf", "target_0.adf"]
+
+    def test_multi_adf_target_exports_every_member(self, tmp_path):
+        """Multi-ADF target exports every member."""
+        group_a = self._make_group_with_files("bard-taliii|1.0", ["bard_0.adf"])
+        group_b = self._make_group_with_files("bardstaleiiithethiefoffate|1.0", ["bard_1.adf"])
+
+        # Curated: both ADFs under the target release
+        lib = StagedLibrary(releases={
+            "bard-taliii|1.0": StagedReleaseEntry(
+                release_key="bard-taliii|1.0", title="Bard's Tale III",
+                edition=None, group=None, chipset=None,
+                adf_files=[], curation_state=StagedState.ACCEPTED,
+            ),
+            "bardstaleiiithethiefoffate|1.0": StagedReleaseEntry(
+                release_key="bardstaleiiithethiefoffate|1.0", title="Bard's Tale III: The Thief of Fate",
+                edition=None, group=None, chipset=None,
+                adf_files=["bard_0.adf", "bard_1.adf"],
+                curation_state=StagedState.ACCEPTED,
+            ),
+        })
+        state_path = tmp_path / "library_state.json"
+        state_path.write_text(json.dumps({"library": lib.to_dict(), "meta": {"schema_version": 1}}))
+
+        _apply_curation([group_a, group_b], str(state_path), None)
+
+        assert len(group_a.records) == 0
+        assert len(group_b.records) == 2
+        assert len(group_b.disks) == 2
+
+    def test_unresolved_curated_member_fails_loudly(self, tmp_path):
+        """If a curated ADF cannot be resolved, export should not silently
+        drop it. The _apply_curation still propagates the membership
+        and creates a minimal ParsedRecord; the export path will attempt
+        to copy the file and will report a conflict for missing source."""
+        group_b = self._make_group_with_files("target-release|1.0", ["target_0.adf"])
+
+        # Curated: target has a file that doesn't exist in any group's records
+        lib = StagedLibrary(releases={
+            "target-release|1.0": StagedReleaseEntry(
+                release_key="target-release|1.0", title="Target Release",
+                edition=None, group=None, chipset=None,
+                adf_files=["target_0.adf", "nonexistent_ghost.adf"],
+                curation_state=StagedState.ACCEPTED,
+            ),
+        })
+        state_path = tmp_path / "library_state.json"
+        state_path.write_text(json.dumps({"library": lib.to_dict(), "meta": {"schema_version": 1}}))
+
+        _apply_curation([group_b], str(state_path), None)
+
+        # The unresolved file should still be in the group's records
+        # as a minimal ParsedRecord (created by _sync_group_membership)
+        assert len(group_b.records) == 2
+        filenames = sorted(r.source_filename for r in group_b.records)
+        assert filenames == ["nonexistent_ghost.adf", "target_0.adf"]

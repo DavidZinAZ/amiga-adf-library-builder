@@ -75,6 +75,73 @@ def _run_id() -> str:
     return f"{stamp}-{os.getpid()}-{seq:05d}"
 
 
+def _sync_group_membership(
+    groups: list[ReleaseGroup],
+    staged_library: Optional[StagedLibrary],
+) -> None:
+    """Propagate curated ADF membership from the staged library back to groups.
+
+    After ``_apply_curation`` loads the staged library, each
+    ``StagedReleaseEntry`` holds the authoritative curated ``adf_files``
+    (moved/merged by the operator). This function updates each
+    ``ReleaseGroup``'s ``records``, ``disks``, and ``specials`` to match
+    that curated membership so export never uses the pre-curation
+    grouping.
+
+    A global ``source_filename``→``ParsedRecord`` lookup is built from all
+    groups so that ADFs moved from one release to another can be resolved
+    even when they no longer exist in their source group's records.
+    """
+    if staged_library is None:
+        return
+
+    # Build a global lookup of all source_filename -> ParsedRecord
+    # across all groups so moved files can still be resolved.
+    filename_to_record: dict[str, ParsedRecord] = {}
+    for g in groups:
+        for rec in g.records:
+            filename_to_record[rec.source_filename] = rec
+
+    for group in groups:
+        entry = staged_library.releases.get(group.release_key)
+        if entry is None:
+            continue
+
+        curated_files = list(entry.adf_files)
+        if not curated_files:
+            group.records = []
+            group.disks = []
+            group.specials = []
+            continue
+
+        curated_set = set(curated_files)
+
+        # Build new records list: use existing records from the global
+        # lookup, or create a minimal ParsedRecord for moved files.
+        new_records: list[ParsedRecord] = []
+        for fname in curated_files:
+            if fname in filename_to_record:
+                new_records.append(filename_to_record[fname])
+            else:
+                # Moved file: create a minimal ParsedRecord.
+                # disk_number defaults to 1; ordering is resolved by
+                # the sort in export_release.
+                ext = Path(fname).suffix.lstrip(".") or "adf"
+                new_records.append(ParsedRecord(
+                    source_filename=fname,
+                    ext=ext,
+                    disk_number=1,
+                ))
+
+        # Rebuild disks and specials based on the special_disk flag.
+        disks = [r for r in new_records if not r.special_disk]
+        specials = [r for r in new_records if r.special_disk]
+
+        group.records = new_records
+        group.disks = disks
+        group.specials = specials
+
+
 def _apply_curation(
     groups: list[ReleaseGroup],
     library_state_path: Optional[str],
@@ -128,6 +195,11 @@ def _apply_curation(
         # MODIFIED/NEEDS_REVIEW: keep existing quarantine; operator
         # has flagged these for review and the pipeline should not
         # silently export them.
+
+    # Propagate curated ADF membership from the staged library back
+    # to the groups so export uses the authoritative curated
+    # membership rather than the original pre-curation grouping.
+    _sync_group_membership(groups, library)
 
     return library, updated_decisions
 
