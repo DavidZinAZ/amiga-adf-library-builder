@@ -1,7 +1,7 @@
 """Grouper: cluster parsed records into release sets and flag ambiguity.
 
 Grouping rules (ARCHITECTURE stage 3; documented behavior):
-  * Records sharing ``release_key`` (title+edition+group+chipset+lang+version+alt)
+  * Records sharing ``release_key`` (title+edition+chipset+lang+version)
     are the same release. Editions (e.g. Platinum) are intentionally distinct keys.
   * Disks are ordered by parsed ordinal; a set is "complete" when it contains
     every ordinal 1..total_disks (when total is known). A single-or-multidisk set
