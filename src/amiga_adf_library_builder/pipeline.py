@@ -36,7 +36,7 @@ from .canonical_naming import (
     export_name_for_release_group,
     _load_canonical_library,
 )
-from .paths import PathConfig
+from .paths import PathConfig, _portable_cache_path
 from .run_config import RunConfig
 
 
@@ -569,6 +569,25 @@ def run_pipeline(
     )
     _act("Metadata and artwork preparation complete.")
 
+    # (GH-192 REM-1) Keyed group -> EnrichResult association.
+    # ``enrich_all`` preserves input order, so at this point ``groups`` and
+    # ``enrich_results`` are positionally aligned. Capture the association by
+    # release_key (the pipeline's own identity — selection.py:290 groups games
+    # by ``release_key.split('|')[0]``) *before* the 1G1R export selection
+    # reorders/reduces ``groups`` (line ~866). Every per-group diagnostic, the
+    # keyed result maps, and the DAT lookup must index enrich results by this
+    # key; positional ``zip(groups, enrich_results)`` after the selection is
+    # misaligned and was the root cause of the V/VI per-release swap.
+    # Bare normalized titles are deliberately NOT used as the key: they collide
+    # for same-title/different-edition releases (e.g. the two "UFO: Enemy
+    # Unknown" releases), which is exactly the case the acceptance criteria warn
+    # about. release_key (title|edition) is unambiguous.
+    _enrich_by_key: dict = {}
+    for _g, _r in zip(groups, enrich_results):
+        _rk = str(_g.release_key)
+        if _rk not in _enrich_by_key:
+            _enrich_by_key[_rk] = _r
+
     # Phase 4b: RTFM deterministic manual sidecar build (M1; offline, NO-AI).
     # Built only when an [rtfm] config is present and enabled. Strictly read-only
     # against the configured discovery roots; writes only under assets/rtfm.
@@ -944,7 +963,13 @@ def run_pipeline(
     # artwork download/failure details and cache hits). Additive; existing
     # aggregate keys above are unchanged.
     per_group = []
-    for g, r in zip(groups, enrich_results):
+    # (GH-192 REM-1) Index enrich results by release_key. Positional
+    # ``zip(groups, enrich_results)`` here was misaligned: ``groups`` was
+    # reordered/reduced by the 1G1R selection above, but ``enrich_results``
+    # still carried the original pre-selection order, so every per-group
+    # diagnostic was attributed to the wrong release (the V/VI swap).
+    for g in groups:
+        r = _enrich_by_key.get(str(g.release_key))
         # Route event (quarantine/review) is only known after Phase 6 runs, so it
         # is recorded here alongside the enrichment events from enrich_group.
         events = [e.to_dict() for e in r.events]
@@ -1043,17 +1068,16 @@ def run_pipeline(
         _pg["rtfm_results"] = _rtfm_by_key.get(_pg["release_key"], [])
 
     # (GH-192) Add DAT/local metadata diagnostics to per_group.
-    # Each enrich result carries dat_results with per-source match info.
+    # Index enrich results by release_key (captured above, before the
+    # 1G1R selection reorders groups). Positional indexing here was
+    # misaligned: ``groups`` was reordered/reduced by the 1G1R
+    # selection, but ``enrich_results`` still carried the original
+    # pre-selection order, so every per-group diagnostic was
+    # attributed to the wrong release (the V/VI swap).
     for _pg in per_group:
         _rk = _pg["release_key"]
-        # Find the matching EnrichResult by index (enrich_results aligns with groups)
-        _idx = None
-        for _i, _g in enumerate(groups):
-            if _g.release_key == _rk:
-                _idx = _i
-                break
-        if _idx is not None and _idx < len(enrich_results):
-            _er = enrich_results[_idx]
+        _er = _enrich_by_key.get(str(_rk))
+        if _er is not None:
             _dat = getattr(_er, "dat_results", [])
             _pg["dat_results"] = _dat
             _pg["dat_attempts"] = len(_dat)
@@ -1111,8 +1135,11 @@ def run_pipeline(
     _rk_exact_map: dict[str, bool] = {}
     _rk_fuzzy_map: dict[str, bool] = {}
     _rk_notes_map: dict[str, list[str]] = {}
-    for _g, _r in zip(groups, enrich_results):
-        _rk = str(_g.release_key)
+    # (GH-192 REM-1) Iterate over _enrich_by_key, not
+    # zip(groups, enrich_results): after the 1G1R selection,
+    # ``groups`` is reduced/reordered while ``enrich_results``
+    # retains the original order, so positional pairing is wrong.
+    for _rk, _r in _enrich_by_key.items():
         if _r.provider:
             _rk_provider_map[_rk] = _r.provider
         if _r.metadata_path:
@@ -1143,10 +1170,19 @@ def run_pipeline(
             _rk_fuzzy_map[_rk] = False
 
     # (GH-192 Defect 4) Cache portability diagnostics.
-    # Expose the resolved cache path so operators can verify
-    # whether the portable or user-profile cache is in use.
+    # Resolve the cache path with auto-detection of portable mode
+    # (library_root/data + catalog present). The packaged EXE does
+    # not set AMIGA_ADF_PORTABLE; auto-detection ensures the
+    # portable layout is used by default without env-var opt-in.
     _cache_path_str = str(cfg.cache_dir)
-    _is_portable = bool(os.environ.get("AMIGA_ADF_PORTABLE"))
+    _is_portable = (cfg.cache_dir == _portable_cache_path(library_root).resolve()
+                    if library_root else False)
+    if _is_portable:
+        _cache_source = "portable_library"
+    else:
+        _cache_source = "user_profile"
+    # Verify the resolved portable path for diagnostics.
+    _resolved_cache_path = _portable_cache_path(library_root) if library_root else cfg.cache_dir
 
     result: dict = {
         "run_id": run_id,
@@ -1155,9 +1191,11 @@ def run_pipeline(
         "include_artwork": bool(include_artwork),
         "include_manuals_rtfm": bool(include_manuals_rtfm),
         # (GH-192 Defect 4) Cache portability diagnostics.
+        # Auto-detected from the library layout; no env-var opt-in needed.
         "resolved_cache_dir": _cache_path_str,
         "portable_cache_mode": _is_portable,
-        "cache_hit_source": "user_profile" if not _is_portable else "portable_library",
+        "cache_hit_source": _cache_source,
+        "resolved_portable_cache_dir": str(_resolved_cache_path),
         # (GH-192 Defect 3) Release-key-indexed maps replace flat lists
         # to prevent positional coupling between releases and diagnostics.
         "release_keys": list(str(g.release_key) for g in groups),
@@ -1183,8 +1221,10 @@ def run_pipeline(
         "artwork_resized": [str(r.artwork_resized) for r in enrich_results if r.artwork_resized],
         "artwork_missing": [
             _release_basename_with_warn(g, library_root=library_root)
-            for g, r in zip(groups, enrich_results)
-            if not g.quarantine_reason and r.artwork_missing
+            for g in groups
+            if not g.quarantine_reason
+            and _enrich_by_key.get(str(g.release_key)) is not None
+            and _enrich_by_key[str(g.release_key)].artwork_missing
         ],
         "enrichment_notes": [note for r in enrich_results for note in r.notes],
         "review_routed": quarantine_summary["review"],
@@ -1196,25 +1236,25 @@ def run_pipeline(
             if r.metadata_confidence and r.metadata_confidence >= 0.90
         ],
         "unresolved": [
-            str(g.release_key) for g, r in zip(groups, enrich_results)
-            if not r.metadata_path and not r.nfo_path
-            and not r.artwork_master
+            str(_rk) for _rk, _r in _enrich_by_key.items()
+            if not _r.metadata_path and not _r.nfo_path
+            and not _r.artwork_master
         ],
         "review_required": [
-            str(g.release_key) for g, r in zip(groups, enrich_results)
-            if r.needs_manual_review or r.review_items
+            str(_rk) for _rk, _r in _enrich_by_key.items()
+            if _r.needs_manual_review or _r.review_items
         ],
         "provider_failures": provider_diagnostics.get("totals", {}).get("error", 0),
         "dat_failures": len(_all_review_items),
         "exact_or_authoritative": [
-            str(g.release_key) for g, r in zip(groups, enrich_results)
-            if r.metadata_confidence and r.metadata_confidence >= 0.90
-            or r.artwork_master and r.artwork_resized
+            str(_rk) for _rk, _r in _enrich_by_key.items()
+            if _r.metadata_confidence and _r.metadata_confidence >= 0.90
+            or _r.artwork_master and _r.artwork_resized
         ],
         "fuzzy_or_manual": [
-            str(g.release_key) for g, r in zip(groups, enrich_results)
-            if r.metadata_confidence and r.metadata_confidence < 0.90
-            or (r.needs_manual_review and not r.metadata_confidence)
+            str(_rk) for _rk, _r in _enrich_by_key.items()
+            if _r.metadata_confidence and _r.metadata_confidence < 0.90
+            or (_r.needs_manual_review and not _r.metadata_confidence)
         ],
         "unknown_routed": quarantine_summary["unknown"],
         "applied_approvals": _applied,

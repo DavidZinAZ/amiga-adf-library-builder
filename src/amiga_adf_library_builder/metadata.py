@@ -437,17 +437,45 @@ def validate_metadata_relevance(requested_title: str, record: "MetadataRecord",
     candidate = _norm(candidate_raw)
     ratio = SequenceMatcher(None, target, candidate).ratio() if (target or candidate) else 0.0
 
+    # (GH-192 Defect 1) Colon-only variant handling.
+    # A colon in a title like "UFO: Enemy Unknown" is title formatting,
+    # not a subtitle separator. _strip_subtitle strips after the colon,
+    # which makes "UFO: Enemy Unknown" → "UFO" and loses the subtitle.
+    # Also compare against a colon-normalized version where colons are
+    # removed before normalization, so "UFO: Enemy Unknown" → "UFO Enemy Unknown"
+    # and both the colon and no-colon variants normalize identically.
+    _requested_raw = requested_title
+    _candidate_raw = record.canonical_title or requested_title
+    _target_colon = _norm(_requested_raw.replace(":", "").replace(" ", ""))
+    _candidate_colon = _norm(_candidate_raw.replace(":", "").replace(" ", ""))
+    _colon_ratio = SequenceMatcher(None, _target_colon, _candidate_colon).ratio() if (_target_colon or _candidate_colon) else 0.0
+    _colon_identity = (_target_colon != "" and _candidate_colon != "" and (
+        _candidate_colon == _target_colon
+        or _candidate_colon.startswith(_target_colon + " ")
+        or _target_colon.startswith(_candidate_colon + " ")
+    ))
+    if _colon_identity:
+        evidence.append("colon_normalized_match")
+    elif _colon_ratio > ratio:
+        evidence.append(f"colon_normalized_similarity:{_colon_ratio:.2f}")
+
     # Track subtitle evidence for explainable diagnostics.
-    subtitle_stripped = (candidate_raw != (record.canonical_title or requested_title))
+    # A colon in a title is title formatting, not a subtitle separator,
+    # so colon-only variants should not be flagged as subtitle_stripped.
+    _has_colon = ":" in requested_title or ":" in (record.canonical_title or "")
+    subtitle_stripped = (candidate_raw != (record.canonical_title or requested_title)) and not _has_colon
     if subtitle_stripped:
         evidence.append("subtitle_stripped")
 
     # --- Strong positive: canonical identity (possibly with edition suffix) ---
+    # (GH-192 Defect 1) Also accept colon-normalized identity:
+    # "UFO: Enemy Unknown" and "UFO Enemy Unknown" normalize to the
+    # same alphanumeric form when colons are removed.
     exact_identity = (target != "" and candidate != "" and (
         candidate == target
         or candidate.startswith(target + " ")
         or target.startswith(candidate + " ")
-    ))
+    )) or _colon_identity
 
     # --- Person / biography signal ---
     hay_text = (record.canonical_title + " " + (record.description or "")).lower()
@@ -495,10 +523,12 @@ def validate_metadata_relevance(requested_title: str, record: "MetadataRecord",
         evidence.append(f"year_mismatch:{requested_year}!={record_year}")
 
     # --- Title similarity / identity ---
+    # Use the better of the stripped and colon-normalized ratios.
+    _effective_ratio = max(ratio, _colon_ratio)
     if exact_identity:
         evidence.append("exact_canonical_title")
     else:
-        evidence.append(f"title_similarity:{ratio:.2f}")
+        evidence.append(f"title_similarity:{_effective_ratio:.2f}")
 
     # --- Build the decision from the combined evidence ---
     year_mismatch = any(e.startswith("year_mismatch:") for e in evidence)
@@ -506,29 +536,30 @@ def validate_metadata_relevance(requested_title: str, record: "MetadataRecord",
 
     if exact_identity and (amiga_present or not record.platforms) and not year_mismatch:
         return RelevanceDecision(
-            category="accepted", confidence=max(0.90, ratio),
+            category="accepted", confidence=max(0.90, _effective_ratio),
             evidence=evidence, reason="exact_match",
         )
 
     # --- Different-game lookalike guard (issue #7) ---
-    # A candidate that is NOT an exact identity but is merely the
-    # requested title extended by extra characters (a sequel number/word, an
-    # edition/version tail) is a *different* game. Numeral normalization pads
-    # sequel numbers (II -> 0002), which can lower the similarity ratio without
-    # changing that identity evidence. Numeric extensions are rejected in every
-    # fuzzy band; other uncertain extensions retain the existing review policy.
-    # Roman/Arabic equivalents still pass via the exact-identity branch.
+    # Also check colon-normalized extension.
     extension = ""
+    _colon_extension = ""
     if target and candidate:
         if candidate.startswith(target):
             extension = candidate[len(target):]
         elif target.startswith(candidate):
             extension = target[len(candidate):]
-    if (not exact_identity and extension
-            and (ratio >= _RELEVANCE_ACCEPT_RATIO or extension[0].isdigit())):
+    if _target_colon and _candidate_colon:
+        if _candidate_colon.startswith(_target_colon):
+            _colon_extension = _candidate_colon[len(_target_colon):]
+        elif _target_colon.startswith(_candidate_colon):
+            _colon_extension = _target_colon[len(_candidate_colon):]
+    if (not exact_identity and (extension or _colon_extension)
+            and (ratio >= _RELEVANCE_ACCEPT_RATIO or extension[0].isdigit()
+                 or (_colon_extension and (_colon_extension[0].isdigit())))):
         evidence.append("different_game_substring")
         return RelevanceDecision(
-            category="rejected", confidence=min(0.45, ratio),
+            category="rejected", confidence=min(0.45, _effective_ratio),
             evidence=evidence, reason="different_game",
         )
 
