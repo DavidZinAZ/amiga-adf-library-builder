@@ -14,9 +14,16 @@ from pathlib import Path
 
 import pytest
 
+from amiga_adf_library_builder import metadata as metadata_module
 from amiga_adf_library_builder.metadata import (
     MetadataRecord,
     validate_metadata_relevance,
+)
+from amiga_adf_library_builder import enrich as enrich_module
+from amiga_adf_library_builder import paths as paths_module
+from amiga_adf_library_builder.diagnostics import (
+    attempt_from_enrich_events,
+    aggregate_provider_attempts,
 )
 from amiga_adf_library_builder.metadata_source import MetadataSourceManager
 from amiga_adf_library_builder.paths import _portable_cache_path, resolve_config
@@ -74,6 +81,179 @@ class TestOnlineMetadataNormalization:
         decision = validate_metadata_relevance("UFO Enemy Unknown", rec)
         assert decision.confidence > 0.5
 
+    @pytest.mark.parametrize(("requested", "candidate"), [
+        ("Hacker II: The Doomsday Papers", "Hacker 2 The Doomsday Papers"),
+        ("The Bard's Tale III: Thief of Fate", "Bards Tale 3 Thief of Fate"),
+        ("Ultima III: Exodus", "Ultima 3 Exodus"),
+        ("Ultima IV: Quest of the Avatar", "Ultima 4 Quest of the Avatar"),
+        ("Ultima V: Warriors of Destiny", "Ultima 5 Warriors of Destiny"),
+        ("Ultima VI: The False Prophet", "Ultima 6 False Prophet"),
+        ("UFO: Enemy Unknown", "U.F.O. Enemy Unknown"),
+    ])
+    def test_packaged_provider_title_variants(self, requested: str, candidate: str) -> None:
+        rec = MetadataRecord(canonical_title=candidate, provider="wikipedia", confidence=0.9, platforms=["amiga"])
+        decision = validate_metadata_relevance(requested, rec)
+        assert decision.category == "accepted", f"{requested!r} vs {candidate!r}: {decision}"
+
+    def test_packaged_provider_negative_control_rejected(self) -> None:
+        rec = MetadataRecord(canonical_title="Bard's Tale IV", provider="wikipedia", confidence=0.9, platforms=["amiga"])
+        decision = validate_metadata_relevance("Hacker II The Doomsday Papers", rec)
+        assert decision.category == "rejected"
+
+    def test_enrichment_persists_provider_hit_reject_and_error(self, monkeypatch, tmp_path) -> None:
+        from amiga_adf_library_builder.models import ReleaseGroup
+
+        requested = "Hacker II: The Doomsday Papers"
+        metadata = MetadataRecord(
+            canonical_title="Hacker 2 The Doomsday Papers",
+            provider="wikipedia",
+            confidence=0.9,
+            platforms=["amiga"],
+        )
+        provider_results = [
+            {"provider": "hall-of-light", "canonical_title": "Wrong Game", "category": "rejected",
+             "confidence": 0.1, "reason": "different_game", "evidence": []},
+            {"provider": "lemon-amiga", "canonical_title": "", "category": "not_found",
+             "confidence": 0.0, "reason": "request_error", "evidence": ["request_error"]},
+            {"provider": "wikipedia", "canonical_title": metadata.canonical_title, "category": "accepted",
+             "confidence": 1.0, "reason": "exact_identity", "evidence": ["canonical_match"]},
+        ]
+        monkeypatch.setattr(
+            enrich_module,
+            "lookup_metadata",
+            lambda *args, **kwargs: (metadata, "wikipedia", provider_results),
+        )
+        result = enrich_module.enrich_group(
+            ReleaseGroup(release_key=f"{requested}|standard", title=requested,
+                         edition="standard", group=requested, chipset=""),
+            nfo_dir=tmp_path / "nfo",
+            scans={},
+            artwork_original_dir=tmp_path / "art-original",
+            artwork_processed_dir=tmp_path / "art-processed",
+            metadata_cache_dir=tmp_path / "metadata-cache",
+            curated_metadata_dir=tmp_path / "metadata-curated",
+            online=True,
+            include_artwork=False,
+        )
+        attempts = attempt_from_enrich_events(
+            result.events,
+            title=requested,
+            release_key=f"{requested}|standard",
+        )
+        outcomes = {attempt.provider: attempt.outcome for attempt in attempts}
+        assert outcomes["hall-of-light"] == "no_match"
+        assert outcomes["lemon-amiga"] == "error"
+        assert outcomes["wikipedia"] == "matched"
+
+    def test_packaged_pipeline_metadata_fixtures(self, monkeypatch) -> None:
+        fixtures = [
+            ("Hacker II The Doomsday Papers", "Hacker II: The Doomsday Papers"),
+            ("Bard's Tale III Thief of Fate", "The Bard's Tale III: Thief of Fate"),
+            ("Ultima III Exodus", "Ultima III: Exodus"),
+            ("Ultima IV Quest of the Avatar", "Ultima IV: Quest of the Avatar"),
+            ("Ultima V Warriors of Destiny", "Ultima V: Warriors of Destiny"),
+            ("Ultima VI The False Prophet", "Ultima VI: The False Prophet"),
+            ("UFO Enemy Unknown", "U.F.O.: Enemy Unknown"),
+        ]
+
+        def hall_of_light_fixture(query: str, **kwargs):
+            query_key = query.casefold()
+            for requested, candidate in fixtures:
+                if query_key.startswith(requested.casefold()):
+                    return MetadataRecord(
+                        canonical_title=candidate,
+                        provider="hall-of-light",
+                        confidence=0.95,
+                        platforms=["Amiga"],
+                    )
+            return None
+
+        monkeypatch.setattr(metadata_module, "hall_of_light_lookup", hall_of_light_fixture)
+        with tempfile.TemporaryDirectory() as tmp:
+            library_root = Path(tmp) / "library"
+            for directory in ("data", "catalog", "original"):
+                (library_root / directory).mkdir(parents=True, exist_ok=True)
+            cfg = _resolve_cfg(library_root)
+            for requested, _candidate in fixtures:
+                (cfg.original_dir / f"{requested}.adf").write_bytes(b"fixture")
+
+            result = run_pipeline(
+                cfg=cfg,
+                run=RunConfig(online=True, include_artwork=False),
+            )
+            hol = next(
+                provider for provider in result["provider_diagnostics"]["providers"]
+                if provider["provider"] == "hall-of-light"
+            )
+            assert hol["attempts"] == len(fixtures)
+            assert hol["matched"] == len(fixtures)
+            assert len(result["per_group"]) == len(fixtures)
+            assert all(
+                any(event["category"] == "metadata_provider_attempt"
+                    and "outcome=hit" in event["detail"]
+                    for event in group["events"])
+                for group in result["per_group"]
+            )
+
+
+# ============================================================================
+# DEFECT 2: DAT OBSERVABILITY
+# ============================================================================
+# ============================================================================
+
+
+class TestDatRunDiagnostics:
+    def test_dat_hit_is_in_provider_rollup_with_source_provenance(self) -> None:
+        results = [{
+            "source_id": "sample-dat",
+            "source_name": "sample.dat",
+            "match_type": "title",
+            "title": "Alien Breed",
+            "matched": True,
+        }]
+        attempts = attempt_from_enrich_events(
+            [{"category": "dat", "detail": "dat_title_candidate source=sample-dat", "ok": True}],
+            title="Alien Breed",
+            release_key="Alien Breed|standard",
+            dat_results=results,
+        )
+        summary = aggregate_provider_attempts(attempts)
+        dat = next(item for item in summary["providers"] if item.provider == "dat")
+        assert dat.attempts == 1
+        assert dat.matched == 1
+        assert attempts[0].provider_id == "sample-dat"
+        assert "source_name=sample.dat" in attempts[0].detail
+
+    def test_dat_no_match_is_an_explicit_provider_attempt(self) -> None:
+        attempts = attempt_from_enrich_events(
+            [{"category": "dat", "detail": "dat_no_match", "ok": True}],
+            title="Unknown Game",
+            release_key="Unknown Game|standard",
+            dat_results=[{
+                "source_id": "sample-dat",
+                "source_name": "sample.dat",
+                "match_type": "",
+                "title": "",
+                "matched": False,
+            }],
+        )
+        assert len(attempts) == 1
+        assert attempts[0].provider == "dat"
+        assert attempts[0].outcome == "no_match"
+        assert attempts[0].provider_id == "sample-dat"
+        assert "source_name=sample.dat" in attempts[0].detail
+
+    def test_dat_event_only_mapping(self) -> None:
+        attempts = attempt_from_enrich_events(
+            [{"category": "dat", "detail": "dat_hash_match source=sample-dat", "ok": True}],
+            title="Alien Breed",
+            release_key="Alien Breed|standard",
+        )
+        assert len(attempts) == 1
+        assert attempts[0].provider == "dat"
+        assert attempts[0].matched is True
+        assert attempts[0].provider_id == "sample-dat"
+
 
 # ============================================================================
 # DEFECT 2: DAT OBSERVABILITY
@@ -125,16 +305,32 @@ class TestDatObservability:
             manager = self._make_dat_source(Path(tmp) / "metadata_sources.db")
             assert len(manager.lookup_by_title("Nonexistent Game 999")) == 0
 
-    def test_dat_results_in_run_summary(self) -> None:
+    def test_dat_results_in_run_summary_with_hit_and_no_match(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             library_root = Path(tmp) / "library"
             (library_root / "data").mkdir(parents=True)
             (library_root / "catalog").mkdir(parents=True)
             (library_root / "original").mkdir(parents=True)
             cfg = _resolve_cfg(library_root)
+            self._make_dat_source(cfg.metadata_sources_db)
+            (cfg.original_dir / "Alien Breed.adf").write_bytes(b"fixture")
+            (cfg.original_dir / "Unknown Game 999.adf").write_bytes(b"fixture")
+
             result = run_pipeline(cfg=cfg, run=RunConfig(online=False))
-            assert "dat_failures" in result
-            assert isinstance(result["dat_failures"], int)
+            dat = next(
+                provider for provider in result["provider_diagnostics"]["providers"]
+                if provider["provider"] == "dat"
+            )
+            assert dat["attempts"] == 2
+            assert dat["matched"] == 1
+            assert dat["no_match"] == 1
+            assert all("dat_results" in group for group in result["per_group"])
+            matched = next(
+                item for group in result["per_group"] for item in group["dat_results"]
+                if item["matched"]
+            )
+            assert matched["source_id"]
+            assert matched["source_name"]
 
     def test_per_release_dat_diagnostics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -212,26 +408,44 @@ class TestCachePortability:
             assert cfg.cache_dir == _portable_cache_path(library_root)
             assert "data/cache" in str(cfg.cache_dir)
 
-    def test_non_portable_cache_when_no_data_catalog(self) -> None:
-        """If library_root lacks data/ or catalog/, cache must NOT be portable."""
+    def test_non_portable_python_cache_when_no_data_catalog(self, monkeypatch) -> None:
+        """An ordinary Python/CLI library without portable markers uses XDG."""
         with tempfile.TemporaryDirectory() as tmp:
             library_root = Path(tmp) / "library"
             library_root.mkdir()
+            monkeypatch.setattr(paths_module.sys, "executable", "/usr/bin/python3")
             cfg = _resolve_cfg(library_root)
-            # When data/ and catalog/ don't both exist, cache should NOT be under data/cache
             assert "data/cache" not in str(cfg.cache_dir)
 
-    def test_portable_cache_mode_deterministic(self) -> None:
+    def test_packaged_cache_uses_library_data_even_before_dirs_exist(self, monkeypatch) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            library_root = Path(tmp) / "library"
-            (library_root / "data").mkdir(parents=True)
-            (library_root / "catalog").mkdir(parents=True)
-            (library_root / "original").mkdir(parents=True)
+            library_root = Path(tmp) / "fresh-library"
+            monkeypatch.setattr(paths_module.sys, "executable", "/opt/amiga-adf/builder.exe")
+            cfg = _resolve_cfg(library_root)
+            assert cfg.cache_dir == (library_root / "data" / "cache").resolve()
+            assert "xdg-cache" not in str(cfg.cache_dir)
+            assert not (library_root / "data").exists()
+            assert not (library_root / "catalog").exists()
+
+    def test_gui_library_root_pattern_uses_portable_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            library_root = Path(tmp) / "Library-Root"
+            cfg = _resolve_cfg(library_root)
+            assert cfg.cache_dir == (library_root / "data" / "cache").resolve()
+
+    def test_packaged_portable_cache_mode_deterministic(self, monkeypatch) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            library_root = Path(tmp) / "fresh-library"
+            monkeypatch.setattr(paths_module.sys, "executable", "/opt/amiga-adf/builder.exe")
             cfg = _resolve_cfg(library_root)
             assert os.environ.get("AMIGA_ADF_PORTABLE") is None
+            assert not (library_root / "data").exists()
+            assert not (library_root / "catalog").exists()
+            cfg.original_dir.mkdir(parents=True)
             result = run_pipeline(cfg=cfg, run=RunConfig(online=False))
             assert result["portable_cache_mode"] is True
             assert result["cache_hit_source"] == "portable_library"
+            assert result["resolved_cache_dir"] == str((library_root / "data" / "cache").resolve())
 
     def test_clean_cache_no_stale_reuse(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

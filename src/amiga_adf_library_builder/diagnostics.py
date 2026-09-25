@@ -29,6 +29,7 @@ provider error string can never leak a secret value into the UI or logs.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -139,6 +140,7 @@ def attempt_from_enrich_events(
     *,
     title: str = "",
     release_key: str = "",
+    dat_results: Optional[list[dict]] = None,
 ) -> list[ProviderAttempt]:
     """Derive per-release :class:`ProviderAttempt` records from EnrichEvents.
 
@@ -173,9 +175,13 @@ def attempt_from_enrich_events(
     # lookup pipeline), so they are added at most once each.
     meta_attempt: Optional[ProviderAttempt] = None
     art_attempt: Optional[ProviderAttempt] = None
+    dat_events = []
 
     for e in events:
         cat = _cat(e)
+        if cat == "dat":
+            dat_events.append(e)
+            continue
         detail = _d(e, "detail", "") or ""
         err = _d(e, "error", None)
         ok = _d(e, "ok", True)
@@ -223,6 +229,36 @@ def attempt_from_enrich_events(
             # Keep the strongest signal per provider (matched > review > error
             # > no_match). Deterministic precedence.
             _merge_identity(seen_identity, provider, attempt)
+            continue
+
+        if cat == "metadata_provider_attempt":
+            provider_match = re.search(
+                r"provider=([^ ]+) outcome=([^ ]+) reason=([^ ]+)", detail
+            )
+            if provider_match:
+                provider_name, provider_outcome, provider_reason = provider_match.groups()
+                if provider_outcome == "hit":
+                    outcome, matched, assets, rejected = "matched", True, 1, False
+                elif provider_outcome == "reject":
+                    outcome, matched, assets, rejected = "no_match", False, 0, True
+                elif provider_outcome == "review":
+                    outcome, matched, assets, rejected = "review", False, 0, False
+                elif provider_outcome == "error":
+                    outcome, matched, assets, rejected = "error", False, 0, False
+                else:
+                    outcome, matched, assets, rejected = "no_match", False, 0, False
+                attempts.append(ProviderAttempt(
+                    provider=provider_name,
+                    title=title,
+                    release_key=release_key,
+                    outcome=outcome,
+                    matched=matched,
+                    assets=assets,
+                    detail=detail,
+                    error=provider_reason if outcome == "error" else None,
+                    rejected=rejected,
+                    reason=provider_reason,
+                ))
             continue
 
         # Online metadata pipeline.
@@ -352,6 +388,53 @@ def attempt_from_enrich_events(
                     reason=reason,
                 )
             # artwork_lookup (in-progress) and cache_hit/refresh add nothing.
+
+    if dat_results:
+        for result in dat_results:
+            matched = bool(result.get("matched"))
+            source_id = str(result.get("source_id") or "")
+            source_name = str(result.get("source_name") or "")
+            match_type = str(result.get("match_type") or "")
+            dat_title = str(result.get("title") or "")
+            attempts.append(ProviderAttempt(
+                provider="dat",
+                title=title,
+                release_key=release_key,
+                outcome="matched" if matched else "no_match",
+                matched=matched,
+                assets=1 if matched else 0,
+                match_method=match_type,
+                provider_id=source_id or None,
+                detail=(f"source_id={source_id} source_name={source_name} "
+                        f"match_type={match_type} title={dat_title!r}"),
+            ))
+    else:
+        # Event-only callers still receive DAT observability. Prefer the
+        # per-source records attached to enrich results when the pipeline has
+        # them; events provide a conservative fallback for direct consumers.
+        for event in dat_events:
+            detail = _d(event, "detail", "") or ""
+            error = _d(event, "error", None)
+            if detail == "dat_loaded" or detail.startswith("dat_loaded "):
+                continue
+            source = re.search(r"source=([^ ]+)", detail)
+            matched = "dat_hash_match" in detail or "dat_title_candidate" in detail
+            if detail == "dat_no_match":
+                matched = False
+            elif not matched and not error:
+                continue
+            source_id = source.group(1) if source else ""
+            attempts.append(ProviderAttempt(
+                provider="dat",
+                title=title,
+                release_key=release_key,
+                outcome="error" if error else "matched" if matched else "no_match",
+                matched=matched,
+                assets=1 if matched else 0,
+                provider_id=source_id or None,
+                detail=detail,
+                error=error,
+            ))
 
     for provider, attempt in seen_identity.items():
         attempts.append(attempt)
