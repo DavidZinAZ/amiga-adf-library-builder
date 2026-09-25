@@ -48,6 +48,41 @@ from pathlib import Path
 REPORT: dict = {"steps": [], "errors": []}
 
 
+def _source_identity() -> tuple[str, str, list[str], bool]:
+    """Record app/QA lineage; deepen Actions' shallow checkout before diffing."""
+    repo_root = Path(__file__).resolve().parents[1]
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo_root,
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    ref_name = os.environ.get("GITHUB_REF_NAME", "")
+    if not ref_name.startswith("qual/"):
+        return head, head, [], True
+
+    # actions/checkout defaults to fetch-depth=1, which omits HEAD's parent.
+    # Fetch one more commit on this same ref so the application SHA and exact
+    # application..qualification diff can be checked, not inferred.
+    parent_probe = subprocess.run(
+        ["git", "rev-parse", "HEAD^"], cwd=repo_root,
+        capture_output=True, text=True,
+    )
+    if parent_probe.returncode != 0:
+        subprocess.run(
+            ["git", "fetch", "--no-tags", "--deepen=1", "origin", f"refs/heads/{ref_name}"],
+            cwd=repo_root, capture_output=True, text=True, check=True,
+        )
+    application_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD^"], cwd=repo_root,
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    changed = subprocess.run(
+        ["git", "diff", "--name-only", f"{application_sha}..{head}"],
+        cwd=repo_root, capture_output=True, text=True, check=True,
+    ).stdout.splitlines()
+    qa_only = bool(changed) and set(changed) <= {"tools/qa_windows_real_exec.py"}
+    return application_sha, head, changed, qa_only
+
+
 def _step(name: str, ok: bool, detail: str = "") -> None:
     REPORT["steps"].append({"step": name, "ok": ok, "detail": detail})
     print(f"[{'PASS' if ok else 'FAIL'}] {name}: {detail}")
@@ -66,6 +101,18 @@ def main() -> int:
     report_dir.mkdir(parents=True, exist_ok=True)
     screenshots = report_dir / "screenshots"
     screenshots.mkdir(parents=True, exist_ok=True)
+
+    application_sha, qualification_sha, qualification_diff, qa_only = _source_identity()
+    REPORT.update({
+        "application_sha": application_sha,
+        "qualification_sha": qualification_sha,
+        "qualification_diff_files": qualification_diff,
+    })
+    _step(
+        "qualification_diff_qa_only",
+        qa_only,
+        f"application={application_sha} qualification={qualification_sha} diff={qualification_diff}",
+    )
 
     # ------------------------------------------------------------------ #
     # 1) LAUNCH the real standalone exe (clean Windows launch, offscreen)
@@ -224,21 +271,19 @@ def main() -> int:
         # containing a SPACE), close the app via its NORMAL close path
         # (closeEvent -> _persist_defaults -> SettingsStore.save), reopen a
         # fresh instance on the same settings file, and assert at WIDGET level
-        # that all four folder fields came back. No pipeline run in between.
-        # In-process graceful close is the same closeEvent/_persist_defaults
-        # code path the packaged exe executes on shutdown; the packaged-exe
-        # smoke launch above already proves bundle integrity. A hard
-        # terminate() is deliberately NOT used for the close here.
+        # that both supported folder fields came back. The export destination is
+        # derived from the auto-managed Library Root; it is not an editable field.
+        # No pipeline run occurs in between. In-process graceful close is the same
+        # closeEvent/_persist_defaults path the packaged exe executes on shutdown;
+        # a hard terminate() is deliberately NOT used for this persistence check.
         cw_dirs = {
             "original_dir": base_dir / "cw" / "original",
             "staging_dir": base_dir / "cw" / "staging",
-            "output_dir": base_dir / "cw" / "output",
         }
         for d in cw_dirs.values():
             d.mkdir(parents=True, exist_ok=True)
         mw._le_original_dir.setText(str(cw_dirs["original_dir"]))
         mw._le_staging_dir.setText(str(cw_dirs["staging_dir"]))
-        mw._le_output_dir.setText(str(cw_dirs["output_dir"]))
         mw.show()  # window is visible before the normal close
         mw.close()  # NORMAL close path: closeEvent -> _persist_defaults
         # Reopen: a FRESH MainWindow on the same settings file (the one the
@@ -250,7 +295,6 @@ def main() -> int:
         restored = {
             "original_dir": mw2._le_original_dir.text(),
             "staging_dir": mw2._le_staging_dir.text(),
-            "output_dir": mw2._le_output_dir.text(),
         }
         expected_cw = {k: str(v) for k, v in cw_dirs.items()}
         match = restored == expected_cw
@@ -260,8 +304,7 @@ def main() -> int:
             f"close_without_run_exercised={match} "
             f"library_root={str(pp.library_root)!r} "
             f"original_dir={restored['original_dir']!r} "
-            f"staging_dir={restored['staging_dir']!r} "
-            f"output_dir={restored['output_dir']!r}",
+            f"staging_dir={restored['staging_dir']!r}",
         )
         if match:
             REPORT["close_without_run_exercised"] = True
@@ -607,12 +650,20 @@ def main() -> int:
             gh90_report["multi_release_rows"] = rows
             _gh90_step("gh90_multi_release_rows", rows >= 4, f"rows={rows}")
 
-            # Multi-select: select all rows and verify each selected row identity.
-            pw._table.setSelectionMode(__import__("PySide6.QtWidgets").QtWidgets.QAbstractItemView.MultiSelection)
+            # Multi-select complete rows, matching the table's user-visible
+            # SelectRows behavior. QItemSelectionModel.select(index, Select)
+            # selects a single cell and makes selectedRows() empty, so include
+            # the Rows flag for this programmatic UI-driver operation.
+            from PySide6.QtWidgets import QAbstractItemView
+            from PySide6.QtCore import QItemSelectionModel
+
+            pw._table.setSelectionMode(QAbstractItemView.ExtendedSelection)
             selection_model = pw._table.selectionModel()
+            selection_model.clearSelection()
+            select_row = QItemSelectionModel.Select | QItemSelectionModel.Rows
             for r in range(pw._table.rowCount()):
                 idx = pw._table.model().index(r, 0)
-                selection_model.select(idx, __import__("PySide6.QtCore").QtCore.QItemSelectionModel.Select)
+                selection_model.select(idx, select_row)
             selected = selection_model.selectedRows()
             titles = []
             keys = []
@@ -631,6 +682,7 @@ def main() -> int:
                 keys.append(release_key)
                 if not (title and release_key and release_key in pw._state.current_library.releases):
                     identity_match = False
+            identity_match = identity_match and len(keys) == rows and len(set(keys)) == rows
             gh90_report["selected_rows_identity_match"] = identity_match
             gh90_report["selected_rows_titles"] = titles
             _gh90_step("gh90_selected_rows_identity_match", identity_match,
@@ -658,7 +710,7 @@ def main() -> int:
                         f"sorted_rows={sorted_rows}")
             pw._table.setSortingEnabled(False)
 
-            # Staged mutation: select row 0 and row 2, mutate ONLY those releases to Accepted.
+            # Staged mutation: select row 0 and row 2, mutate ONLY those releases.
             targets = []
             for row in (0, 2):
                 item = pw._table.item(row, 0)
@@ -668,52 +720,68 @@ def main() -> int:
                 for col in range(pw._table.columnCount()):
                     it = pw._table.item(row, col)
                     if it is not None:
-                        release_key = it.data(__import__("PySide6.QtCore").QtCore.Qt.ItemDataRole.UserRole)
+                        release_key = it.data(Qt.ItemDataRole.UserRole)
                         if release_key:
                             break
                 if release_key:
                     targets.append((row, release_key))
-            # Select exactly the target rows.
+
+            # Give every fixture a known pending state, so a no-op cannot appear
+            # successful merely because target rows began Accepted already.
+            staged_state = __import__("amiga_adf_library_builder.models").models.StagedState
+            releases = pw._state.current_library.releases
+            for entry in releases.values():
+                entry.curation_state = staged_state.PENDING
+            before_targets = [releases[key].curation_state for _, key in targets if key in releases]
+
+            # Select exactly the target rows and verify their stable release keys.
             pw._table.clearSelection()
             selection_model = pw._table.selectionModel()
-            select_flag = __import__("PySide6.QtCore").QtCore.QItemSelectionModel.Select
-            rows_flag = __import__("PySide6.QtCore").QtCore.QItemSelectionModel.Rows
+            select_row = QItemSelectionModel.Select | QItemSelectionModel.Rows
             for row, _ in targets:
                 idx = pw._table.model().index(row, 0)
-                selection_model.select(idx, select_flag | rows_flag)
+                selection_model.select(idx, select_row)
             selected = selection_model.selectedRows()
-            if len(selected) == len(targets):
-                pw._set_selected_state(__import__("amiga_adf_library_builder.models").models.StagedState.ACCEPTED)
-            mutated_targets = []
-            for _, release_key in targets:
-                entry = pw._state.current_library.releases.get(release_key)
-                mutated_targets.append(entry.curation_state if entry else None)
-            mutated_ok = all(s is not None and s.value == "Accepted" for s in mutated_targets if s is not None)
-            # Verify non-selected releases remain unchanged.
-            non_selected_unchanged = True
-            for row in range(pw._table.rowCount()):
-                if row in {t[0] for t in targets}:
-                    continue
-                item = pw._table.item(row, 0)
-                if item is None:
-                    continue
-                release_key = None
+            selected_keys = set()
+            for idx in selected:
                 for col in range(pw._table.columnCount()):
-                    it = pw._table.item(row, col)
+                    it = pw._table.item(idx.row(), col)
                     if it is not None:
-                        release_key = it.data(__import__("PySide6.QtCore").QtCore.Qt.ItemDataRole.UserRole)
-                        if release_key:
+                        key = it.data(Qt.ItemDataRole.UserRole)
+                        if key:
+                            selected_keys.add(key)
                             break
-                if not release_key:
-                    continue
-                entry = pw._state.current_library.releases.get(release_key)
-                if entry and entry.curation_state.value == "Accepted":
-                    non_selected_unchanged = False
-                    break
-            gh90_report["staged_mutation_only_selected"] = mutated_ok and non_selected_unchanged
+            target_keys = {key for _, key in targets}
+            selection_identity_match = (
+                len(targets) == 2 and len(selected) == len(targets)
+                and selected_keys == target_keys
+            )
+            if selection_identity_match:
+                pw._set_selected_state(staged_state.ACCEPTED)
+
+            mutated_targets = [releases[key].curation_state for _, key in targets if key in releases]
+            mutated_ok = (
+                len(mutated_targets) == len(targets) and bool(targets)
+                and all(state == staged_state.ACCEPTED for state in mutated_targets)
+            )
+            non_selected_unchanged = all(
+                entry.curation_state == staged_state.PENDING
+                for key, entry in releases.items() if key not in target_keys
+            )
+            only_selected_mutated = (
+                selection_identity_match
+                and len(before_targets) == len(targets)
+                and all(state == staged_state.PENDING for state in before_targets)
+                and mutated_ok and non_selected_unchanged
+            )
+            gh90_report["staged_mutation_only_selected"] = only_selected_mutated
             gh90_report["staged_mutation_target_count"] = len(targets)
-            _gh90_step("gh90_staged_mutation_only_selected", mutated_ok and non_selected_unchanged,
-                        f"targets={len(targets)} mutated={mutated_targets} non_selected_unchanged={non_selected_unchanged}")
+            _gh90_step(
+                "gh90_staged_mutation_only_selected",
+                only_selected_mutated,
+                f"targets={len(targets)} selected={len(selected)} "
+                f"mutated={mutated_targets} non_selected_unchanged={non_selected_unchanged}",
+            )
 
             # Source fixtures unchanged.
             after_hashes = {}
@@ -751,7 +819,6 @@ def main() -> int:
     # ------------------------------------------------------------------ #
     REPORT["gh86"] = gh86_report
     report_path = report_dir / "report.json"
-    report_path.write_text(json.dumps(REPORT, indent=2), encoding="utf-8")
     # Spot-check: no plaintext secret/token in any log under the spaces base.
     leak = False
     for log in (base_dir / "logs").rglob("*.log") if (base_dir / "logs").is_dir() else []:
@@ -760,6 +827,7 @@ def main() -> int:
             leak = True
     _step("no_secret_leak_in_logs", not leak,
           "no plaintext token/secret in GUI logs" if not leak else "SECRET LEAK")
+    report_path.write_text(json.dumps(REPORT, indent=2), encoding="utf-8")
     print("\nREPORT:", report_path)
     # Verdict: fail the CI step if any hard step failed.
     hard_fail = any(not s["ok"] for s in REPORT["steps"]
@@ -767,7 +835,14 @@ def main() -> int:
                                      "exe_self_contained", "settings_persist",
                                      "close_without_run_restore",
                                      "help_about_available", "no_crash_on_invalid_input",
-                                     "no_secret_leak_in_logs",
+                                     "no_secret_leak_in_logs", "qualification_diff_qa_only",
+                                     # (GH-90) Preview selection and staged-state integrity
+                                     "gh90_pipeline_populated", "gh90_preview_loaded",
+                                     "gh90_multi_release_rows", "gh90_selected_rows_identity_match",
+                                     "gh90_filter_refresh_identity_match", "gh90_order_identity_match",
+                                     "gh90_staged_mutation_only_selected", "gh90_source_fixtures_unchanged",
+                                     "gh90_preview_no_export_after_mutation", "gh90_screenshot",
+                                     "gh90_selection_integrity",
                                      # (GH-33) LaunchBox local mappings flows
                                      "lb_multi_mappings_added", "lb_check_roots_diagnostic",
                                      "lb_mappings_persist_reopen",
