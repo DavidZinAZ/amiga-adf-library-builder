@@ -343,31 +343,32 @@ class LemonAmigaConfig:
 _ARTICLES_SET = frozenset({"the", "a", "an"})
 
 def _strip_subtitle(title: str) -> str:
-    """Strip subtitle and leading article for matching.
+    """Strip an explicit dash subtitle without discarding title punctuation.
 
-    Returns the main title portion before any subtitle separator,
-    with a leading article removed so that ``"The X"`` and
-    ``"X"`` normalize identically. This is generic.
+    Colons are not reliable subtitle markers: many game titles use them as
+    internal punctuation (for example, a title followed by a named episode).
+    Canonical normalization handles punctuation-only differences, so only
+    spaced dash separators are treated as subtitle boundaries here.
     """
-    # Match colon or em-dash surrounded by optional spaces, not inside parens.
-    m = re.search(r"\s*(?:[:—‑–])\s", title)
+    m = re.search(r"\s+(?:—|‑|–)\s+", title)
     if m and m.start() > 2:
         title = title[:m.start()].strip()
-    # Strip leading article for article-movement symmetry.
     words = title.split()
-    if len(words) >= 2 and words[0].lower() in _ARTICLES_SET:
+    if len(words) >= 2 and words[0].casefold() in _ARTICLES_SET:
         title = " ".join(words[1:])
     return title
 
 
 def _norm(value: str) -> str:
-    # Delegate to canonical_title for universal roman/arabic,
-    # article-movement, and disambiguator normalization.
-    # Falls back to raw alnum-strip when canonical_title returns empty.
-    canonical = canonical_title(value)
+    """Produce a generic title key tolerant of articles, punctuation and versions."""
+    # Remove article tokens before canonical_title so leading and trailing
+    # article variants converge; canonical_title handles Unicode, punctuation,
+    # parenthetical qualifiers, and Roman/Arabic version-number equivalence.
+    without_articles = re.sub(r"(?i)\b(?:the|a|an)\b", " ", value)
+    canonical = canonical_title(without_articles)
     if canonical:
-        return re.sub(r"[^a-z0-9]", "", canonical.lower())
-    return re.sub(r"[^a-z0-9]", "", value.lower())
+        return canonical.casefold()
+    return re.sub(r"[^a-z0-9]", "", without_articles.casefold())
 
 
 # Threshold band for the deterministic relevance validator below.

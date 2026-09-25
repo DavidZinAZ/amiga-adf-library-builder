@@ -106,6 +106,7 @@ class EnrichCategory(str, Enum):
     """
 
     METADATA_LOOKUP = "metadata_lookup"
+    METADATA_PROVIDER_ATTEMPT = "metadata_provider_attempt"
     CACHE_HIT = "cache_hit"
     CACHE_MISS = "cache_miss"
     CACHE_REFRESH = "cache_refresh"
@@ -676,9 +677,30 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                 activity=activity,
                 halloflight_enabled=halloflight_enabled,
             )
-            # Surface online relevance fall-through decisions as structured
-            # diagnostics (bounded: one event per rejected/reviewed candidate).
+            # Persist provider-level outcomes before the selected result is
+            # reduced to the final metadata record.
             for rev in relevance_events:
+                provider_label = str(rev.get("provider") or "unknown")
+                provider_category = str(rev.get("category") or "not_found")
+                provider_reason = str(rev.get("reason") or provider_category)
+                if provider_category == "accepted":
+                    provider_outcome = "hit"
+                elif provider_category == "rejected":
+                    provider_outcome = "reject"
+                elif provider_category == "review":
+                    provider_outcome = "review"
+                elif provider_reason.endswith("_error"):
+                    provider_outcome = "error"
+                else:
+                    provider_outcome = "no_match"
+                events.append(EnrichEvent(
+                    category=EnrichCategory.METADATA_PROVIDER_ATTEMPT,
+                    detail=(f"provider={provider_label} outcome={provider_outcome} "
+                            f"reason={provider_reason} confidence={float(rev.get('confidence') or 0.0):.2f} "
+                            f"candidate={str(rev.get('canonical_title') or '')!r}"),
+                    ok=provider_outcome not in ("error", "reject", "review"),
+                    error=provider_reason if provider_outcome == "error" else None,
+                ))
                 if rev["category"] == "rejected":
                     events.append(EnrichEvent(
                         category=EnrichCategory.METADATA_RELEVANCE_REJECTED,

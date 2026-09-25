@@ -1102,6 +1102,7 @@ def run_pipeline(
                     pg["events"],
                     title=pg["title"],
                     release_key=pg["release_key"],
+                    dat_results=pg.get("dat_results", []),
                 )
             )
         provider_diagnostics = diagnostics.aggregate_provider_attempts(_attempts)

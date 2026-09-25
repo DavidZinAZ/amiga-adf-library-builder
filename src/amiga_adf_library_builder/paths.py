@@ -34,6 +34,7 @@ Path-role validation (enforced at resolution time):
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -105,15 +106,16 @@ def _xdg_cache_path() -> Path:
 def _portable_cache_path(library_root: Path) -> Path:
     """Resolve cache for portable/packaged builds.
 
-    Auto-detects portable mode: if the library_root has both ``data``
-    and ``catalog`` subdirectories, it is treated as a portable layout
-    and the cache lives under ``library_root/data/cache``. Otherwise
-    falls back to the XDG user-profile cache. This means the packaged
-    Windows GUI follows the portable policy by default/auto-detection,
-    not by requiring the ``AMIGA_ADF_PORTABLE`` env-var opt-in that the
-    shipped EXE never sets.
+    Frozen executables use the app-relative library layout even on a fresh
+    install, before ``data`` and ``catalog`` have been created. The GUI's
+    explicit ``Library-Root`` layout is also portable when run from Python.
+    Existing initialized library layouts retain the same portable behavior;
+    ordinary Python/CLI installs continue to use the XDG cache.
     """
-    if (library_root / "data").is_dir() and (library_root / "catalog").is_dir():
+    packaged = not Path(sys.executable).name.lower().startswith("python")
+    gui_library_root = Path(library_root).name.casefold() == "library-root"
+    initialized_layout = (library_root / "data").is_dir() and (library_root / "catalog").is_dir()
+    if packaged or gui_library_root or initialized_layout:
         return _derive(library_root, "data", "cache").resolve()
     return _xdg_cache_path()
 
