@@ -105,13 +105,15 @@ def _xdg_cache_path() -> Path:
 def _portable_cache_path(library_root: Path) -> Path:
     """Resolve cache for portable/packaged builds.
 
-    When the AMIGA_ADF_PORTABLE environment variable is set, the cache
-    lives under the library_root/data/cache instead of the user profile
-    (~/.cache). This ensures the packaged Windows GUI uses a cache
-    adjacent to the executable that is deterministic and not silently
-    shared across installations.
+    Auto-detects portable mode: if the library_root has both ``data``
+    and ``catalog`` subdirectories, it is treated as a portable layout
+    and the cache lives under ``library_root/data/cache``. Otherwise
+    falls back to the XDG user-profile cache. This means the packaged
+    Windows GUI follows the portable policy by default/auto-detection,
+    not by requiring the ``AMIGA_ADF_PORTABLE`` env-var opt-in that the
+    shipped EXE never sets.
     """
-    if os.environ.get("AMIGA_ADF_PORTABLE"):
+    if (library_root / "data").is_dir() and (library_root / "catalog").is_dir():
         return _derive(library_root, "data", "cache").resolve()
     return _xdg_cache_path()
 
