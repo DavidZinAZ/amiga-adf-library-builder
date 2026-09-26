@@ -8,8 +8,10 @@ metadata. Wikipedia and RAWG remain optional fallback metadata providers.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
+import urllib.error
 import urllib.parse
 import urllib.request
 import ipaddress
@@ -25,6 +27,8 @@ from .title_norm import canonical_title
 from .utils import now_iso as utc_now
 
 USER_AGENT = f"AmigaADFLibraryBuilder/{__import__('amiga_adf_library_builder._version', fromlist=['__version__']).__version__} (+preservation metadata client)"
+_logger = logging.getLogger(__name__)
+
 _ALLOWED_ARTWORK_PAGE_HOSTS = {
     "www.lemonamiga.com", "lemonamiga.com", "amiga.abime.net",
     "www.openretro.org", "openretro.org", "amiga.lychesis.net",
@@ -899,6 +903,9 @@ def hall_of_light_lookup(title: str, *, timeout: float = 20.0,
     search_url = "https://amiga.abime.net/games/search?" + urllib.parse.urlencode({"q": title})
     try:
         search_html, final_search_url = _text_get(search_url, timeout=timeout, opener=opener)
+    except (urllib.error.URLError, urllib.error.HTTPError, socket.gaierror, socket.timeout, TimeoutError) as exc:
+        _logger.warning("hall-of-light: search fetch failed: %s", type(exc).__name__)
+        raise
     except Exception:
         return None
 
@@ -919,6 +926,9 @@ def hall_of_light_lookup(title: str, *, timeout: float = 20.0,
     for game_url in game_links[:10]:  # Limit to first 10 results
         try:
             detail_html, final_url = _text_get(game_url, timeout=timeout, opener=opener)
+        except (urllib.error.URLError, urllib.error.HTTPError, socket.gaierror, socket.timeout, TimeoutError) as exc:
+            _logger.warning("hall-of-light: detail fetch failed for %s: %s", game_url, type(exc).__name__)
+            continue
         except Exception:
             continue
 
@@ -1120,6 +1130,9 @@ def lemonamiga_lookup(title: str, *, timeout: float = 20.0,
         game_html, final_url = _text_get(
             game_url, timeout=timeout, opener=opener
         )
+    except (urllib.error.URLError, urllib.error.HTTPError, socket.gaierror, socket.timeout, TimeoutError) as exc:
+        _logger.warning("lemon-amiga: game page fetch failed: %s", type(exc).__name__)
+        raise
     except Exception:
         return None
 
@@ -1663,19 +1676,23 @@ def lookup_metadata(title: str, *, cache_dir: Path, curated_dir: Path,
         nonlocal accepted
         _log(f"Querying {label}…")
         candidate = None
-        outcome = "not_configured"
+        outcome = "no_result"
         try:
             candidate = lookup()
             outcome = "candidate_returned"
         except Exception as exc:
-            # Classify the exception type for diagnostics
-            exc_name = type(exc).__name__
-            if "auth" in exc_name.lower() or "credentials" in str(exc).lower():
-                outcome = "auth_error"
-            elif "request" in exc_name.lower() or "connection" in exc_name.lower() or "timeout" in exc_name.lower():
+            # Classify the exception type for diagnostics using proper
+            # isinstance checks rather than string-containment heuristics.
+            if isinstance(exc, (urllib.error.URLError, urllib.error.HTTPError)):
                 outcome = "request_error"
-            else:
+            elif isinstance(exc, json.JSONDecodeError):
                 outcome = "parse_error"
+            elif isinstance(exc, (socket.gaierror, socket.timeout, TimeoutError)):
+                outcome = "request_error"
+            elif "auth" in type(exc).__name__.lower() or "credentials" in str(exc).lower():
+                outcome = "auth_error"
+            else:
+                outcome = "parse_error"  # genuine unexpected parse/internal error
             candidate = None
         if candidate is None:
             relevance_events.append({

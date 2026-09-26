@@ -217,12 +217,14 @@ class TestLemonAmigaLookup:
         assert result.artwork_url is not None
         assert result.artwork_provider == "lemon-amiga"
 
-    def test_timeout_returns_none(self):
+    def test_timeout_propagates_as_transport_error(self):
+        """TimeoutError is a transport exception that propagates to _try_provider."""
         cfg = LemonAmigaConfig(enabled=True)
-        result = lemonamiga_lookup("Vroom", opener=_error_opener(TimeoutError("timeout")), config=cfg)
-        assert result is None
+        with pytest.raises(TimeoutError):
+            lemonamiga_lookup("Vroom", opener=_error_opener(TimeoutError("timeout")), config=cfg)
 
     def test_connection_error_returns_none(self):
+        """ConnectionError is not a transport exception; it returns None."""
         cfg = LemonAmigaConfig(enabled=True)
         result = lemonamiga_lookup("Vroom", opener=_error_opener(ConnectionError("refused")), config=cfg)
         assert result is None
