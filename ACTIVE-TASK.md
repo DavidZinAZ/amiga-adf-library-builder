@@ -1,29 +1,25 @@
-# ACTIVE-TASK.md — GH-192 REM-2
+# ACTIVE-TASK — GH-192 REM-3 — Diagnostic/Observability Fixes
 
-## Mode: IMPLEMENT
+- Task: GH-192 REM-3 (from corrected Q-Branch research handoff)
+- Mode: IMPLEMENT (authorized by task body)
+- BASE: a444a4f81f66f7ea4d9d527d2f22af3d75f1b243 (origin/main, v0.2.33)
+- Branch: dev/gh192-rem3
+- Worktree: /home/dumbo/projects/amiga-adf-library-builder
+- Status: IMPLEMENTING
 
-### Authorized base and workspace
-- BASE SHA: 332527722b77900287e0c07ce1861c76cad36483 (`origin/main` after fetch)
-- Worktree: /home/dumbo/projects/amiga-adf-library-builder-wt
-- Initial HEAD matched BASE; working tree was clean.
-- Git action planned: create a task branch, then one local implementation commit after verification. No push.
+## Tasks
 
-### Scope
-Repair the four GH-192 REM-2 production defects: packaged cache resolution, DAT provider diagnostics, generic online metadata matching and provider-level attempt observability. Preserve the existing release-key diagnostic association in `pipeline.py`.
+### TASK A — _try_provider exception classification
+Fix the _try_provider() exception classifier so transport/infrastructure failures are classified as request_error rather than falling through to parse_error. Use proper exception-type handling.
 
-### Validation
-- `pytest tests/test_gh192_rem1.py -v`: 36 passed on implementation commit 1aebc1d9b2d44e522cb4199d531dd626f1a2acb5.
-- Related suite: 150 passed, 2 deselected; the deselected artwork tests fail identically on BASE 3325277.
-- Broader full-suite attempt was stopped after 10m at 44% with four failures observed. All four exact test failures were rerun from an archive of BASE 3325277 and reproduced there; no new regressions established. Full suite remainder is unverified.
-- `git diff --check BASE..implementation-commit`: passed.
-- Release-key association remains `_enrich_by_key` based; positional zip regression was not introduced.
+### TASK B — HOL/Lemon swallowed transport failures
+Add bounded diagnostic visibility before returning None so DNS/connection/HTTP/timeout/provider failures can be distinguished from a clean no-match. Preserve the existing None return contract.
 
-### Candidate
-- Implementation commit: 1aebc1d9b2d44e522cb4199d531dd626f1a2acb5
-- Parent / BASE: 332527722b77900287e0c07ce1861c76cad36483
-- Branch: `dev/gh192-rem2-packaged-gui-production-regressions`
-- No push; final checkpoint documentation commit will follow.
+### TASK C — misleading not_configured outcome
+Fix the diagnostic outcome used when an enabled/configured provider was actually called and returned no candidate. Do not label that state not_configured.
 
-## Mode: COMPLETE
-
-Source and test changes are committed. Focused acceptance tests pass; pre-existing baseline failures and the incomplete full-suite run are recorded above. QA handoff must verify the final branch HEAD and should treat full-suite coverage beyond the recorded related suites as outstanding.
+## Implementation Notes
+- Primary change: src/amiga_adf_library_builder/metadata.py
+- Test file: tests/test_gh192_rem3.py (new)
+- Changes are bounded to diagnostic/observability only
+- No functional matching/scoring behavior changes
