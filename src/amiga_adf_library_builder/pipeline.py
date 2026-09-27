@@ -100,9 +100,14 @@ def _find_staged_entry(
     # Fallback: match by normalized title.  GH-190 removed group/alt_marker
     # from _build_release_key, so the release_key changed but the title
     # component is still present in both the group and the staged entry.
+    # GHOST entries are skipped in the fallback: they are emptied
+    # source groups (moved/merged) and must not reattach to a new active
+    # group by title coincidence (GH-192 Problem 5).
     if group_title:
         norm_title = _norm(group_title)
         for candidate in staged_library.releases.values():
+            if candidate.curation_state == StagedState.GHOST:
+                continue
             if candidate.title and _norm(candidate.title) == norm_title:
                 return candidate
 
@@ -152,6 +157,11 @@ def _sync_group_membership(
             group.records = []
             group.disks = []
             group.specials = []
+            # GHOST entries are emptied by operator move/merge.
+            # The group must not continue to appear as an active
+            # release — set quarantine so it is skipped (GH-192 Problem 5).
+            if entry.curation_state == StagedState.GHOST:
+                group.quarantine_reason = "curation: ghost (moved/merged)"
             continue
 
         curated_set = set(curated_files)
@@ -232,6 +242,10 @@ def _apply_curation(
             updated_decisions[game_id] = group.release_key.lower()
         elif entry.curation_state == StagedState.REJECTED:
             group.quarantine_reason = "rejected by curation"
+        elif entry.curation_state == StagedState.GHOST:
+            # Emptied by operator move/merge; quarantine so the
+            # group does not appear as an active release (GH-192).
+            group.quarantine_reason = "curation: ghost (moved/merged)"
         # MODIFIED/NEEDS_REVIEW: keep existing quarantine; operator
         # has flagged these for review and the pipeline should not
         # silently export them.

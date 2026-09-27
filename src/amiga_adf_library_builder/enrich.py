@@ -1359,6 +1359,7 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
 
     from .canonical_naming import _load_canonical_library, identity_for_release_group
     from .canonical import SourceAuthority, Provenance
+    from .title_norm import _strip_parenthetical_disambiguators
     display_title = metadata.canonical_title if metadata else group.title
     canon = _load_canonical_library(library_root) if library_root is not None else None
     if canon is not None:
@@ -1369,11 +1370,17 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                 if value and (metadata is None or prov.authority > SourceAuthority.PARSER):
                     display_title = value
                 elif display_title:
-                    canon.claim_field("game", identity[1], "title", display_title,
+                    # Strip disambiguation before claiming so provider
+                    # display text like "Hacker (video game)" does not
+                    # become the canonical library title. The provenance
+                    # record still captures the provider title.
+                    claim_title = _strip_parenthetical_disambiguators(display_title)
+                    canon.claim_field("game", identity[1], "title", claim_title,
                                       Provenance(source=provider, authority=SourceAuthority.SEED))
     group.title = display_title or group.title
-    if metadata is not None:
-        metadata.canonical_title = group.title
+    # metadata.canonical_title is intentionally NOT overwritten with
+    # group.title. The metadata's own canonical_title must be preserved
+    # and not leaked by pipeline-modified display text (GH-192 Problem 4).
 
     master = None
     processed: Optional[Path] = None
@@ -1557,6 +1564,10 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
         if _ra_success_note is not None:
             notes.append(_ra_success_note)
     _review_items = _build_review_items(events)
+    # Propagate DAT/local metadata diagnostic events so callers
+    # can observe dat_not_configured, dat_source_disabled,
+    # dat_loaded, dat_hash_match, etc. (GH-192 Problem 3).
+    events.extend(_dat_events)
     return EnrichResult(nfo_path, master, processed, processed is None, notes, metadata_path, provider, processed is None, events, needs_manual_review=needs_manual_review,
                         metadata_confidence=(metadata.confidence if metadata is not None else None),
                         review_items=_review_items, dat_results=_dat_results)
