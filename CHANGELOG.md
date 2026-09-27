@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.36 — 2026-09-27
+
+### Windows User Test Release (operator production qualification)
+
+- Packaging-only release of PR #205 merged main (GH-192/#189 provider repair) for real operator production testing.
+- Version identity: 0.2.35 → 0.2.36 in pyproject.toml, _frozen_version.py, AmigaADFGui.spec, tools/_version_info.txt, CHANGELOG.md.
+- GH-192 reopened for operator production acceptance on the packaged Windows build.
+- GH-189 remains open.
+- Do not close until the v0.2.36 operator run is reviewed.
+
 ## 0.2.26 — 2026-09-22
 
 ### GH-183 Release
