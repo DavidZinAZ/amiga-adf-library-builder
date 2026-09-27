@@ -88,6 +88,19 @@ class UnsafeUrlError(ValueError):
     """Raised when an outbound fetch URL targets a private/loopback/link-local address."""
 
 
+class _BotChallengeError(Exception):
+    """Raised when a provider returns an anti-bot challenge page instead of content.
+
+    The HTTP status code is captured when available. This lets downstream
+    diagnostics distinguish bot blocking (bot_challenge) from normal
+    no-match, parser failure, or generic network/request errors.
+    """
+
+    def __init__(self, message: str, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
+
+
 # Blocks outbound fetches to hosts that resolve to non-public address space.
 # Covers loopback, link-local, RFC1918 and IPv6 ULA/private/loopback. The guard
 # never performs a real network request itself; DNS resolution is only consulted
@@ -291,7 +304,26 @@ def _text_get(url: str, *, timeout: float = 20.0,
         headers = getattr(response, "headers", None)
         if headers is not None and hasattr(headers, "get_content_charset"):
             charset = headers.get_content_charset() or "utf-8"
-        return data.decode(charset, errors="replace"), str(final_url)
+        text = data.decode(charset, errors="replace")
+        # Detect bot-challenge / anti-bot interstitial responses so that
+        # external blocking is distinguishable from normal no-match or
+        # parser failures downstream.
+        _BOT_CHALLENGE_MARKERS = (
+            "Making sure you're not a bot",   # Anubis / Within
+            "Just a moment...",               # Cloudflare
+            "<title>Just a moment...</title>",
+            "You have been blocked",
+            "bot_check",
+            "cf-browser-verifier",
+        )
+        if any(marker in text for marker in _BOT_CHALLENGE_MARKERS):
+            status = getattr(response, "status", None) or getattr(response, "getcode", lambda: None)()
+            raise _BotChallengeError(
+                f"bot_challenge: provider anti-bot page detected "
+                f"for {url}",
+                status=status,
+            )
+        return text, str(final_url)
 
 
 @dataclass
@@ -899,11 +931,13 @@ def hall_of_light_lookup(title: str, *, timeout: float = 20.0,
     import urllib.parse
     import re
 
-    # Step 1: Search for the game
-    search_url = "https://amiga.abime.net/games/search?" + urllib.parse.urlencode({"q": title})
+    # Step 1: Search for the game using the verified live listing endpoint.
+    # The old /games/search?q= URL returns a JS filter form with no result
+    # links; /games/list/?gamename= returns actual result links.
+    search_url = "https://amiga.abime.net/games/list/?" + urllib.parse.urlencode({"gamename": title})
     try:
         search_html, final_search_url = _text_get(search_url, timeout=timeout, opener=opener)
-    except (urllib.error.URLError, urllib.error.HTTPError, socket.gaierror, socket.timeout, TimeoutError) as exc:
+    except (urllib.error.URLError, urllib.error.HTTPError, socket.gaierror, socket.timeout, TimeoutError, _BotChallengeError) as exc:
         _logger.warning("hall-of-light: search fetch failed: %s", type(exc).__name__)
         raise
     except Exception:
@@ -1004,7 +1038,12 @@ class _HallOfLightSearchParser(HTMLParser):
 
 
 class _HallOfLightDetailParser(HTMLParser):
-    """Parse Hall of Light game detail page for metadata."""
+    """Parse Hall of Light game detail page for metadata.
+
+    The live site uses plain <h1> and <dt> elements without the
+    previously-expected CSS classes. Field labels are derived from
+    the text content of <dt> elements rather than class attributes.
+    """
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -1021,6 +1060,9 @@ class _HallOfLightDetailParser(HTMLParser):
         self._in_description = False
         self._description_parts: list[str] = []
         self._skip_until_endtag: str = ""
+        self._in_h1 = False
+        self._in_dt = False
+        self._dt_text_parts: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
         if self._skip_until_endtag:
@@ -1029,24 +1071,24 @@ class _HallOfLightDetailParser(HTMLParser):
         a = {k.lower(): (v or "") for k, v in attrs}
         tag_lower = tag.lower()
 
-        if tag_lower == "h1" and a.get("class") and "game-title" in a["class"]:
+        if tag_lower == "h1":
+            self._in_h1 = True
             self._state = "title"
-        elif tag_lower == "div" and a.get("class") and "game-description" in a["class"]:
+        elif tag_lower == "div" and a.get("class") and "description" in a["class"].lower():
             self._in_description = True
             self._state = "description"
         elif tag_lower == "dt":
-            # Definition term - field label
-            self._current_field = a.get("class", "").lower() or ""
+            self._in_dt = True
+            self._dt_text_parts = []
         elif tag_lower == "dd" and self._current_field:
-            # Definition description - field value; keep the field from the preceding dt
-            self._state = self._current_field
+            self._state = self._current_field.lower()
         elif tag_lower == "a" and a.get("href"):
             href = a["href"]
-            # Extract game ID from URL if present
-            if "/games/view/" in href:
-                parts = href.split("/")
-                if len(parts) >= 4:
-                    self.game_id = parts[3] if parts[3] else ""
+            # Extract game slug from /games/view/<slug> URLs.
+            # The live site no longer uses /games/view/<id>/<slug>.
+            m = re.match(r"^/games/view/([^/]+)$", href)
+            if m:
+                self.game_id = m.group(1)
 
     def handle_endtag(self, tag: str) -> None:
         if self._skip_until_endtag:
@@ -1055,11 +1097,12 @@ class _HallOfLightDetailParser(HTMLParser):
             return
 
         if tag.lower() == "dt":
-            # Don't clear _current_field here - it's needed for the following dd
-            pass
+            self._in_dt = False
+            self._current_field = "".join(self._dt_text_parts).strip().lower()
+            self._dt_text_parts = []
         elif tag.lower() == "dd":
             self._state = ""
-            self._current_field = ""  # Clear after dd
+            self._current_field = ""
         elif tag.lower() == "div" and self._in_description:
             self._in_description = False
             if self._description_parts:
@@ -1077,13 +1120,15 @@ class _HallOfLightDetailParser(HTMLParser):
         if not data:
             return
 
-        if self._state == "title" and not self.canonical_title:
+        if self._in_dt:
+            self._dt_text_parts.append(data)
+        elif self._state == "title" and not self.canonical_title:
             self.canonical_title = data
         elif self._state == "description" or self._in_description:
             self._description_parts.append(data)
         elif self._state:
-            # Field mapping from class names to our fields
-            field = self._state.replace("game-", "").replace("field-", "")
+            # Field mapping from <dt> text labels to our fields
+            field = self._state
             if "year" in field or "release" in field:
                 self.year = data[:4] if len(data) >= 4 and data[:4].isdigit() else ""
             elif "developer" in field:
@@ -1130,7 +1175,7 @@ def lemonamiga_lookup(title: str, *, timeout: float = 20.0,
         game_html, final_url = _text_get(
             game_url, timeout=timeout, opener=opener
         )
-    except (urllib.error.URLError, urllib.error.HTTPError, socket.gaierror, socket.timeout, TimeoutError) as exc:
+    except (urllib.error.URLError, urllib.error.HTTPError, socket.gaierror, socket.timeout, TimeoutError, _BotChallengeError) as exc:
         _logger.warning("lemon-amiga: game page fetch failed: %s", type(exc).__name__)
         raise
     except Exception:
@@ -1271,6 +1316,7 @@ class _LemonAmigaGameParser(HTMLParser):
         self._current_doc_type: str = ""
         self._in_doc_link: bool = False
         self._doc_link_text_parts: list[str] = []
+        self._in_h1: bool = False  # track <h1> content for canonical title
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
         a = {k.lower(): (v or "") for k, v in attrs}
@@ -1281,6 +1327,7 @@ class _LemonAmigaGameParser(HTMLParser):
         elif tag_lower == "h1" and not self.canonical_title:
             self._in_td = False
             self._in_th = False
+            self._in_h1 = True
         elif tag_lower == "th":
             self._in_th = True
             self._th_text = ""
@@ -1349,7 +1396,7 @@ class _LemonAmigaGameParser(HTMLParser):
         elif tag_lower == "th":
             self._in_th = False
         elif tag_lower == "h1":
-            pass  # title captured in handle_data
+            self._in_h1 = False
         elif tag_lower == "div":
             self._in_description = False
             self._in_docs_section = False
@@ -1394,7 +1441,7 @@ class _LemonAmigaGameParser(HTMLParser):
             self._th_text += data + " "
         elif self._in_doc_link:
             self._doc_link_text_parts.append(data)
-        elif not self.canonical_title:
+        elif self._in_h1 and not self.canonical_title:
             self.canonical_title = data
 
     def _process_field(self, field: str, value: str) -> None:
@@ -1683,7 +1730,9 @@ def lookup_metadata(title: str, *, cache_dir: Path, curated_dir: Path,
         except Exception as exc:
             # Classify the exception type for diagnostics using proper
             # isinstance checks rather than string-containment heuristics.
-            if isinstance(exc, (urllib.error.URLError, urllib.error.HTTPError)):
+            if isinstance(exc, _BotChallengeError):
+                outcome = "bot_challenge"
+            elif isinstance(exc, (urllib.error.URLError, urllib.error.HTTPError)):
                 outcome = "request_error"
             elif isinstance(exc, json.JSONDecodeError):
                 outcome = "parse_error"

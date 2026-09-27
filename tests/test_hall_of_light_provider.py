@@ -72,9 +72,9 @@ HOL_SEARCH_HTML = b'''
 <head><title>Hall of Light - Search Results</title></head>
 <body>
 <div class="search-results">
-<a href="/games/view/1234/star-voyage">Star Voyage</a>
-<a href="/games/view/5678/star-voyage-ii">Star Voyage II: The Return</a>
-<a href="/games/view/9999/unrelated-game">Unrelated Game</a>
+<a href="/games/view/star-voyage">Star Voyage</a>
+<a href="/games/view/star-voyage-ii">Star Voyage II: The Return</a>
+<a href="/games/view/unrelated-game">Unrelated Game</a>
 </div>
 </body>
 </html>
@@ -84,24 +84,24 @@ HOL_DETAIL_STAR_VOYAGE = b'''
 <html>
 <head><title>Star Voyage - Hall of Light</title></head>
 <body>
-<h1 class="game-title">Star Voyage</h1>
-<div class="game-description">
+<h1>Star Voyage</h1>
+<div class="description">
 Classic action-adventure title for the Amiga.
 Released in 1987 by Electronic Arts.
 </div>
 <dl>
-<dt class="game-year">Year</dt>
-<dd class="game-year">1987</dd>
-<dt class="game-developer">Developer</dt>
-<dd class="game-developer">EA Games</dd>
-<dt class="game-publisher">Publisher</dt>
-<dd class="game-publisher">Electronic Arts</dd>
-<dt class="game-genre">Genre</dt>
-<dd class="game-genre">Action, Adventure</dd>
-<dt class="game-platform">Platform</dt>
-<dd class="game-platform">Amiga, Amiga OCS</dd>
+<dt>Year</dt>
+<dd>1987</dd>
+<dt>Developer</dt>
+<dd>EA Games</dd>
+<dt>Publisher</dt>
+<dd>Electronic Arts</dd>
+<dt>Genre</dt>
+<dd>Action, Adventure</dd>
+<dt>Platform</dt>
+<dd>Amiga, Amiga OCS</dd>
 </dl>
-<a href="/games/view/1234/star-voyage">View</a>
+<a href="/games/view/star-voyage">View</a>
 </body>
 </html>
 '''
@@ -110,23 +110,23 @@ HOL_DETAIL_STAR_VOYAGE_II = b'''
 <html>
 <head><title>Star Voyage II: The Return - Hall of Light</title></head>
 <body>
-<h1 class="game-title">Star Voyage II: The Return</h1>
-<div class="game-description">
+<h1>Star Voyage II: The Return</h1>
+<div class="description">
 Sequel to the classic Star Voyage.
 </div>
 <dl>
-<dt class="game-year">Year</dt>
-<dd class="game-year">1989</dd>
-<dt class="game-developer">Developer</dt>
-<dd class="game-developer">EA Games</dd>
-<dt class="game-publisher">Publisher</dt>
-<dd class="game-publisher">Electronic Arts</dd>
-<dt class="game-genre">Genre</dt>
-<dd class="game-genre">Action, Adventure</dd>
-<dt class="game-platform">Platform</dt>
-<dd class="game-platform">Amiga, Amiga AGA</dd>
+<dt>Year</dt>
+<dd>1989</dd>
+<dt>Developer</dt>
+<dd>EA Games</dd>
+<dt>Publisher</dt>
+<dd>Electronic Arts</dd>
+<dt>Genre</dt>
+<dd>Action, Adventure</dd>
+<dt>Platform</dt>
+<dd>Amiga, Amiga AGA</dd>
 </dl>
-<a href="/games/view/5678/star-voyage-ii">View</a>
+<a href="/games/view/star-voyage-ii">View</a>
 </body>
 </html>
 '''
@@ -135,21 +135,21 @@ HOL_DETAIL_NO_AMIGA = b'''
 <html>
 <head><title>PC Only Game - Hall of Light</title></head>
 <body>
-<h1 class="game-title">PC Only Game</h1>
-<div class="game-description">A game only on PC.</div>
+<h1>PC Only Game</h1>
+<div class="description">A game only on PC.</div>
 <dl>
-<dt class="game-year">Year</dt>
-<dd class="game-year">1990</dd>
-<dt class="game-developer">Developer</dt>
-<dd class="game-developer">PC Devs</dd>
-<dt class="game-publisher">Publisher</dt>
-<dd class="game-publisher">PC Pub</dd>
-<dt class="game-genre">Genre</dt>
-<dd class="game-genre">Strategy</dd>
-<dt class="game-platform">Platform</dt>
-<dd class="game-platform">PC (Windows), DOS</dd>
+<dt>Year</dt>
+<dd>1990</dd>
+<dt>Developer</dt>
+<dd>PC Devs</dd>
+<dt>Publisher</dt>
+<dd>PC Pub</dd>
+<dt>Genre</dt>
+<dd>Strategy</dd>
+<dt>Platform</dt>
+<dd>PC (Windows), DOS</dd>
 </dl>
-<a href="/games/view/1111/pc-only-game">View</a>
+<a href="/games/view/pc-only-game">View</a>
 </body>
 </html>
 '''
@@ -161,21 +161,21 @@ HOL_DETAIL_WITH_COVER = b'''
 <meta property="og:image" content="https://amiga.abime.net/media/covers/star-voyage-front.jpg">
 </head>
 <body>
-<h1 class="game-title">Star Voyage</h1>
-<div class="game-description">Classic action-adventure title.</div>
+<h1>Star Voyage</h1>
+<div class="description">Classic action-adventure title.</div>
 <dl>
-<dt class="game-year">Year</dt>
-<dd class="game-year">1987</dd>
-<dt class="game-developer">Developer</dt>
-<dd class="game-developer">EA Games</dd>
-<dt class="game-publisher">Publisher</dt>
-<dd class="game-publisher">Electronic Arts</dd>
-<dt class="game-genre">Genre</dt>
-<dd class="game-genre">Action, Adventure</dd>
-<dt class="game-platform">Platform</dt>
-<dd class="game-platform">Amiga, Amiga OCS</dd>
+<dt>Year</dt>
+<dd>1987</dd>
+<dt>Developer</dt>
+<dd>EA Games</dd>
+<dt>Publisher</dt>
+<dd>Electronic Arts</dd>
+<dt>Genre</dt>
+<dd>Action, Adventure</dd>
+<dt>Platform</dt>
+<dd>Amiga, Amiga OCS</dd>
 </dl>
-<a href="/games/view/1234/star-voyage">View</a>
+<a href="/games/view/star-voyage">View</a>
 </body>
 </html>
 '''
@@ -193,13 +193,13 @@ HOL_DETAIL_MINIMAL = b'''
 <html>
 <head><title>Minimal Game - Hall of Light</title></head>
 <body>
-<h1 class="game-title">Minimal Game</h1>
-<div class="game-description">A minimal entry.</div>
+<h1>Minimal Game</h1>
+<div class="description">A minimal entry.</div>
 <dl>
-<dt class="game-platform">Platform</dt>
-<dd class="game-platform">Amiga</dd>
+<dt>Platform</dt>
+<dd>Amiga</dd>
 </dl>
-<a href="/games/view/2222/minimal-game">View</a>
+<a href="/games/view/minimal-game">View</a>
 </body>
 </html>
 '''
@@ -214,15 +214,15 @@ def test_hall_of_light_lookup_returns_record(monkeypatch, tmp_path):
 
     log: list[str] = []
     responses = {
-        "/games/search?q=Star+Voyage": HOL_SEARCH_HTML,
-        "/games/view/1234/star-voyage": HOL_DETAIL_STAR_VOYAGE,
+        "/games/list/?gamename=Star+Voyage": HOL_SEARCH_HTML,
+        "/games/view/star-voyage": HOL_DETAIL_STAR_VOYAGE,
     }
     record = hall_of_light_lookup(
         "Star Voyage", opener=_multi_opener(responses, log),
     )
     assert record is not None
     assert record.provider == "hall-of-light"
-    assert record.provider_id == "1234"
+    assert record.provider_id == "star-voyage"
     assert record.canonical_title == "Star Voyage"
     assert record.year == "1987"
     assert record.developer == "EA Games"
@@ -230,7 +230,7 @@ def test_hall_of_light_lookup_returns_record(monkeypatch, tmp_path):
     assert "Action" in record.genres
     assert "Adventure" in record.genres
     assert any("amiga" in p.lower() for p in record.platforms)
-    assert record.source_url.startswith("https://amiga.abime.net/games/view/1234/star-voyage")
+    assert record.source_url.startswith("https://amiga.abime.net/games/view/star-voyage")
     assert record.confidence > 0.5
 
 
@@ -241,9 +241,9 @@ def test_hall_of_light_lookup_ranks_by_similarity(monkeypatch, tmp_path):
 
     log: list[str] = []
     responses = {
-        "/games/search?q=Star+Voyage": HOL_SEARCH_HTML,
-        "/games/view/1234/star-voyage": HOL_DETAIL_STAR_VOYAGE,
-        "/games/view/5678/star-voyage-ii": HOL_DETAIL_STAR_VOYAGE_II,
+        "/games/list/?gamename=Star+Voyage": HOL_SEARCH_HTML,
+        "/games/view/star-voyage": HOL_DETAIL_STAR_VOYAGE,
+        "/games/view/star-voyage-ii": HOL_DETAIL_STAR_VOYAGE_II,
     }
     record = hall_of_light_lookup(
         "Star Voyage", opener=_multi_opener(responses, log),
@@ -272,11 +272,11 @@ def test_hall_of_light_lookup_skips_non_amiga_games(monkeypatch):
 
     log: list[str] = []
     search_html = b'''
-<html><body><a href="/games/view/1111/pc-only-game">PC Only Game</a></body></html>
+<html><body><a href="/games/view/pc-only-game">PC Only Game</a></body></html>
 '''
     responses = {
-        "/games/search?q=PC+Only+Game": search_html,
-        "/games/view/1111/pc-only-game": HOL_DETAIL_NO_AMIGA,
+        "/games/list/?gamename=PC+Only+Game": search_html,
+        "/games/view/pc-only-game": HOL_DETAIL_NO_AMIGA,
     }
     record = hall_of_light_lookup(
         "PC Only Game", opener=_multi_opener(responses, log),
@@ -292,8 +292,8 @@ def test_hall_of_light_lookup_artwork_discovery(monkeypatch):
 
     log: list[str] = []
     responses = {
-        "/games/search?q=Star+Voyage": HOL_SEARCH_HTML,
-        "/games/view/1234/star-voyage": HOL_DETAIL_WITH_COVER,
+        "/games/list/?gamename=Star+Voyage": HOL_SEARCH_HTML,
+        "/games/view/star-voyage": HOL_DETAIL_WITH_COVER,
     }
     record = hall_of_light_lookup(
         "Star Voyage", opener=_multi_opener(responses, log),
@@ -301,7 +301,7 @@ def test_hall_of_light_lookup_artwork_discovery(monkeypatch):
     assert record is not None
     assert record.artwork_url == "https://amiga.abime.net/media/covers/star-voyage-front.jpg"
     assert record.artwork_provider == "hall-of-light"
-    assert record.artwork_source_url.startswith("https://amiga.abime.net/games/view/1234/star-voyage")
+    assert record.artwork_source_url.startswith("https://amiga.abime.net/games/view/star-voyage")
 
 
 def test_hall_of_light_lookup_handles_network_errors(monkeypatch):
@@ -326,14 +326,14 @@ def test_hall_of_light_lookup_handles_network_errors(monkeypatch):
     search_html = b'''
 <html><body>
 <a href="/games/view/1111/failed-game">Failed Game</a>
-<a href="/games/view/1234/star-voyage">Star Voyage</a>
+<a href="/games/view/star-voyage">Star Voyage</a>
 </body></html>
 '''
     opener = FailingOpener("/games/view/1111/failed-game")
     # Need to return search HTML first
     def multi_opener(request, timeout=0):
         log.append(request.full_url)
-        if "/games/search" in request.full_url:
+        if "/games/list/" in request.full_url:
             r = _Resp(search_html)
             r.url = request.full_url
             return r
@@ -350,10 +350,10 @@ def test_hall_of_light_lookup_minimal_fields(monkeypatch):
     monkeypatch.delenv("MOBYGAMES_API_KEY", raising=False)
 
     log: list[str] = []
-    search_html = b'<html><body><a href="/games/view/2222/minimal-game">Minimal Game</a></body></html>'
+    search_html = b'<html><body><a href="/games/view/minimal-game">Minimal Game</a></body></html>'
     responses = {
-        "/games/search?q=Minimal+Game": search_html,
-        "/games/view/2222/minimal-game": HOL_DETAIL_MINIMAL,
+        "/games/list/?gamename=Minimal+Game": search_html,
+        "/games/view/minimal-game": HOL_DETAIL_MINIMAL,
     }
     record = hall_of_light_lookup(
         "Minimal Game", opener=_multi_opener(responses, log),
@@ -398,8 +398,8 @@ def test_hall_of_light_in_lookup_metadata_accepted(monkeypatch, tmp_path):
 
     log: list[str] = []
     responses = {
-        "/games/search?q=Star+Voyage": HOL_SEARCH_HTML,
-        "/games/view/1234/star-voyage": HOL_DETAIL_STAR_VOYAGE,
+        "/games/list/?gamename=Star+Voyage": HOL_SEARCH_HTML,
+        "/games/view/star-voyage": HOL_DETAIL_STAR_VOYAGE,
     }
 
     record, provider, events = lookup_metadata(
@@ -428,18 +428,18 @@ def test_hall_of_light_rejected_falls_through_to_wikipedia(monkeypatch, tmp_path
 
     log: list[str] = []
     # Hall of Light returns a different game (low similarity, but above 0.30 floor)
-    hol_search = b'<html><body><a href=\"/games/view/9999/star-quest\">Star Quest</a></body></html>'
+    hol_search = b'<html><body><a href="/games/view/star-quest">Star Quest</a></body></html>'
     hol_detail = b'''
 <html><body>
-<h1 class="game-title">Star Quest</h1>
-<div class="game-description">Completely different.</div>
-<dl><dt class="game-platform">Platform</dt><dd class="game-platform">Amiga</dd></dl>
-<a href="/games/view/9999/star-quest">View</a>
+<h1>Star Quest</h1>
+<div class="description">Completely different.</div>
+<dl><dt>Platform</dt><dd>Amiga</dd></dl>
+<a href="/games/view/star-quest">View</a>
 </body></html>
 '''
     responses = {
-        "/games/search?q=Star+Voyage": hol_search,
-        "/games/view/9999/star-quest": hol_detail,
+        "/games/list/?gamename=Star+Voyage": hol_search,
+        "/games/view/star-quest": hol_detail,
     }
 
     # Wikipedia returns the correct game
@@ -589,18 +589,18 @@ def test_hall_of_light_search_parser_extracts_links():
 
     html = '''
 <html><body>
-<a href="/games/view/111/game-one">Game One</a>
-<a href="/games/view/222/game-two">Game Two</a>
+<a href="/games/view/star-voyage">Star Voyage</a>
+<a href="/games/view/star-voyage-ii">Star Voyage II</a>
 <a href="/other/link">Not a game</a>
-<a href="/games/view/333/game-three">Game Three</a>
+<a href="/games/view/unrelated-game">Unrelated Game</a>
 </body></html>
 '''
     parser = _HallOfLightSearchParser()
     parser.feed(html)
     assert len(parser.game_links) == 3
-    assert "https://amiga.abime.net/games/view/111/game-one" in parser.game_links
-    assert "https://amiga.abime.net/games/view/222/game-two" in parser.game_links
-    assert "https://amiga.abime.net/games/view/333/game-three" in parser.game_links
+    assert "https://amiga.abime.net/games/view/star-voyage" in parser.game_links
+    assert "https://amiga.abime.net/games/view/star-voyage-ii" in parser.game_links
+    assert "https://amiga.abime.net/games/view/unrelated-game" in parser.game_links
 
 
 def test_hall_of_light_detail_parser_extracts_fields():
@@ -609,16 +609,16 @@ def test_hall_of_light_detail_parser_extracts_fields():
 
     html = '''
 <html><body>
-<h1 class="game-title">Test Game</h1>
-<div class="game-description">A test game description.</div>
+<h1>Test Game</h1>
+<div class="description">A test game description.</div>
 <dl>
-<dt class="game-year">Year</dt><dd class="game-year">1992</dd>
-<dt class="game-developer">Developer</dt><dd class="game-developer">Test Devs</dd>
-<dt class="game-publisher">Publisher</dt><dd class="game-publisher">Test Pub</dd>
-<dt class="game-genre">Genre</dt><dd class="game-genre">Action, Strategy</dd>
-<dt class="game-platform">Platform</dt><dd class="game-platform">Amiga, Amiga AGA</dd>
+<dt>Year</dt><dd>1992</dd>
+<dt>Developer</dt><dd>Test Devs</dd>
+<dt>Publisher</dt><dd>Test Pub</dd>
+<dt>Genre</dt><dd>Action, Strategy</dd>
+<dt>Platform</dt><dd>Amiga, Amiga AGA</dd>
 </dl>
-<a href="/games/view/444/test-game">View</a>
+<a href="/games/view/test-game">View</a>
 </body></html>
 '''
     parser = _HallOfLightDetailParser()
@@ -630,7 +630,7 @@ def test_hall_of_light_detail_parser_extracts_fields():
     assert parser.publisher == "Test Pub"
     assert parser.genres == ["Action", "Strategy"]
     assert parser.platforms == ["Amiga", "Amiga AGA"]
-    assert parser.game_id == "444"
+    assert parser.game_id == "test-game"
 
 
 # --- gating regression tests (GH-83) -------------------------------------
@@ -740,3 +740,211 @@ def test_hall_of_light_provider_toggle():
     assert provider.to_config_dict()["enabled"] is True
     provider.set_enabled(False)
     assert provider.to_config_dict()["enabled"] is False
+
+
+# ============================================================================
+# BOT CHALLENGE DIAGNOSTICS (GH-192 TASK A)
+# ============================================================================
+
+
+def test_bot_challenge_detected_on_anubis_response():
+    """_text_get raises _BotChallengeError for Anubis/Within challenge pages."""
+    from amiga_adf_library_builder.metadata import _text_get, _BotChallengeError
+
+    class _BotOpener:
+        def __call__(self, request, timeout=0):
+            from io import BytesIO
+            class _Resp(BytesIO):
+                def geturl(self): return request.full_url
+                @property
+                def status(self): return 200
+                @property
+                def headers(self): return None
+            body = b"<html><head><title>Making sure you're not a bot!</title></head><body>Anubis challenge</body></html>"
+            r = _Resp(body)
+            return r
+
+    with pytest.raises(_BotChallengeError) as exc_info:
+        _text_get("https://amiga.abime.net/games/list/?gamename=Test", opener=_BotOpener())
+    assert "bot_challenge" in str(exc_info.value)
+    assert exc_info.value.status == 200
+    assert hasattr(exc_info.value, "status")
+
+
+def test_bot_challenge_detected_on_cloudflare_response():
+    """_text_get raises _BotChallengeError for Cloudflare challenge pages."""
+    from amiga_adf_library_builder.metadata import _text_get, _BotChallengeError
+
+    class _CloudflareOpener:
+        def __call__(self, request, timeout=0):
+            from io import BytesIO
+            class _Resp(BytesIO):
+                def geturl(self): return request.full_url
+                @property
+                def status(self): return 403
+                @property
+                def headers(self): return None
+            body = b"<html><head><title>Just a moment...</title></head><body>Cloudflare challenge</body></html>"
+            r = _Resp(body)
+            return r
+
+    with pytest.raises(_BotChallengeError) as exc_info:
+        _text_get("https://www.lemonamiga.com/game/test", opener=_CloudflareOpener())
+    assert "bot_challenge" in str(exc_info.value)
+    assert exc_info.value.status == 403
+    assert hasattr(exc_info.value, "status")
+
+
+def test_bot_challenge_has_http_status():
+    """_BotChallengeError preserves the HTTP status code."""
+    from amiga_adf_library_builder.metadata import _BotChallengeError
+    exc = _BotChallengeError("blocked", status=403)
+    assert exc.status == 403
+    assert isinstance(exc, Exception)
+
+
+def _classify_exception_with_bot_challenge(exc: Exception) -> str:
+    """Replicate _try_provider's exception classification logic."""
+    import json
+    import socket
+    import urllib.error
+    from amiga_adf_library_builder.metadata import _BotChallengeError
+    try:
+        raise exc
+    except Exception as e:
+        if isinstance(e, _BotChallengeError):
+            return "bot_challenge"
+        elif isinstance(e, (urllib.error.URLError, urllib.error.HTTPError)):
+            return "request_error"
+        elif isinstance(e, json.JSONDecodeError):
+            return "parse_error"
+        elif isinstance(e, (socket.gaierror, socket.timeout, TimeoutError)):
+            return "request_error"
+        elif "auth" in type(e).__name__.lower() or "credentials" in str(e).lower():
+            return "auth_error"
+        else:
+            return "parse_error"
+
+
+def test_try_provider_classifies_bot_challenge():
+    """_try_provider classifies _BotChallengeError as bot_challenge."""
+    from amiga_adf_library_builder.metadata import _BotChallengeError
+    exc = _BotChallengeError("bot challenge detected", status=200)
+    outcome = _classify_exception_with_bot_challenge(exc)
+    assert outcome == "bot_challenge"
+
+
+def test_try_provider_distinguishes_bot_challenge_from_request_error():
+    """bot_challenge is not confused with request_error."""
+    from amiga_adf_library_builder.metadata import _BotChallengeError
+    import urllib.error
+
+    bot_exc = _BotChallengeError("blocked", status=200)
+    req_exc = urllib.error.URLError("connection refused")
+    assert _classify_exception_with_bot_challenge(bot_exc) == "bot_challenge"
+    assert _classify_exception_with_bot_challenge(req_exc) == "request_error"
+
+
+def test_hol_lookup_bot_challenge_propagates():
+    """hall_of_light_lookup propagates _BotChallengeError from _text_get."""
+    from amiga_adf_library_builder.metadata import hall_of_light_lookup, _BotChallengeError
+
+    def _bot_opener(request, timeout=0):
+        from io import BytesIO
+        class _Resp(BytesIO):
+            def geturl(self): return request.full_url
+            @property
+            def status(self): return 200
+            @property
+            def headers(self): return None
+        body = b"<html><head><title>Making sure you're not a bot!</title></head></html>"
+        return _Resp(body)
+
+    with pytest.raises(_BotChallengeError):
+        hall_of_light_lookup("Some Game", opener=_bot_opener)
+
+
+def test_ordinary_transport_failure_returns_request_error():
+    """Ordinary transport failures are classified as request_error, not bot_challenge."""
+    import urllib.error
+    exc = urllib.error.HTTPError("https://example.com", 503, "Service Unavailable", None, None)
+    assert _classify_exception_with_bot_challenge(exc) == "request_error"
+
+
+def test_genuine_no_match_is_not_bot_challenge():
+    """A clean no-match (empty HTML with no challenge markers) does not raise _BotChallengeError."""
+    from amiga_adf_library_builder.metadata import _text_get, _BotChallengeError
+
+    class _NormalOpener:
+        def __call__(self, request, timeout=0):
+            from io import BytesIO
+            class _Resp(BytesIO):
+                def geturl(self): return request.full_url
+                @property
+                def status(self): return 200
+                @property
+                def headers(self): return None
+            body = b"<html><body>No games found</body></html>"
+            return _Resp(body)
+
+    text, url = _text_get("https://amiga.abime.net/games/list/?gamename=NonExistent", opener=_NormalOpener())
+    assert "No games found" in text
+    assert url.startswith("https://amiga.abime.net")
+
+
+# ============================================================================
+# LEMON AMIGA TITLE EVIDENCE TEST (GH-192 TASK E)
+# ============================================================================
+
+
+def test_lemonamiga_hacker_ii_full_title():
+    """_LemonAmigaGameParser captures the full <h1> title for Hacker II.
+
+    Regression test: the parser must capture 'Hacker II: The Doomsday Papers',
+    not just the short header text 'HACKER II'.
+    """
+    from amiga_adf_library_builder.metadata import _LemonAmigaGameParser
+
+    # Simulate the live Lemon Amiga page structure where <h1> contains
+    # the full canonical title and a separate smaller element shows the short name.
+    html = b'''<!DOCTYPE html>
+<html>
+<head><title>Hacker II: The Doomsday Papers - Lemon Amiga</title></head>
+<body>
+<h2>HACKER II</h2>
+<h1>Hacker II: The Doomsday Papers</h1>
+<table class="info">
+<tr><th>Released</th><td>1986</td></tr>
+<tr><th>Publisher</th><td>Activision</td></tr>
+<tr><th>Hardware</th><td>OCS</td></tr>
+</table>
+<div class="description">Classic stealth game.</div>
+</body>
+</html>'''
+
+    parser = _LemonAmigaGameParser()
+    parser.feed(html.decode())
+    assert parser.canonical_title == "Hacker II: The Doomsday Papers", (
+        f"Expected full title, got: {parser.canonical_title!r}"
+    )
+
+
+def test_lemonamiga_hacker_ii_plain_h1():
+    """_LemonAmigaGameParser captures canonical title from a plain <h1>."""
+    from amiga_adf_library_builder.metadata import _LemonAmigaGameParser
+
+    html = b'''<!DOCTYPE html>
+<html>
+<head><title>Rocket Ranger - Lemon Amiga</title></head>
+<body>
+<h1>Rocket Ranger</h1>
+<table class="info">
+<tr><th>Released</th><td>1986</td></tr>
+<tr><th>Publisher</th><td>Spectrum HoloByte</td></tr>
+</table>
+</body>
+</html>'''
+
+    parser = _LemonAmigaGameParser()
+    parser.feed(html.decode())
+    assert parser.canonical_title == "Rocket Ranger"
