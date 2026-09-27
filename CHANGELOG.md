@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.37 — 2026-09-27
+
+### Windows User Test Release (operator production qualification)
+
+- Hall of Light bot-challenge propagation fix: detail-fetch `_BotChallengeError`
+  propagates out of the lookup loop instead of being swallowed by generic
+  exception handling (classified `bot_challenge`, distinct from
+  `request_error`).
+- Lemon Amiga HTTP 403 challenge-body detection: 403 response body is inspected
+  for Cloudflare/Anubis challenge markers; recognized challenges raise
+  `_BotChallengeError(status=403)`; non-challenge 403s re-raise the original
+  `HTTPError`.
+- No browser bypass added. Intended diagnostic correction only.
+- Version identity: 0.2.36 → 0.2.37 in pyproject.toml, AmigaADFGui.spec,
+  CHANGELOG.md.
+- GH-192 remains open pending operator production acceptance on the packaged
+  Windows build. GH-189 remains open.
+
 ## 0.2.36 — 2026-09-27
 
 ### Windows User Test Release (operator production qualification)
