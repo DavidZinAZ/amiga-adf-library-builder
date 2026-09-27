@@ -457,3 +457,172 @@ def test_carry_over_without_identity_store_falls_back_to_release_key(
     cur_mgr = CurationStateManager(cur_path)
     cur_lib = cur_mgr.load()
     assert cur_lib.releases["Title_A"].curation_state.value == "accepted"
+
+
+
+# ---------------------------------------------------------------------------
+# GH-192 Problem 2: Ghost/stale curation state
+# ---------------------------------------------------------------------------
+
+def _make_staged_library_with_ghost(tmp_path: Path, release_key: str, title: str) -> Path:
+    """Create a staged library with a GHOST entry for a release."""
+    from amiga_adf_library_builder.library_state import CurationStateManager
+    from amiga_adf_library_builder.models import StagedLibrary, StagedReleaseEntry, StagedState, StagedChange, CurationAction
+    from datetime import datetime, timezone
+
+    state_path = tmp_path / "library_state.json"
+    library = StagedLibrary()
+    ghost_entry = StagedReleaseEntry(
+        release_key=release_key,
+        title=title,
+        edition=None,
+        group=None,
+        chipset=None,
+        curation_state=StagedState.GHOST,
+        adf_files=[],
+    )
+    ghost_entry.actions.append(StagedChange(
+        action=CurationAction.MOVE,
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        details="Moved to Bard's Tale III",
+        payload="{}",
+    ))
+    library.releases[release_key] = ghost_entry
+
+    manager = CurationStateManager(state_path)
+    manager.save(library)
+    return state_path
+
+
+def test_ghost_entry_results_in_quarantine(tmp_path: Path) -> None:
+    """When a staged library has a GHOST entry, the corresponding
+    release group must be quarantined so it does not appear as an
+    active release (GH-192 Problem 5)."""
+    from amiga_adf_library_builder.pipeline import _apply_curation
+    from amiga_adf_library_builder.parser import parse_filename
+    from amiga_adf_library_builder.grouper import group_records
+
+    recs = [parse_filename("Bards Talet3 (Disk 1 of 1).adf")]
+    groups = group_records(recs)
+    assert len(groups) == 1
+    release_key = groups[0].release_key
+
+    state_path = _make_staged_library_with_ghost(tmp_path, release_key, "Bards Talet3")
+
+    decisions = {}
+    library, updated_decisions = _apply_curation(
+        groups, str(state_path), decisions
+    )
+
+    group = groups[0]
+    assert group.quarantine_reason is not None, (
+        "GHOST entry group must have quarantine_reason set"
+    )
+    assert "ghost" in group.quarantine_reason.lower(), (
+        f"Expected ghost quarantine, got: {group.quarantine_reason}"
+    )
+
+
+def test_ghost_stale_release_after_move(tmp_path: Path) -> None:
+    """Regression test: Bards Talet3 -> manually move ADF into
+    Bard's Tale III -> rerun -> stale source release must not
+    return as active (GH-192 Problem 5)."""
+    from amiga_adf_library_builder.pipeline import _apply_curation, _sync_group_membership, _find_staged_entry
+    from amiga_adf_library_builder.models import StagedLibrary, StagedReleaseEntry, StagedState, StagedChange, CurationAction
+    from amiga_adf_library_builder.parser import parse_filename
+    from amiga_adf_library_builder.grouper import group_records
+    from amiga_adf_library_builder.library_state import CurationStateManager
+    from datetime import datetime, timezone
+
+    recs = [parse_filename("Bards Talet3 (Disk 1 of 1).adf")]
+    groups = group_records(recs)
+    assert len(groups) == 1
+    release_key = groups[0].release_key
+    title = groups[0].title
+
+    state_path = tmp_path / "library_state.json"
+    library = StagedLibrary()
+    ghost_entry = StagedReleaseEntry(
+        release_key=release_key,
+        title=title,
+        edition=None,
+        group=None,
+        chipset=None,
+        curation_state=StagedState.GHOST,
+        adf_files=[],
+    )
+    ghost_entry.actions.append(StagedChange(
+        action=CurationAction.MOVE,
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        details="Moved to Bard's Tale III: Thief of Fate",
+        payload="{}",
+    ))
+    library.releases[release_key] = ghost_entry
+    manager = CurationStateManager(state_path)
+    manager.save(library)
+
+    groups = group_records(recs)
+
+    decisions = {}
+    library_out, updated_decisions = _apply_curation(
+        groups, str(state_path), decisions
+    )
+
+    group = groups[0]
+    assert group.quarantine_reason is not None, (
+        "Stale GHOST group must be quarantined"
+    )
+    assert "ghost" in group.quarantine_reason.lower(), (
+        f"Expected ghost quarantine, got: {group.quarantine_reason}"
+    )
+
+    new_group = group_records([parse_filename("Bard's Tale III (Disk 1 of 1).adf")])[0]
+    entry = _find_staged_entry(library_out, new_group.release_key, new_group.title)
+    if entry is not None:
+        assert entry.curation_state != StagedState.GHOST, (
+            "GHOST entries must be skipped by _find_staged_entry fallback"
+        )
+
+
+def test_sync_group_membership_sets_quarantine_for_ghost(tmp_path: Path) -> None:
+    """When _sync_group_membership processes a GHOST entry with
+    empty adf_files, the group must have quarantine_reason set
+    (GH-192 Problem 5)."""
+    from amiga_adf_library_builder.pipeline import _sync_group_membership, _find_staged_entry
+    from amiga_adf_library_builder.models import StagedLibrary, StagedReleaseEntry, StagedState
+    from amiga_adf_library_builder.parser import parse_filename
+    from amiga_adf_library_builder.grouper import group_records
+    from amiga_adf_library_builder.library_state import CurationStateManager
+    from datetime import datetime, timezone
+
+    recs = [parse_filename("Bards Talet3 (Disk 1 of 1).adf")]
+    groups = group_records(recs)
+    assert len(groups) == 1
+    release_key = groups[0].release_key
+    title = groups[0].title
+
+    state_path = tmp_path / "library_state.json"
+    library = StagedLibrary()
+    ghost_entry = StagedReleaseEntry(
+        release_key=release_key,
+        title=title,
+        edition=None,
+        group=None,
+        chipset=None,
+        curation_state=StagedState.GHOST,
+        adf_files=[],
+    )
+    library.releases[release_key] = ghost_entry
+    manager = CurationStateManager(state_path)
+    manager.save(library)
+
+    _sync_group_membership(groups, library)
+
+    group = groups[0]
+    assert group.records == [], "Group records must be emptied"
+    assert group.quarantine_reason is not None, (
+        "GHOST group must have quarantine_reason set"
+    )
+    assert "ghost" in group.quarantine_reason.lower(), (
+        f"Expected ghost quarantine, got: {group.quarantine_reason}"
+    )
