@@ -295,35 +295,52 @@ def _text_get(url: str, *, timeout: float = 20.0,
     guard_url(url, resolve=opener is None)
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml"})
     open_fn = opener or urllib.request.urlopen
-    with open_fn(request, timeout=timeout) as response:
-        data = response.read(3_000_001)
-        if len(data) > 3_000_000:
-            raise RuntimeError("artwork source page exceeds 3 MB safety limit")
-        final_url = getattr(response, "geturl", lambda: url)()
-        charset = "utf-8"
-        headers = getattr(response, "headers", None)
-        if headers is not None and hasattr(headers, "get_content_charset"):
-            charset = headers.get_content_charset() or "utf-8"
-        text = data.decode(charset, errors="replace")
-        # Detect bot-challenge / anti-bot interstitial responses so that
-        # external blocking is distinguishable from normal no-match or
-        # parser failures downstream.
-        _BOT_CHALLENGE_MARKERS = (
-            "Making sure you're not a bot",   # Anubis / Within
-            "Just a moment...",               # Cloudflare
-            "<title>Just a moment...</title>",
-            "You have been blocked",
-            "bot_check",
-            "cf-browser-verifier",
-        )
-        if any(marker in text for marker in _BOT_CHALLENGE_MARKERS):
-            status = getattr(response, "status", None) or getattr(response, "getcode", lambda: None)()
-            raise _BotChallengeError(
-                f"bot_challenge: provider anti-bot page detected "
-                f"for {url}",
-                status=status,
-            )
-        return text, str(final_url)
+    _BOT_CHALLENGE_MARKERS = (
+        "Making sure you're not a bot",   # Anubis / Within
+        "Just a moment...",               # Cloudflare
+        "<title>Just a moment...</title>",
+        "You have been blocked",
+        "bot_check",
+        "cf-browser-verifier",
+    )
+    try:
+        with open_fn(request, timeout=timeout) as response:
+            data = response.read(3_000_001)
+            if len(data) > 3_000_000:
+                raise RuntimeError("artwork source page exceeds 3 MB safety limit")
+            final_url = getattr(response, "geturl", lambda: url)()
+            charset = "utf-8"
+            headers = getattr(response, "headers", None)
+            if headers is not None and hasattr(headers, "get_content_charset"):
+                charset = headers.get_content_charset() or "utf-8"
+            text = data.decode(charset, errors="replace")
+            # Detect bot-challenge / anti-bot interstitial responses so that
+            # external blocking is distinguishable from normal no-match or
+            # parser failures downstream.
+            if any(marker in text for marker in _BOT_CHALLENGE_MARKERS):
+                status = getattr(response, "status", None) or getattr(response, "getcode", lambda: None)()
+                raise _BotChallengeError(
+                    f"bot_challenge: provider anti-bot page detected "
+                    f"for {url}",
+                    status=status,
+                )
+            return text, str(final_url)
+    except urllib.error.HTTPError as _http_exc:
+        if _http_exc.code == 403:
+            # HTTP 403 often indicates bot blocking. Read the error body
+            # so that challenge markers are detected even when urllib
+            # raises before _text_get would normally read the response.
+            try:
+                _body = _http_exc.read(3_000_001).decode("utf-8", errors="replace")
+            except Exception:
+                _body = ""
+            if any(marker in _body for marker in _BOT_CHALLENGE_MARKERS):
+                raise _BotChallengeError(
+                    f"bot_challenge: provider anti-bot page detected "
+                    f"for {url} (HTTP 403)",
+                    status=403,
+                ) from _http_exc
+        raise
 
 
 @dataclass
@@ -960,6 +977,8 @@ def hall_of_light_lookup(title: str, *, timeout: float = 20.0,
     for game_url in game_links[:10]:  # Limit to first 10 results
         try:
             detail_html, final_url = _text_get(game_url, timeout=timeout, opener=opener)
+        except _BotChallengeError:
+            raise
         except (urllib.error.URLError, urllib.error.HTTPError, socket.gaierror, socket.timeout, TimeoutError) as exc:
             _logger.warning("hall-of-light: detail fetch failed for %s: %s", game_url, type(exc).__name__)
             continue

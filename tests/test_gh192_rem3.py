@@ -8,6 +8,7 @@ Tests the three bounded fixes from the corrected Q-Branch research handoff:
 from __future__ import annotations
 
 import json
+import io
 import socket
 import urllib.error
 from pathlib import Path
@@ -23,6 +24,7 @@ from amiga_adf_library_builder.metadata import (
     lemonamiga_lookup,
     LemonAmigaConfig,
     HallOfLightConfig,
+    _BotChallengeError,
 )
 
 
@@ -462,7 +464,7 @@ class _FakeResponse:
         self._data = data
         self._url = url
 
-    def read(self) -> bytes:
+    def read(self, n: int = -1) -> bytes:
         return self._data
 
     def __enter__(self):
@@ -486,3 +488,344 @@ class _FakeHeaders:
 
 # Need to import tempfile in the module scope
 import tempfile
+
+
+# ============================================================================
+# GH-192 REM-3: Bot challenge propagation regression tests
+# ============================================================================
+
+# --- challenge HTML fixtures ----------------------------------------------
+
+CHALLENGE_HTML_CLOUDFLARE = b'''<!DOCTYPE html>
+<html>
+<head><title>Just a moment...</title></head>
+<body>
+<script>
+// Cloudflare challenge
+</script>
+<div>Just a moment...</div>
+</body>
+</html>'''
+
+CHALLENGE_HTML_ANUBIS = b'''<!DOCTYPE html>
+<html>
+<head><title>Access denied</title></head>
+<body>
+<div>Making sure you're not a bot</div>
+</body>
+</html>'''
+
+CHALLENGE_HTML_BLOCKED = b'''<!DOCTYPE html>
+<html>
+<body>
+<div>You have been blocked</div>
+</body>
+</html>'''
+
+HOL_SEARCH_HTML_NORMAL = b'''<html><body>
+<div class="search-results">
+<a href="/games/view/test-game">Test Game</a>
+</div>
+</body></html>'''
+
+HOL_DETAIL_NORMAL = b'''<html><body>
+<h1>Test Game</h1>
+<dl><dt>Platform</dt><dd>Amiga</dd></dl>
+</body></html>'''
+
+LEMON_NORMAL_HTML = b'''<!DOCTYPE html>
+<html><head><title>Vroom - Lemon Amiga</title></head>
+<body>
+<h1>Vroom</h1>
+<table class="info"><tr><th>Hardware</th><td>OCS, ECS</td></tr></table>
+</body></html>'''
+
+
+class TestHallOfLightChallengePropagation:
+    """Verify that Hall of Light bot challenges propagate as _BotChallengeError
+    instead of being swallowed by the detail fetch exception handler."""
+
+    def test_detail_challenge_raises_bot_challenge(self):
+        """When the detail fetch returns challenge HTML, _BotChallengeError
+        is raised and propagates out of hall_of_light_lookup."""
+        def _challenge_opener(request, timeout=0):
+            return _FakeResponse(CHALLENGE_HTML_CLOUDFLARE, request.full_url)
+
+        with pytest.raises(_BotChallengeError):
+            hall_of_light_lookup("Test Game", opener=_challenge_opener)
+
+    def test_detail_challenge_propagates_through_try_provider(self, monkeypatch, tmp_path):
+        """When HOL detail returns a bot challenge, _try_provider classifies
+        it as bot_challenge (not candidate_returned or no_match)."""
+        import urllib.error
+
+        def _failing_lookup(title=None, **kwargs):
+            raise _BotChallengeError("bot_challenge: provider anti-bot page detected", status=403)
+
+        monkeypatch.setattr(metadata_module, "hall_of_light_lookup", _failing_lookup)
+        monkeypatch.delenv("RAWG_API_KEY", raising=False)
+        monkeypatch.delenv("MOBYGAMES_API_KEY", raising=False)
+
+        library_root = tmp_path / "library"
+        for d in ("data", "catalog", "original"):
+            (library_root / d).mkdir(parents=True, exist_ok=True)
+        cfg, _ = resolve_config(library_root=str(library_root))
+
+        _record, _provider, relevance_events = lookup_metadata(
+            title="Test Game",
+            cache_dir=tmp_path / "cache",
+            curated_dir=tmp_path / "curated",
+            group=None,
+            opener=None,
+            halloflight_enabled=True,
+        )
+
+        hol_events = [e for e in relevance_events if e["provider"] == "hall-of-light"]
+        assert len(hol_events) == 1
+        assert hol_events[0]["reason"] == "bot_challenge"
+        assert hol_events[0]["confidence"] == 0.0
+
+    def test_detail_transport_error_still_returns_none(self):
+        """Transport errors during detail fetch skip that candidate
+        and return None when no other candidates match."""
+        def _search_opener(request, timeout=0):
+            return _FakeResponse(HOL_SEARCH_HTML_NORMAL, request.full_url)
+
+        def _detail_opener(request, timeout=0):
+            raise urllib.error.URLError("connection refused")
+
+        # Use a combined opener: search works, detail fails
+        responses = {"/games/list/?gamename=Test Game": HOL_SEARCH_HTML_NORMAL}
+        def _combo_opener(request, timeout=0):
+            if "/games/list/" in request.full_url:
+                return _FakeResponse(HOL_SEARCH_HTML_NORMAL, request.full_url)
+            raise urllib.error.URLError("connection refused")
+
+        result = hall_of_light_lookup("Test Game", opener=_combo_opener)
+        assert result is None
+
+    def test_detail_non_transport_exception_returns_none(self):
+        """Non-transport exceptions during detail fetch still return None."""
+        def _bad_opener(request, timeout=0):
+            raise RuntimeError("unexpected")
+
+        result = hall_of_light_lookup("Test Game", opener=_bad_opener)
+        assert result is None
+
+    def test_genuine_no_match_returns_none(self, monkeypatch):
+        """A clean no-match (HTML with no game links) still returns None."""
+        def _opener(request, timeout=0):
+            return _FakeResponse(b"<html><body></body></html>", request.full_url)
+
+        result = hall_of_light_lookup("NonExistent Game", opener=_opener)
+        assert result is None
+
+
+class TestLemonAmigaChallengePropagation:
+    """Verify that Lemon Amiga HTTP 403 bot challenges propagate as
+    _BotChallengeError instead of being swallowed or classified as
+    request_error."""
+
+    def test_http403_with_challenge_body_raises_bot_challenge(self):
+        """When the game page returns HTTP 403 with Cloudflare challenge
+        body, _BotChallengeError is raised."""
+        def _challenge_opener(request, timeout=0):
+            raise urllib.error.HTTPError(
+                request.full_url, 403, "Forbidden", {},
+                io.BytesIO(CHALLENGE_HTML_CLOUDFLARE)
+            )
+
+        cfg = LemonAmigaConfig(enabled=True)
+        with pytest.raises(_BotChallengeError):
+            lemonamiga_lookup("Vroom", opener=_challenge_opener, config=cfg)
+
+    def test_http403_with_challenge_body_classified_as_bot_challenge(
+            self, monkeypatch, tmp_path):
+        """When Lemon Amiga raises _BotChallengeError, _try_provider
+        classifies it as bot_challenge."""
+        import urllib.error
+
+        def _failing_lookup(title=None, **kwargs):
+            raise _BotChallengeError("bot_challenge: provider anti-bot page detected", status=403)
+
+        monkeypatch.setattr(metadata_module, "lemonamiga_lookup", _failing_lookup)
+        monkeypatch.delenv("RAWG_API_KEY", raising=False)
+
+        library_root = tmp_path / "library"
+        for d in ("data", "catalog", "original"):
+            (library_root / d).mkdir(parents=True, exist_ok=True)
+        cfg, _ = resolve_config(library_root=str(library_root))
+
+        _record, _provider, relevance_events = lookup_metadata(
+            title="Vroom",
+            cache_dir=tmp_path / "cache",
+            curated_dir=tmp_path / "curated",
+            group=None,
+            opener=None,
+            lemonamiga_enabled=True,
+        )
+
+        lemon_events = [e for e in relevance_events if e["provider"] == "lemon-amiga"]
+        assert len(lemon_events) == 1
+        assert lemon_events[0]["reason"] == "bot_challenge"
+        assert lemon_events[0]["confidence"] == 0.0
+
+    def test_http403_without_challenge_body_still_raises_http_error(self):
+        """When HTTP 403 is returned but body doesn't contain challenge
+        markers, the original HTTPError is still raised."""
+        def _plain403_opener(request, timeout=0):
+            raise urllib.error.HTTPError(
+                request.full_url, 403, "Forbidden", {},
+                io.BytesIO(b"<html><body>Access denied</body></html>")
+            )
+
+        cfg = LemonAmigaConfig(enabled=True)
+        with pytest.raises(urllib.error.HTTPError):
+            lemonamiga_lookup("Vroom", opener=_plain403_opener, config=cfg)
+
+    def test_transport_error_still_propagates(self):
+        """Transport errors during Lemon Amiga fetch still propagate."""
+        cfg = LemonAmigaConfig(enabled=True)
+
+        def _failing_opener(request, timeout=0):
+            raise urllib.error.URLError("connection refused")
+
+        with pytest.raises(urllib.error.URLError):
+            lemonamiga_lookup("Vroom", opener=_failing_opener, config=cfg)
+
+    def test_genuine_no_match_still_returns_none(self):
+        """A clean no-match (HTML without game data) still returns None."""
+        cfg = LemonAmigaConfig(enabled=True)
+        no_game_html = b"<html><body><h1>Not a Game</h1></body></html>"
+
+        def _opener(request, timeout=0):
+            return _FakeResponse(no_game_html, "https://www.lemonamiga.com/game/vroom")
+
+        result = lemonamiga_lookup("NonExistent Game", opener=_opener, config=cfg)
+        assert result is None
+
+
+class TestTryProviderBotChallengeClassification:
+    """Verify that _try_provider correctly classifies _BotChallengeError
+    as 'bot_challenge' for both Hall of Light and Lemon Amiga."""
+
+    def test_hol_bot_challenge_classification(self, monkeypatch, tmp_path):
+        """_try_provider classifies _BotChallengeError from hall_of_light_lookup
+        as 'bot_challenge'."""
+        def _raising_lookup(title=None, **kwargs):
+            raise _BotChallengeError("bot challenge detected", status=403)
+
+        monkeypatch.setattr(metadata_module, "hall_of_light_lookup", _raising_lookup)
+        monkeypatch.delenv("RAWG_API_KEY", raising=False)
+        monkeypatch.delenv("MOBYGAMES_API_KEY", raising=False)
+
+        library_root = tmp_path / "library"
+        for d in ("data", "catalog", "original"):
+            (library_root / d).mkdir(parents=True, exist_ok=True)
+        cfg, _ = resolve_config(library_root=str(library_root))
+
+        _record, _provider, relevance_events = lookup_metadata(
+            title="Test Game",
+            cache_dir=tmp_path / "cache",
+            curated_dir=tmp_path / "curated",
+            group=None,
+            opener=None,
+            halloflight_enabled=True,
+        )
+
+        hol_events = [e for e in relevance_events if e["provider"] == "hall-of-light"]
+        assert len(hol_events) == 1
+        assert hol_events[0]["reason"] == "bot_challenge"
+        assert hol_events[0]["confidence"] == 0.0
+
+    def test_lemon_bot_challenge_classification(self, monkeypatch, tmp_path):
+        """_try_provider classifies _BotChallengeError from lemonamiga_lookup
+        as 'bot_challenge'."""
+        def _raising_lookup(title=None, **kwargs):
+            raise _BotChallengeError("bot challenge detected", status=403)
+
+        monkeypatch.setattr(metadata_module, "lemonamiga_lookup", _raising_lookup)
+        monkeypatch.delenv("RAWG_API_KEY", raising=False)
+
+        library_root = tmp_path / "library"
+        for d in ("data", "catalog", "original"):
+            (library_root / d).mkdir(parents=True, exist_ok=True)
+        cfg, _ = resolve_config(library_root=str(library_root))
+
+        _record, _provider, relevance_events = lookup_metadata(
+            title="Vroom",
+            cache_dir=tmp_path / "cache",
+            curated_dir=tmp_path / "curated",
+            group=None,
+            opener=None,
+            lemonamiga_enabled=True,
+        )
+
+        lemon_events = [e for e in relevance_events if e["provider"] == "lemon-amiga"]
+        assert len(lemon_events) == 1
+        assert lemon_events[0]["reason"] == "bot_challenge"
+
+    def test_genuine_no_match_still_no_match(self, monkeypatch, tmp_path):
+        """Genuine no-match (provider returns None) still classified as
+        candidate_returned with no candidate."""
+        def _no_match_lookup(title=None, **kwargs):
+            return None
+
+        monkeypatch.setattr(metadata_module, "hall_of_light_lookup", _no_match_lookup)
+        monkeypatch.delenv("RAWG_API_KEY", raising=False)
+        monkeypatch.delenv("MOBYGAMES_API_KEY", raising=False)
+
+        library_root = tmp_path / "library"
+        for d in ("data", "catalog", "original"):
+            (library_root / d).mkdir(parents=True, exist_ok=True)
+        cfg, _ = resolve_config(library_root=str(library_root))
+
+        _record, _provider, relevance_events = lookup_metadata(
+            title="Some Game",
+            cache_dir=tmp_path / "cache",
+            curated_dir=tmp_path / "curated",
+            group=None,
+            opener=None,
+            halloflight_enabled=True,
+        )
+
+        hol_events = [e for e in relevance_events if e["provider"] == "hall-of-light"]
+        assert len(hol_events) == 1
+        assert hol_events[0]["reason"] == "candidate_returned"
+
+    def test_ordinary_request_error_still_request_error(self, monkeypatch, tmp_path):
+        """Ordinary URLError is still classified as request_error."""
+        import urllib.error
+
+        def _raising_lookup(title=None, **kwargs):
+            raise urllib.error.URLError("connection refused")
+
+        monkeypatch.setattr(metadata_module, "hall_of_light_lookup", _raising_lookup)
+        monkeypatch.delenv("RAWG_API_KEY", raising=False)
+        monkeypatch.delenv("MOBYGAMES_API_KEY", raising=False)
+
+        library_root = tmp_path / "library"
+        for d in ("data", "catalog", "original"):
+            (library_root / d).mkdir(parents=True, exist_ok=True)
+        cfg, _ = resolve_config(library_root=str(library_root))
+
+        _record, _provider, relevance_events = lookup_metadata(
+            title="Some Game",
+            cache_dir=tmp_path / "cache",
+            curated_dir=tmp_path / "curated",
+            group=None,
+            opener=None,
+            halloflight_enabled=True,
+        )
+
+        hol_events = [e for e in relevance_events if e["provider"] == "hall-of-light"]
+        assert len(hol_events) == 1
+        assert hol_events[0]["reason"] == "request_error"
+
+
+# ============================================================================
+# Helpers (extended)
+# ============================================================================
+
+import io
+from amiga_adf_library_builder.paths import resolve_config
