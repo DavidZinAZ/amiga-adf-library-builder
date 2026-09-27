@@ -7,18 +7,18 @@ from amiga_adf_library_builder.metadata import (
 
 
 @pytest.mark.parametrize("href", [
-    "/games/view/1234/hacker", "/doc/hacker/763", "/cheat/hacker/480",
+    "/games/view/hacker", "/doc/hacker/763", "/cheat/hacker/480",
 ])
 def test_hol_links_do_not_require_lemon_document_parser_state(href):
     parser = _HallOfLightDetailParser()
     parser.feed(
-        '<h1 class="game-title">Hacker</h1>'
-        '<dl><dt class="game-platform">Platform</dt><dd>Amiga</dd></dl>'
+        '<h1>Hacker</h1>'
+        '<dl><dt>Platform</dt><dd>Amiga</dd></dl>'
         f'<div class="docs"><a href="{href}">Link</a></div>'
     )
     assert parser.canonical_title == "Hacker"
     assert parser.platforms == ["Amiga"]
-    assert parser.game_id == ("1234" if "/games/view/" in href else "")
+    assert parser.game_id == ("hacker" if href.startswith("/games/view/") else "")
 
 
 @pytest.mark.parametrize("base,sequel", [
