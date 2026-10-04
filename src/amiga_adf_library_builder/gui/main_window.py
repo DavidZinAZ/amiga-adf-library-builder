@@ -335,8 +335,16 @@ class MainWindow(QMainWindow):
         self._library_root = self._paths.library_root
         self._library_root.mkdir(parents=True, exist_ok=True)
         logger.info("Library Root: %s", self._library_root)
+        # (GH-192 prod FAILURE 4) The DAT/source index must live at the ONE
+        # authoritative path the pipeline reads: <Library-Root>/data/
+        # metadata_sources.db (PathConfig.metadata_sources_db). The GUI
+        # previously used <base>/data/, so every DAT source the operator
+        # added was invisible to the run and every group reported
+        # dat_source_disabled. Resolve through the same config the pipeline
+        # uses and fall back to the portable layout if resolution fails.
+        self._metadata_sources_db = self._resolve_metadata_sources_db()
         self._metadata_manager = MetadataSourceManager(
-            self._paths.metadata_sources_db
+            self._metadata_sources_db
         )
         self._identity_store = FileIdentityStore(
             self._paths.data_dir / "identity.db"
@@ -388,6 +396,37 @@ class MainWindow(QMainWindow):
         # takes effect on the first ``show()``.
         if self._saved_maximized:
             self.setWindowState(Qt.WindowState.WindowMaximized)
+
+    def _resolve_metadata_sources_db(self) -> Path:
+        """Return the authoritative metadata_sources.db path for this window.
+
+        (GH-192 prod FAILURE 4) The pipeline builds its
+        ``MetadataSourceManager`` from ``PathConfig.metadata_sources_db``,
+        which resolves to ``<Library-Root>/data/metadata_sources.db``. The GUI
+        must use that exact path or an operator-added DAT source is stored
+        where the run never looks for it.
+
+        Resolution order:
+          1. ``resolve_config`` for the GUI's own Library-Root — the same call
+             the pipeline path is derived from, so the two cannot diverge.
+          2. The portable layout (``<Library-Root>/data/…``) when config
+             resolution raises.
+        """
+        try:
+            from ..paths import resolve_config as _resolve
+            paths_cfg, _source = _resolve(library_root=str(self._library_root))
+            resolved = Path(paths_cfg.metadata_sources_db)
+        except Exception:
+            resolved = Path(self._library_root) / "data" / "metadata_sources.db"
+        try:
+            resolved.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            logger.warning(
+                "could not create metadata source index directory: %s",
+                resolved.parent,
+            )
+        logger.info("Metadata sources index: %s", resolved)
+        return resolved
 
     # --- menu -----------------------------------------------------------------
     def _build_menu(self) -> None:

@@ -19,6 +19,7 @@ import pytest
 
 from amiga_adf_library_builder.metadata import (
     LemonAmigaConfig,
+    ProviderRequestError,
     lemonamiga_lookup,
     lookup_metadata,
     validate_metadata_relevance,
@@ -218,10 +219,17 @@ class TestLemonAmigaLookup:
         assert result.artwork_provider == "lemon-amiga"
 
     def test_timeout_propagates_as_transport_error(self):
-        """TimeoutError is a transport exception that propagates to _try_provider."""
+        """TimeoutError is a transport exception that propagates to _try_provider.
+
+        (GH-192 production FAILURE 3) It is now wrapped in a
+        ``ProviderRequestError`` carrying category=timeout plus the URL, so
+        the run log can name the failure instead of only its outcome class.
+        """
         cfg = LemonAmigaConfig(enabled=True)
-        with pytest.raises(TimeoutError):
+        with pytest.raises(ProviderRequestError) as excinfo:
             lemonamiga_lookup("Vroom", opener=_error_opener(TimeoutError("timeout")), config=cfg)
+        assert excinfo.value.category == "timeout"
+        assert excinfo.value.url.endswith("/game/vroom")
 
     def test_connection_error_returns_none(self):
         """ConnectionError is not a transport exception; it returns None."""

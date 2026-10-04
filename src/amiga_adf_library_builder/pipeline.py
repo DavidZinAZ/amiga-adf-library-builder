@@ -246,9 +246,24 @@ def _apply_curation(
             # Emptied by operator move/merge; quarantine so the
             # group does not appear as an active release (GH-192).
             group.quarantine_reason = "curation: ghost (moved/merged)"
-        # MODIFIED/NEEDS_REVIEW: keep existing quarantine; operator
-        # has flagged these for review and the pipeline should not
-        # silently export them.
+        elif entry.curation_state == StagedState.NEEDS_REVIEW:
+            # (GH-192 prod FAILURE 5) NEEDS_REVIEW is the pipeline's own
+            # routing signal for "this release needs a human" — the state the
+            # staged-library builder assigns from quarantine_reason. Treating
+            # it as "leave quarantine as-is" meant a review-routed release
+            # was exported on the next run after an UNRELATED curation
+            # operation, while the aggregate still listed it in
+            # review_routed. A release routed to human review must stay
+            # blocked until it is explicitly ACCEPTED (or REJECTED, which
+            # blocks it permanently).
+            #
+            # Never overwrite an existing quarantine reason: the specific
+            # grouper diagnosis is more actionable than this generic label,
+            # and losing it would hide the real cause from the operator.
+            if group.quarantine_reason is None:
+                group.quarantine_reason = "routed to review; awaiting operator approval"
+        # MODIFIED: operator edited the entry. Keep existing quarantine as-is;
+        # an explicit MODIFIED edit is not an export approval.
 
     # Propagate curated ADF membership from the staged library back
     # to the groups so export uses the authoritative curated
@@ -877,6 +892,22 @@ def run_pipeline(
             # decisions; REJECTED entries get a quarantine flag.
             staged_library, decisions = _apply_curation(
                 groups, library_state_path, decisions
+            )
+            # (GH-192 prod FAILURE 5) Phase 6 routed quarantines BEFORE
+            # curation was applied, so the on-disk review records and the
+            # aggregate review_routed list were computed from the pre-curation
+            # state while the exporter used the post-curation state. Re-route
+            # now so the records, the aggregate, and the exporter's
+            # quarantine gate all describe the SAME set of releases.
+            # Idempotent: record filenames and contents are deterministic.
+            quarantine_summary = quarantine.route_quarantine(
+                groups, review_dir=review_dir, unknown_dir=unknown_dir,
+                scans=scan_map, review_items=_all_review_items,
+            )
+            _act(
+                f"After curation: {len(quarantine_summary['review'])} release(s) "
+                f"awaiting review, {len(quarantine_summary['unknown'])} set aside "
+                f"as unrecognized."
             )
             if one_per_game:
                 # Load canonical library once for region/language/version scoring.

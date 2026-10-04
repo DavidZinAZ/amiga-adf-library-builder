@@ -30,6 +30,7 @@ import pytest
 from amiga_adf_library_builder import metadata as metadata_module
 from amiga_adf_library_builder.metadata import (
     MetadataRecord,
+    ProviderRequestError,
     _BotChallengeError,
     _text_get,
     lookup_metadata,
@@ -120,14 +121,22 @@ class TestBotChallengeDetectionD1:
 
         Guards against over-broad classification that would hide real
         access-control failures behind a bot label.
+
+        (GH-192 production FAILURE 3) A plain 403 is now raised as a
+        ``ProviderRequestError`` carrying status=403 and category=http_error,
+        rather than a bare ``urllib.error.HTTPError``. The rejection evidence
+        (no exception detail, no failure sample) is unchanged.
         """
         def _opener(request, timeout=0):
             err = urllib.error.HTTPError(request.full_url, 403, "Forbidden", None, None)
             err.read = MagicMock(return_value=b"<html><body>nope</body></html>")
             raise err
 
-        with pytest.raises(urllib.error.HTTPError):
+        with pytest.raises(ProviderRequestError) as excinfo:
             _text_get("https://example.invalid/x", opener=_opener)
+        assert excinfo.value.status == 403
+        assert excinfo.value.category == "http_error"
+        assert excinfo.value.url == "https://example.invalid/x"
 
     def test_normal_page_is_not_flagged(self):
         """Ordinary provider HTML must never be misread as a challenge."""
@@ -219,6 +228,10 @@ class TestFailureDiagnosticsD2:
 
         Guards against the diagnostics change inventing failure evidence
         for healthy no-match results.
+
+        (GH-192 production FAILURE 2) A provider returning ``None`` is a
+        genuine ``no_result`` — it must NOT be labelled ``candidate_returned``
+        with an empty candidate title.
         """
         def _none_lookup(title=None, **kwargs):
             return None
@@ -226,8 +239,9 @@ class TestFailureDiagnosticsD2:
         events = _run_lookup(monkeypatch, tmp_path, "hall_of_light_lookup",
                              _none_lookup, halloflight_enabled=True)
         hol = [e for e in events if e["provider"] == "hall-of-light"]
-        assert hol[0]["reason"] == "candidate_returned"
-        assert hol[0]["evidence"] == ["candidate_returned"]
+        assert hol[0]["reason"] == "no_result"
+        assert hol[0]["evidence"] == ["no_result"]
+        assert hol[0]["canonical_title"] == ""
 
 
 # ============================================================================

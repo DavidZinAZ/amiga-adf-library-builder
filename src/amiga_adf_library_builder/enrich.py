@@ -583,11 +583,17 @@ def resize_artwork(master: Path, artwork_processed_dir: Path,
 
 
 
-def _build_review_items(events: list) -> list:
+def _build_review_items(events: list, release_key: str = "") -> list:
     """Convert review-category EnrichEvents into ReviewItems (GH-164 RC3).
 
     Each review event produces exactly one persisted ReviewItem so that
     enrich review events are never silently discarded.
+
+    (GH-192 prod FAILURE 5) ``release_key`` MUST be supplied by the caller.
+    ``route_quarantine`` skips review items with an empty release_key
+    (``if not release_key: continue``), so an item built without one was
+    written to no record at all and never appeared in ``review_routed`` — the
+    aggregate could then disagree with what actually blocked the export.
     """
     from .utils import now_iso as _now_iso_func
     items = []
@@ -611,7 +617,7 @@ def _build_review_items(events: list) -> list:
             score=0.0,
             reason=ev.error or "review",
             evidence=[ev.detail or ev.error or ""],
-            release_key="",
+            release_key=release_key,
             routed_at=_now_iso_func(),
         ))
     return items
@@ -928,10 +934,14 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
     _dat_results: list[dict] = []  # per-disk match results with source info
     if metadata_source_manager is not None:
         try:
-            _act("Checking DAT/local metadata sources…")
             _sources = metadata_source_manager.list_sources()
             _enabled_sources = [s for s in _sources if s.enabled]
+            # (GH-192 prod FAILURE 4) Only say "Checking…" when a lookup is
+            # actually about to happen. Announcing a check that never occurs
+            # made the GUI claim DAT was consulted while every run reported
+            # dat_source_disabled.
             if _enabled_sources:
+                _act("Checking DAT/local metadata sources…")
                 _dat_events.append(EnrichEvent(
                     category=EnrichCategory.DAT,
                     detail=f"dat_loaded sources={len(_enabled_sources)} entries={sum(s.entry_count for s in _enabled_sources)}",
@@ -1011,23 +1021,41 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                             "matched": False,
                         })
             else:
+                # (GH-192 prod FAILURE 4) A source DB exists but no source is
+                # enabled. Say so plainly in the run log instead of implying a
+                # lookup happened. The ``dat_source_disabled`` detail is
+                # unchanged — only the operator-facing line is new, so the
+                # existing diagnostics taxonomy is preserved.
+                _has_any = bool(_sources)
                 _dat_events.append(EnrichEvent(
                     category=EnrichCategory.DAT,
                     detail="dat_source_disabled",
                     cache="negative", ok=True,
                 ))
+                _act(
+                    f"DAT/local metadata sources are all disabled "
+                    f"({len(_sources)} configured) — no DAT lookup was performed."
+                    if _has_any else
+                    "No DAT/local metadata source is configured — "
+                    "no DAT lookup was performed."
+                )
         except Exception as exc:
             _dat_events.append(EnrichEvent(
                 category=EnrichCategory.DAT,
                 detail=f"dat_unavailable: {exc}",
                 cache="negative", ok=False, error=str(exc),
             ))
+            _act(f"DAT/local metadata sources unavailable: {exc}.")
     else:
         _dat_events.append(EnrichEvent(
             category=EnrichCategory.DAT,
             detail="dat_not_configured",
             cache="negative", ok=True,
         ))
+        _act(
+            "No DAT/local metadata source is configured — "
+            "no DAT lookup was performed."
+        )
 
     # Optional IGDB metadata/artwork provider. Title + Amiga platform search.
     # Non-hash-first; runs independently of Playmatch/Hasheous.
@@ -1563,7 +1591,7 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
         events.append(_ra_success_event)
         if _ra_success_note is not None:
             notes.append(_ra_success_note)
-    _review_items = _build_review_items(events)
+    _review_items = _build_review_items(events, release_key=str(group.release_key))
     # Propagate DAT/local metadata diagnostic events so callers
     # can observe dat_not_configured, dat_source_disabled,
     # dat_loaded, dat_hash_match, etc. (GH-192 Problem 3).

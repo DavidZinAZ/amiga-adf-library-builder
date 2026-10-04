@@ -107,6 +107,91 @@ class _BotChallengeError(Exception):
         self.status = status
 
 
+class ProviderRequestError(urllib.error.URLError):
+    """Raised when an outbound provider request fails, with full diagnostics.
+
+    (GH-192 production FAILURE 3) A bare ``request_error`` classification told
+    the operator nothing: not the URL, not the status, not whether the cause
+    was a rate limit, a timeout, or a dead socket. This exception carries
+    those fields so ``_try_provider`` can log them verbatim.
+
+    ``category`` is one of ``rate_limited``, ``timeout``, ``network``,
+    ``http_error``, or ``url_unsafe`` and is the deterministic reason tag.
+    ``retry_after`` carries the server-supplied Retry-After seconds when the
+    server provides one.
+
+    Subclasses :class:`urllib.error.URLError` deliberately: every existing
+    ``except urllib.error.URLError`` handler in the provider chain keeps
+    working unchanged, and callers that only checked "was this a transport
+    error" continue to see one. Callers that want the diagnosis read
+    ``status`` / ``category`` / ``url``.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        url: str = "",
+        status: int | None = None,
+        category: str = "network",
+        exception_type: str = "",
+        retry_after: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.url = url
+        self.status = status
+        self.category = category
+        self.exception_type = exception_type
+        self.retry_after = retry_after
+
+
+def _http_status_of(exc: BaseException) -> Optional[int]:
+    """Return the HTTP status carried by ``exc``, or None."""
+    for _attr in ("status", "code"):
+        _value = getattr(exc, _attr, None)
+        if isinstance(_value, int):
+            return _value
+    return None
+
+
+def classify_request_error(exc: BaseException, *, url: str = "") -> ProviderRequestError:
+    """Wrap a transport-level exception in a diagnosable ProviderRequestError.
+
+    Deterministic precedence: rate limit (429/503 with Retry-After) >
+    explicit HTTP status > timeout > DNS/socket > generic network. The
+    original exception class and message are preserved verbatim.
+    """
+    status = _http_status_of(exc)
+    category = "network"
+    retry_after: Optional[float] = None
+    if status == 429:
+        category = "rate_limited"
+    elif status is not None:
+        category = "http_error"
+    elif isinstance(exc, (socket.timeout, TimeoutError)):
+        category = "timeout"
+    elif isinstance(exc, socket.gaierror):
+        category = "network"
+    headers = getattr(exc, "headers", None)
+    if headers is not None:
+        try:
+            _ra = headers.get("Retry-After") if hasattr(headers, "get") else None
+            if _ra is not None:
+                retry_after = float(_ra)
+        except (TypeError, ValueError):
+            retry_after = None
+    if status == 503 and retry_after is not None:
+        category = "rate_limited"
+    return ProviderRequestError(
+        f"{type(exc).__name__}: {exc}",
+        url=url,
+        status=status,
+        category=category,
+        exception_type=type(exc).__name__,
+        retry_after=retry_after,
+    )
+
+
 # Blocks outbound fetches to hosts that resolve to non-public address space.
 # Covers loopback, link-local, RFC1918 and IPv6 ULA/private/loopback. The guard
 # never performs a real network request itself; DNS resolution is only consulted
@@ -290,8 +375,15 @@ def _json_get(url: str, *, timeout: float = 20.0, headers: Optional[dict[str, st
     guard_url(url, resolve=opener is None)
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, **(headers or {})})
     open_fn = opener or urllib.request.urlopen
-    with open_fn(request, timeout=timeout) as response:
-        return json.loads(response.read().decode("utf-8"))
+    # (GH-192 prod FAILURE 3) Transport failures are wrapped so the caller
+    # sees the URL, HTTP status, and a deterministic category (rate_limited /
+    # timeout / network / http_error) instead of a bare request_error.
+    try:
+        with open_fn(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, urllib.error.HTTPError, socket.gaierror,
+            socket.timeout, TimeoutError) as exc:
+        raise classify_request_error(exc, url=url) from exc
 
 
 def _text_get(url: str, *, timeout: float = 20.0,
@@ -358,22 +450,27 @@ def _text_get(url: str, *, timeout: float = 20.0,
                 )
             return text, str(final_url)
     except urllib.error.HTTPError as _http_exc:
-        if _http_exc.code == 403:
-            # HTTP 403 often indicates bot blocking. Read the error body
-            # so that challenge markers are detected even when urllib
-            # raises before _text_get would normally read the response.
-            try:
-                _body = _http_exc.read(3_000_001).decode("utf-8", errors="replace")
-            except Exception:
-                _body = ""
-            _hit = _challenge_hit(_body)
-            if _hit:
-                raise _BotChallengeError(
-                    f"bot_challenge: provider anti-bot page detected "
-                    f"for {url} (HTTP 403, marker={_hit!r})",
-                    status=403,
-                ) from _http_exc
+        # (GH-192 prod FAILURE 1/3) Read the error body on EVERY HTTP status,
+        # not just 403. Anti-bot interstitials are served as 403, 429, 503 and
+        # even 200; the status is not a reliable signal, the body marker is.
+        # Classifying a challenge as a plain http_error would hide the block
+        # behind a rate-limit diagnosis.
+        try:
+            _body = _http_exc.read(3_000_001).decode("utf-8", errors="replace")
+        except Exception:
+            _body = ""
+        _hit = _challenge_hit(_body)
+        if _hit:
+            raise _BotChallengeError(
+                f"bot_challenge: provider anti-bot page detected "
+                f"for {url} (HTTP {_http_exc.code}, marker={_hit!r})",
+                status=int(_http_exc.code),
+            ) from _http_exc
+        raise classify_request_error(_http_exc, url=url) from _http_exc
+    except _BotChallengeError:
         raise
+    except (urllib.error.URLError, socket.gaierror, socket.timeout, TimeoutError) as exc:
+        raise classify_request_error(exc, url=url) from exc
 
 
 @dataclass
@@ -1007,7 +1104,23 @@ def hall_of_light_lookup(title: str, *, timeout: float = 20.0,
     search_url = "https://amiga.abime.net/games/list/?" + urllib.parse.urlencode({"gamename": title})
     try:
         search_html, final_search_url = _text_get(search_url, timeout=timeout, opener=opener)
-    except (urllib.error.URLError, urllib.error.HTTPError, socket.gaierror, socket.timeout, TimeoutError, _BotChallengeError) as exc:
+    except _BotChallengeError as exc:
+        # (GH-192 prod FAILURE 1) Make it explicit WHICH stage was blocked
+        # (search vs detail fetch) and carry the URL. A blocked provider must
+        # never look like a genuine miss.
+        raise _BotChallengeError(
+            f"bot_challenge: hall-of-light SEARCH blocked for {search_url}: {exc}",
+            status=exc.status,
+        ) from exc
+    except ProviderRequestError as exc:
+        # (GH-192 prod FAILURE 3) Carry URL/status/category through instead of
+        # degrading to a bare no-match.
+        _logger.warning(
+            "hall-of-light: search fetch failed: %s (%s)",
+            type(exc).__name__, exc.category,
+        )
+        raise
+    except (urllib.error.URLError, urllib.error.HTTPError, socket.gaierror, socket.timeout, TimeoutError) as exc:
         _logger.warning("hall-of-light: search fetch failed: %s", type(exc).__name__)
         raise
     except Exception:
@@ -1030,8 +1143,12 @@ def hall_of_light_lookup(title: str, *, timeout: float = 20.0,
     for game_url in game_links[:10]:  # Limit to first 10 results
         try:
             detail_html, final_url = _text_get(game_url, timeout=timeout, opener=opener)
-        except _BotChallengeError:
-            raise
+        except _BotChallengeError as exc:
+            # (GH-192 prod FAILURE 1) Name the blocked stage AND the detail URL.
+            raise _BotChallengeError(
+                f"bot_challenge: hall-of-light DETAIL fetch blocked for {game_url}: {exc}",
+                status=exc.status,
+            ) from exc
         except (urllib.error.URLError, urllib.error.HTTPError, socket.gaierror, socket.timeout, TimeoutError) as exc:
             _logger.warning("hall-of-light: detail fetch failed for %s: %s", game_url, type(exc).__name__)
             continue
@@ -1247,7 +1364,24 @@ def lemonamiga_lookup(title: str, *, timeout: float = 20.0,
         game_html, final_url = _text_get(
             game_url, timeout=timeout, opener=opener
         )
-    except (urllib.error.URLError, urllib.error.HTTPError, socket.gaierror, socket.timeout, TimeoutError, _BotChallengeError) as exc:
+    except _BotChallengeError as exc:
+        # (GH-192 prod FAILURE 2) Name the blocked fetch and its URL. A
+        # Cloudflare block must never be indistinguishable from "no game".
+        raise _BotChallengeError(
+            f"bot_challenge: lemon-amiga game page fetch blocked for "
+            f"{game_url}: {exc}",
+            status=exc.status,
+        ) from exc
+    except ProviderRequestError as exc:
+        # (GH-192 prod FAILURE 3) Already carries URL/status/category — let it
+        # propagate. Falling through to the generic handler below would turn
+        # a diagnosable transport failure into a silent ``return None``.
+        _logger.warning(
+            "lemon-amiga: game page fetch failed: %s (%s)",
+            type(exc).__name__, exc.category,
+        )
+        raise
+    except (urllib.error.URLError, urllib.error.HTTPError, socket.gaierror, socket.timeout, TimeoutError) as exc:
         _logger.warning("lemon-amiga: game page fetch failed: %s", type(exc).__name__)
         raise
     except Exception:
@@ -1809,12 +1943,33 @@ def lookup_metadata(title: str, *, cache_dir: Path, curated_dir: Path,
         failure_detail: dict[str, Any] = {}
         try:
             candidate = lookup()
-            outcome = "candidate_returned"
+            # (GH-192 prod FAILURE 2) Only a NON-None return is a candidate.
+            # A provider that returns None (disabled, no page, no Amiga
+            # platform, below similarity floor) is a genuine no_result.
+            # Classifying that as ``candidate_returned`` produced the
+            # self-contradictory diagnostic
+            # ``outcome=no_match reason=candidate_returned candidate=''``
+            # and made a real "no candidate" look like a rejected candidate.
+            outcome = "candidate_returned" if candidate is not None else "no_result"
         except Exception as exc:
             # Classify the exception type for diagnostics using proper
             # isinstance checks rather than string-containment heuristics.
             if isinstance(exc, _BotChallengeError):
                 outcome = "bot_challenge"
+            elif isinstance(exc, ProviderRequestError):
+                # (GH-192 prod FAILURE 1/3) The wrapper already carries the
+                # deterministic category. Keep the stable outcome name
+                # ``request_error`` so downstream reason taxonomy is
+                # unchanged, and carry the category as evidence.
+                outcome = "request_error"
+                failure_detail = {
+                    "exception_type": exc.exception_type or type(exc).__name__,
+                    "exception_message": str(exc)[:400],
+                    "http_status": exc.status,
+                    "url": exc.url,
+                    "error_category": exc.category,
+                    "retry_after": exc.retry_after,
+                }
             elif isinstance(exc, (urllib.error.URLError, urllib.error.HTTPError)):
                 outcome = "request_error"
             elif isinstance(exc, json.JSONDecodeError):
@@ -1828,18 +1983,20 @@ def lookup_metadata(title: str, *, cache_dir: Path, curated_dir: Path,
             # Record the concrete failure detail so a production run says
             # WHY a provider failed instead of only naming an outcome class.
             # (GH-192: "when a provider fails, the app must make it obvious why")
-            _status = getattr(exc, "status", None)
-            if _status is None:
-                _status = getattr(exc, "code", None)
-            failure_detail = {
-                "exception_type": type(exc).__name__,
-                "exception_message": str(exc)[:400],
-                "http_status": _status if isinstance(_status, int) else None,
-            }
+            if not failure_detail:
+                _status = _http_status_of(exc)
+                failure_detail = {
+                    "exception_type": type(exc).__name__,
+                    "exception_message": str(exc)[:400],
+                    "http_status": _status,
+                }
             candidate = None
         if candidate is None:
             evidence = [outcome]
-            for _key in ("exception_type", "exception_message", "http_status"):
+            for _key in (
+                "exception_type", "exception_message", "http_status",
+                "url", "error_category", "retry_after",
+            ):
                 _value = failure_detail.get(_key)
                 if _value not in (None, ""):
                     evidence.append(f"{_key}={_value}")
@@ -1853,13 +2010,28 @@ def lookup_metadata(title: str, *, cache_dir: Path, curated_dir: Path,
             })
             return
         decision = validate_metadata_relevance(title, candidate, group=group)
+        # (GH-192 prod FAILURE 2) When a candidate WAS returned, the run
+        # diagnostic must name it: candidate title, candidate URL/provider id,
+        # normalized source vs candidate title, confidence, and the exact
+        # rejection reason. Without these, "zero accepted matches" is
+        # unactionable.
+        candidate_evidence = list(decision.evidence)
+        candidate_evidence.append(f"candidate_title={candidate.canonical_title!r}")
+        candidate_evidence.append(f"candidate_url={candidate.source_url or ''}")
+        candidate_evidence.append(f"candidate_provider_id={candidate.provider_id or ''}")
+        candidate_evidence.append(
+            f"normalized_source={_norm(_strip_subtitle(title))!r}"
+        )
+        candidate_evidence.append(
+            f"normalized_candidate={_norm(_strip_subtitle(candidate.canonical_title or ''))!r}"
+        )
         relevance_events.append({
             "provider": label,
             "canonical_title": candidate.canonical_title,
             "category": decision.category,
             "confidence": decision.confidence,
             "reason": decision.reason,
-            "evidence": list(decision.evidence),
+            "evidence": candidate_evidence,
         })
         if decision.category == "accepted":
             _log(f"{label}: accepted.")
