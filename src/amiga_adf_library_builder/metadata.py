@@ -26,6 +26,18 @@ from typing import Any, Callable, Optional
 from .manual_approvals import validate_source_url
 from .title_norm import canonical_title
 from .utils import now_iso as utc_now
+from .wikipedia_client import (
+    DEFAULT_POLICY,
+    WikipediaGate,
+    WikipediaPolicy,
+    get_global_gate,
+    reset_global_gate,
+)
+from .wikipedia_query import (
+    QueryVariant,
+    build_query_variants,
+    candidate_is_same_subject,
+)
 
 USER_AGENT = f"AmigaADFLibraryBuilder/{__import__('amiga_adf_library_builder._version', fromlist=['__version__']).__version__} (+preservation metadata client)"
 _logger = logging.getLogger(__name__)
@@ -338,6 +350,73 @@ class MetadataRecord:
 def cache_key(title: str) -> str:
     key = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
     return key or "unknown"
+
+
+#: Providers that are externally bot-blocked and are therefore subject to the
+#: fail-fast circuit breaker. These are NOT recoverable in application code:
+#: Hall of Light serves a Within/Anubis interstitial and Lemon Amiga serves a
+#: Cloudflare challenge from this network, on every request, for every
+#: User-Agent.
+_BLOCKED_PROVIDERS = ("hall-of-light", "lemon-amiga")
+
+#: Number of consecutive challenges after which a provider is skipped for the
+#: remainder of a lookup run.
+BLOCKED_PROVIDER_THRESHOLD = 3
+
+
+@dataclass
+class BlockedProviderCircuit:
+    """Fail-fast breaker for providers blocked by external anti-bot protection.
+
+    Hall of Light (Within/Anubis) and Lemon Amiga (Cloudflare) are blocked from
+    every path this application has, on every request. Re-requesting them for
+    every release costs one wasted round trip per title and delays the one
+    provider that actually works.
+
+    The breaker is an explicit object owned by the caller rather than a module
+    global. A module-level counter looks convenient but is a real defect: it
+    leaks across runs and across independent test files in the same process, so
+    one test's blocked provider silently changes another test's outcome.
+
+    This is fail-fast only. It is NOT a challenge bypass and does not attempt
+    to defeat the protection.
+    """
+
+    threshold: int = BLOCKED_PROVIDER_THRESHOLD
+    counts: dict[str, int] = field(default_factory=dict)
+    reported: set[str] = field(default_factory=set)
+
+    def is_open(self, label: str) -> bool:
+        """True when ``label`` has been skipped already in this run."""
+        return label in self.reported
+
+    def note_challenge(self, label: str) -> None:
+        """Record a bot challenge for ``label``."""
+        if label in _BLOCKED_PROVIDERS:
+            self.counts[label] = self.counts.get(label, 0) + 1
+
+    def should_skip(self, label: str) -> bool:
+        """True when the threshold is reached and this has not been reported."""
+        return (self.counts.get(label, 0) >= self.threshold
+                and label not in self.reported)
+
+    def mark_reported(self, label: str) -> None:
+        self.reported.add(label)
+
+    def count(self, label: str) -> int:
+        return self.counts.get(label, 0)
+
+
+def reset_blocked_provider_circuit() -> None:
+    """Reset the process-wide blocked-provider circuit breaker.
+
+    Kept as a public no-op-compatible entry point so callers and tests have a
+    single obvious way to clear breaker state. The counters now live on an
+    explicit :class:`BlockedProviderCircuit` instance owned by the run rather
+    than in a module global, so there is no cross-run state to clear; the
+    function remains so existing call sites and tests keep working.
+    """
+    return None
 
 
 def load_cached(cache_dir: Path, title: str) -> Optional[MetadataRecord]:
@@ -874,61 +953,273 @@ def discover_artwork_from_page(page_url: str, title: str, *, timeout: float = 20
     return image_url, provider
 
 
-def wikipedia_lookup(title: str, *, timeout: float = 20.0,
-                     opener: Optional[Callable[..., Any]] = None) -> Optional[MetadataRecord]:
-    query = f'"{title}" Amiga video game'
-    params = {
+_WIKIPEDIA_API = "https://en.wikipedia.org/w/api.php"
+
+
+def _wikipedia_api_params(variant: "QueryVariant") -> dict[str, str]:
+    """Build the deterministic API parameter set for one query form.
+
+    ``bare_quoted`` deliberately omits the ``Amiga video game`` context terms:
+    measured live on 2026-10-04, those terms EXCLUDE the correct article for
+    titles whose page does not use them ("Oil Barons" ranked the real article
+    7th without the context terms and returned only generic list pages with
+    them).
+    """
+    if variant.label == "bare_quoted":
+        search = f'"{variant.search}"'
+    else:
+        search = f'"{variant.search}" Amiga video game'
+    return {
         "action": "query", "format": "json", "formatversion": "2",
-        "generator": "search", "gsrsearch": query, "gsrlimit": "8",
+        "generator": "search",
+        "gsrsearch": search,
+        "gsrlimit": "8",
         "prop": "extracts|pageimages|info", "exintro": "1", "explaintext": "1",
         "piprop": "original|thumbnail", "pithumbsize": "1200", "inprop": "url",
     }
-    url = "https://en.wikipedia.org/w/api.php?" + urllib.parse.urlencode(params)
-    data = _json_get(url, timeout=timeout, opener=opener)
-    pages = (data.get("query") or {}).get("pages") or []
-    if not pages:
-        return None
-    target = _norm(title)
-    ranked = []
+
+
+def _wikipedia_fetch(url: str, *, timeout: float,
+                     opener: Optional[Callable[..., Any]],
+                     gate: "WikipediaGate",
+                     diagnostics: list[dict],
+                     attempt_label: str,
+                     allow_retry: bool = True) -> dict[str, Any]:
+    """Issue ONE Wikipedia API request with pacing and bounded retry.
+
+    Retry is bounded by ``gate.policy.max_retries``; there is no unbounded
+    loop. ``allow_retry=False`` forces a single attempt, used for query forms
+    after the first 429 so a rate-limited run does not multiply its request
+    count by the number of forms. A 429 opens a gate cooldown rather than
+    immediately re-requesting. Every decision is appended to ``diagnostics``.
+    """
+    attempt = 0
+    while True:
+        gate.begin_request()
+        gate.note_request()
+        try:
+            data = _json_get(url, timeout=timeout, opener=opener)
+        except ProviderRequestError as exc:
+            rate_limited = exc.category == "rate_limited" or exc.status == 429
+            entry = {
+                "attempt": attempt,
+                "query_variant": attempt_label,
+                "url": url,
+                "http_status": exc.status,
+                "rate_limited": rate_limited,
+                "retry_after": exc.retry_after,
+                "error_category": exc.category,
+                "gate_decision": gate.last_decision,
+            }
+            if not rate_limited:
+                entry["decision"] = "give_up_non_rate_limited"
+                diagnostics.append(entry)
+                raise
+            # Every 429 is counted, even when no retry follows, so the
+            # run-level rate-limit budget can stop further requests.
+            gate.note_rate_limited(retry_after=exc.retry_after)
+            if (not allow_retry or not gate.policy.retries_enabled
+                    or attempt >= gate.policy.max_retries):
+                entry["decision"] = "give_up_retry_budget_exhausted"
+                entry["rate_limit_events"] = gate.rate_limited_events
+                diagnostics.append(entry)
+                raise
+            wait = gate.cooldown_remaining()
+            entry["decision"] = "backoff"
+            entry["backoff_seconds"] = round(wait, 3)
+            diagnostics.append(entry)
+            gate.note_retry()
+            attempt += 1
+            continue
+        diagnostics.append({
+            "attempt": attempt,
+            "query_variant": attempt_label,
+            "url": url,
+            "http_status": 200,
+            "rate_limited": False,
+            "retry_after": None,
+            "gate_decision": gate.last_decision,
+            "decision": "ok",
+        })
+        return data
+
+
+def _rank_wikipedia_pages(title: str, pages: list[dict]) -> list[tuple[float, dict]]:
+    """Rank candidate pages for ``title`` with the conservative subject test."""
+    ranked: list[tuple[float, dict]] = []
     for page in pages:
         page_title = str(page.get("title") or "")
+        if not page_title:
+            continue
         extract = str(page.get("extract") or "")
-        score = SequenceMatcher(None, target, _norm(page_title)).ratio()
+        if not candidate_is_same_subject(title, page_title, extract=extract):
+            continue
         haystack = (page_title + " " + extract[:600]).lower()
-        if "video game" in haystack: score += 0.15
-        if "amiga" in haystack: score += 0.20
+        if "amiga" in haystack:
+            score = 0.95
+        elif "video game" in haystack:
+            score = 0.85
+        else:
+            score = 0.70
         ranked.append((score, page))
-    score, page = max(ranked, key=lambda item: item[0])
-    if score < 0.45:
+    return ranked
+
+
+def wikipedia_lookup(title: str, *, timeout: float = 20.0,
+                     opener: Optional[Callable[..., Any]] = None,
+                     gate: "Optional[WikipediaGate]" = None,
+                     policy: "Optional[WikipediaPolicy]" = None,
+                     diagnostics: Optional[list[dict]] = None,
+                     artwork: bool = True) -> Optional[MetadataRecord]:
+    """Look up ``title`` on Wikipedia with pacing, fallbacks and diagnostics.
+
+    Behaviour changes vs the previous single-query implementation:
+
+    - requests are paced and rate-limit aware (``gate``/``policy``);
+    - several deterministic query forms are tried, cheapest and most likely
+      first, stopping at the first acceptable subject;
+    - a candidate is accepted only when
+      :func:`candidate_is_same_subject` confirms it is the requested work;
+    - every request, wait, retry and rejection is recorded in ``diagnostics``.
+
+    ``opener`` injection still bypasses pacing entirely (the gate only counts
+    real requests), so offline tests never wait.
+    """
+    gate = gate or get_global_gate(policy)
+    trail: list[dict] = diagnostics if diagnostics is not None else []
+    # Once this lookup has seen a 429, later query forms must NOT retry.
+    # Retrying each of N forms would multiply the request count by
+    # ``max_retries + 1`` against an endpoint that has already told us it is
+    # rate limiting this client. Later forms still get ONE attempt each, so a
+    # differently-cached form can still succeed.
+    rate_limited_seen = False
+    if opener is not None:
+        # A caller-injected opener is a test/offline path: never sleep, but
+        # keep the SAME gate object so its counters, budget and rate-limit
+        # state stay observable to the caller that passed it in.
+        gate.without_sleeping()
+
+    variants = build_query_variants(title)
+    if not variants:
         return None
-    original = page.get("original") or page.get("thumbnail") or {}
+
+    best_page: Optional[dict] = None
+    best_score = 0.0
+    used_variant: Optional[QueryVariant] = None
+    #: First transport failure, re-raised once every query form is exhausted.
+    #: Returning None instead would discard the status/category/URL that
+    #: production needs to tell a rate limit from a timeout from a dead socket,
+    #: and would reintroduce exactly the opaque ``no_result`` diagnosis that
+    #: GH-192 round 2 was opened to fix.
+    first_error: Optional[ProviderRequestError] = None
+    #: True when some form was answered and simply held no acceptable match.
+    #: A real "no such article" answer must NOT be masked by an error from a
+    #: different form.
+    answered_any = False
+
+    for index, variant in enumerate(variants):
+        if not gate.request_allowed():
+            trail.append({
+                "query_variant": variant.label,
+                "decision": "budget_exhausted",
+                "rate_limited": False,
+                "gate_decision": "budget_exhausted",
+            })
+            break
+        params = _wikipedia_api_params(variant)
+        url = _WIKIPEDIA_API + "?" + urllib.parse.urlencode(params)
+        try:
+            data = _wikipedia_fetch(url, timeout=timeout, opener=opener,
+                                    gate=gate, diagnostics=trail,
+                                    attempt_label=variant.label,
+                                    allow_retry=not rate_limited_seen)
+        except ProviderRequestError as exc:
+            # A rate-limited form must not abort the whole lookup: another
+            # query form may still be served. The failure is retained and
+            # re-raised only if EVERY form failed (see below).
+            if first_error is None:
+                first_error = exc
+            if exc.category == "rate_limited" or exc.status == 429:
+                rate_limited_seen = True
+            if gate.rate_limited_exhausted():
+                break
+            continue
+        pages = (data.get("query") or {}).get("pages") or []
+        answered_any = True
+        ranked = _rank_wikipedia_pages(title, pages)
+        if ranked:
+            score, page = max(ranked, key=lambda item: item[0])
+            trail.append({
+                "query_variant": variant.label,
+                "decision": "candidate_accepted",
+                "candidate_title": str(page.get("title") or ""),
+                "candidate_url": str(page.get("fullurl") or ""),
+                "confidence": score,
+                "variant_index": index,
+            })
+            best_page, best_score, used_variant = page, score, variant
+            break
+        trail.append({
+            "query_variant": variant.label,
+            "decision": "no_acceptable_candidate",
+            "candidate_count": len(pages),
+        })
+        if gate.rate_limited_exhausted():
+            break
+
+    if best_page is None:
+        # Re-raise the transport failure when NO form produced a usable
+        # answer, so the caller sees the real diagnosis (429 / timeout /
+        # http_error with URL and Retry-After) instead of a bare None. When at
+        # least one form was answered, the genuine "no acceptable article"
+        # verdict wins and is returned as None.
+        if first_error is not None and not answered_any:
+            raise first_error
+        return None
+
+    query_text = (_wikipedia_api_params(used_variant)["gsrsearch"]
+                if used_variant else title)
+    original = best_page.get("original") or best_page.get("thumbnail") or {}
     art = str(original.get("source") or "")
-    page_url = str(page.get("fullurl") or "")
+    page_url = str(best_page.get("fullurl") or "")
     art_provider = "wikipedia" if art else ""
-    if not art and page_url:
+    if artwork and not art and page_url:
         # The pageimages API returns null for many game pages even when the
         # page itself carries artwork (og:image / link rel=image_src). Fall
-        # back to HTML-based discovery so artwork enrichment is not
-        # silently dead for Wikipedia matches. (GH-192 Task A)
+        # back to HTML-based discovery so artwork enrichment is not silently
+        # dead for Wikipedia matches. (GH-192 Task A)
         try:
+            gate.begin_request()
+            gate.note_request()
             art_found = discover_artwork_from_page(
-                page_url, str(page.get("title") or title),
+                page_url, str(best_page.get("title") or title),
                 timeout=timeout, opener=opener,
             )
+            trail.append({
+                "query_variant": "artwork_page",
+                "url": page_url,
+                "decision": "artwork_found" if art_found else "artwork_none",
+                "gate_decision": gate.last_decision,
+            })
         except _BotChallengeError:
             raise
         except Exception:
             art_found = None
+            trail.append({
+                "query_variant": "artwork_page",
+                "url": page_url,
+                "decision": "artwork_error",
+            })
         if art_found:
             art, art_provider = art_found
     return MetadataRecord(
-        canonical_title=str(page.get("title") or title),
-        description=str(page.get("extract") or "").strip(),
+        canonical_title=str(best_page.get("title") or title),
+        description=str(best_page.get("extract") or "").strip(),
         source_url=page_url, artwork_url=art,
         artwork_source_url=page_url if art else "",
         artwork_provider=art_provider, provider="wikipedia",
-        provider_id=str(page.get("pageid") or ""), retrieved_at=utc_now(),
-        confidence=min(score, 1.0), query=query,
+        provider_id=str(best_page.get("pageid") or ""), retrieved_at=utc_now(),
+        confidence=min(best_score, 1.0), query=query_text,
     )
 
 
@@ -1867,6 +2158,8 @@ def lookup_metadata(title: str, *, cache_dir: Path, curated_dir: Path,
                     mobygames_api_key_env: str = "MOBYGAMES_API_KEY",
                     lemonamiga_enabled: bool = False,
                     halloflight_enabled: bool = True,
+                    wikipedia_gate: "Optional[WikipediaGate]" = None,
+                    blocked_circuit: "Optional[BlockedProviderCircuit]" = None,
                     activity: Optional[Callable[[str], None]] = None
                     ) -> tuple[Optional[MetadataRecord], str, list[dict]]:
     """Resolve metadata for ``title`` using the shared precedence chain.
@@ -1885,13 +2178,19 @@ def lookup_metadata(title: str, *, cache_dir: Path, curated_dir: Path,
     compatibility; disable via the ``[hall-of-light]`` config table.
     """
     curated = load_curated(curated_dir, title)
+    # The gate must exist before the curated branch: a curated record with
+    # missing prose/artwork still supplements from Wikipedia, and that request
+    # must be paced like every other one.
+    gate = wikipedia_gate or get_global_gate()
     if curated:
         # Preserve curated identity/facts. Wikipedia may supplement only missing
         # prose/image; Amiga-specific approved pages are then tried for artwork.
         supplement: Optional[MetadataRecord] = None
         _wiki_art: Optional[tuple[str, str, str]] = None
         if not curated.description or not curated.artwork_url:
-            try: supplement = wikipedia_lookup(title, timeout=timeout, opener=opener)
+            try:
+                supplement = wikipedia_lookup(title, timeout=timeout,
+                                             opener=opener, gate=gate)
             except Exception: supplement = None
         if supplement:
             if not curated.description: curated.description = supplement.description
@@ -1913,14 +2212,32 @@ def lookup_metadata(title: str, *, cache_dir: Path, curated_dir: Path,
                 curated.provider = (curated.provider or "curated") + "+wikipedia"
         save_cached(cache_dir, title, curated)
         return curated, curated.provider or "curated", []
-    if not refresh:
-        cached = load_cached(cache_dir, title)
-        if cached: return cached, "cache", []
     # ONLINE candidates are validated for relevance before caching/accepting.
     # A rejected/review candidate is NEVER cached and NEVER returned; it falls
     # through to the next provider, then to offline/local. Curated and cached
     # paths above stay authoritative and skip validation.
     relevance_events: list[dict] = []
+    if not refresh:
+        cached = load_cached(cache_dir, title)
+        if cached:
+            # (GH-192 online-usability pass) An explicit cache hit is a
+            # first-class diagnostic. Previously a reused cache entry was
+            # indistinguishable from a fresh online match, so "why did this
+            # title not query the network?" was unanswerable from the run log.
+            relevance_events.append({
+                "provider": "cache",
+                "canonical_title": cached.canonical_title,
+                "category": "accepted",
+                "confidence": cached.confidence,
+                "reason": "cache_hit",
+                "evidence": [
+                    "cache_hit",
+                    f"cache_source={cached.provider or 'unknown'}",
+                    f"retrieved_at={cached.retrieved_at}",
+                    "network_requests_avoided=True",
+                ],
+            })
+            return cached, "cache", relevance_events
     accepted: Optional[MetadataRecord] = None
 
     # Live activity hook for on-screen diagnostics. Matches the pattern used
@@ -1934,9 +2251,38 @@ def lookup_metadata(title: str, *, cache_dir: Path, curated_dir: Path,
         except Exception:
             pass
 
+    # (GH-192 online-usability pass) Fail-fast circuit breaker for externally
+    # blocked providers. Hall of Light (Within/Anubis) and Lemon Amiga
+    # (Cloudflare) are blocked from every path this application has;
+    # re-requesting them for every release adds one wasted round trip per
+    # title and delays the provider that actually works.
+    #
+    # The breaker is caller-owned via ``blocked_circuit``: a pipeline run
+    # passes ONE instance across every title so the breaker actually opens and
+    # saves requests, while an unconfigured call (and every independent test)
+    # gets a fresh instance and therefore no cross-call leakage.
+    circuit = (blocked_circuit if blocked_circuit is not None
+               else BlockedProviderCircuit())
+
     def _try_provider(label: str,
                       lookup) -> None:
         nonlocal accepted
+        if circuit.should_skip(label):
+            circuit.mark_reported(label)
+            _log(f"{label}: blocked by anti-bot protection, skipping.")
+            relevance_events.append({
+                "provider": label,
+                "canonical_title": "",
+                "category": "not_found",
+                "confidence": 0.0,
+                "reason": "bot_challenge_circuit_open",
+                "evidence": [
+                    "bot_challenge",
+                    f"consecutive_bot_challenges={circuit.count(label)}",
+                    "provider_skipped_for_remainder_of_run=True",
+                ],
+            })
+            return
         _log(f"Querying {label}…")
         candidate = None
         outcome = "no_result"
@@ -1956,6 +2302,9 @@ def lookup_metadata(title: str, *, cache_dir: Path, curated_dir: Path,
             # isinstance checks rather than string-containment heuristics.
             if isinstance(exc, _BotChallengeError):
                 outcome = "bot_challenge"
+                # The breaker only tracks providers known to be externally
+                # blocked; everything else is reported but not counted.
+                circuit.note_challenge(label)
             elif isinstance(exc, ProviderRequestError):
                 # (GH-192 prod FAILURE 1/3) The wrapper already carries the
                 # deterministic category. Keep the stable outcome name
@@ -2057,8 +2406,40 @@ def lookup_metadata(title: str, *, cache_dir: Path, curated_dir: Path,
                       lambda: lemonamiga_lookup(title, timeout=timeout, opener=opener,
                                                 config=LemonAmigaConfig(enabled=lemonamiga_enabled)))
     if accepted is None:
+        wiki_diagnostics: list[dict] = []
         _try_provider("wikipedia",
-                      lambda: wikipedia_lookup(title, timeout=timeout, opener=opener))
+                      lambda: wikipedia_lookup(
+                          title, timeout=timeout, opener=opener,
+                          gate=gate, diagnostics=wiki_diagnostics))
+        # (GH-192 online-usability pass) Surface the per-request decision trail:
+        # which query form was sent, the URL, HTTP status, rate-limit flag,
+        # Retry-After, the backoff/pause decision, candidate title, confidence,
+        # and the accept/reject reason. Without this the operator sees only a
+        # single opaque "not-found" for a rate-limited run.
+        for entry in wiki_diagnostics:
+            detail = (
+                f"query={entry.get('query_variant', '')!r} "
+                f"decision={entry.get('decision', '')} "
+                f"status={entry.get('http_status', '')} "
+                f"rate_limited={entry.get('rate_limited', False)} "
+                f"retry_after={entry.get('retry_after', '')} "
+                f"gate={entry.get('gate_decision', '')} "
+                f"url={entry.get('url', '')}"
+            )
+            for _key in ("backoff_seconds", "candidate_title", "candidate_url",
+                         "confidence", "candidate_count", "attempt",
+                         "error_category"):
+                _value = entry.get(_key)
+                if _value not in (None, ""):
+                    detail += f" {_key}={_value}"
+            relevance_events.append({
+                "provider": "wikipedia-request",
+                "canonical_title": str(entry.get("candidate_title") or ""),
+                "category": "not_found",
+                "confidence": float(entry.get("confidence") or 0.0),
+                "reason": "wikipedia_" + str(entry.get("decision") or "step"),
+                "evidence": [detail],
+            })
     if accepted is not None:
         save_cached(cache_dir, title, accepted)
         return accepted, accepted.provider, relevance_events
