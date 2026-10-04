@@ -7,6 +7,7 @@ metadata. Wikipedia and RAWG remain optional fallback metadata providers.
 """
 from __future__ import annotations
 
+import html
 import json
 import logging
 import os
@@ -33,6 +34,11 @@ _ALLOWED_ARTWORK_PAGE_HOSTS = {
     "www.lemonamiga.com", "lemonamiga.com", "amiga.abime.net",
     "www.openretro.org", "openretro.org", "amiga.lychesis.net",
     "www.mobygames.com", "mobygames.com", "images.mobygames.com",
+    # Wikipedia: the pageimages API returns null for many game pages, so
+    # artwork discovery falls back to fetching the page HTML and reading
+    # og:image / link rel=image_src. Fetching the rendered article page is
+    # the only way to obtain artwork for those games. (GH-192 Task A)
+    "en.wikipedia.org", "wikipedia.org", "en.m.wikipedia.org",
 }
 
 
@@ -295,14 +301,39 @@ def _text_get(url: str, *, timeout: float = 20.0,
     guard_url(url, resolve=opener is None)
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml"})
     open_fn = opener or urllib.request.urlopen
+    # Anti-bot interstitial markers. Matching is done against BOTH the raw
+    # body and an HTML-entity-decoded copy of it, because several providers
+    # (Anubis / Within on Hall of Light) emit the apostrophe as the entity
+    # ``&#39;`` and a literal-string check silently misses the challenge.
     _BOT_CHALLENGE_MARKERS = (
         "Making sure you're not a bot",   # Anubis / Within
         "Just a moment...",               # Cloudflare
-        "<title>Just a moment...</title>",
         "You have been blocked",
+        "Attention Required! | Cloudflare",
+        "Checking your browser before accessing",
         "bot_check",
         "cf-browser-verifier",
+        "cf_chl_opt",
+        "_Incapsula_Resource",
+        "px-captcha",
+        "Please enable JS and disable any ad blocker",
+        "Enable JavaScript and cookies to continue",
+        "DDoS protection by",
+        "a2e4v1",
+        "anubis_challenge",
+        "waf_challenge",
     )
+
+    def _challenge_hit(body: str) -> Optional[str]:
+        """Return the first anti-bot marker present in ``body``, else None."""
+        if not body:
+            return None
+        decoded = html.unescape(body)
+        for candidate_body in (body, decoded):
+            for marker in _BOT_CHALLENGE_MARKERS:
+                if marker in candidate_body:
+                    return marker
+        return None
     try:
         with open_fn(request, timeout=timeout) as response:
             data = response.read(3_000_001)
@@ -317,11 +348,12 @@ def _text_get(url: str, *, timeout: float = 20.0,
             # Detect bot-challenge / anti-bot interstitial responses so that
             # external blocking is distinguishable from normal no-match or
             # parser failures downstream.
-            if any(marker in text for marker in _BOT_CHALLENGE_MARKERS):
+            _hit = _challenge_hit(text)
+            if _hit:
                 status = getattr(response, "status", None) or getattr(response, "getcode", lambda: None)()
                 raise _BotChallengeError(
                     f"bot_challenge: provider anti-bot page detected "
-                    f"for {url}",
+                    f"for {url} (marker={_hit!r})",
                     status=status,
                 )
             return text, str(final_url)
@@ -334,10 +366,11 @@ def _text_get(url: str, *, timeout: float = 20.0,
                 _body = _http_exc.read(3_000_001).decode("utf-8", errors="replace")
             except Exception:
                 _body = ""
-            if any(marker in _body for marker in _BOT_CHALLENGE_MARKERS):
+            _hit = _challenge_hit(_body)
+            if _hit:
                 raise _BotChallengeError(
                     f"bot_challenge: provider anti-bot page detected "
-                    f"for {url} (HTTP 403)",
+                    f"for {url} (HTTP 403, marker={_hit!r})",
                     status=403,
                 ) from _http_exc
         raise
@@ -738,6 +771,8 @@ def discover_artwork_from_page(page_url: str, title: str, *, timeout: float = 20
         "lemonamiga.com": "lemon-amiga", "www.lemonamiga.com": "lemon-amiga",
         "amiga.abime.net": "hall-of-light", "openretro.org": "openretro",
         "www.openretro.org": "openretro", "amiga.lychesis.net": "lychesis",
+        "en.wikipedia.org": "wikipedia", "wikipedia.org": "wikipedia",
+        "en.m.wikipedia.org": "wikipedia",
     }.get(host.lower(), host.lower())
     return image_url, provider
 
@@ -771,12 +806,30 @@ def wikipedia_lookup(title: str, *, timeout: float = 20.0,
         return None
     original = page.get("original") or page.get("thumbnail") or {}
     art = str(original.get("source") or "")
+    page_url = str(page.get("fullurl") or "")
+    art_provider = "wikipedia" if art else ""
+    if not art and page_url:
+        # The pageimages API returns null for many game pages even when the
+        # page itself carries artwork (og:image / link rel=image_src). Fall
+        # back to HTML-based discovery so artwork enrichment is not
+        # silently dead for Wikipedia matches. (GH-192 Task A)
+        try:
+            art_found = discover_artwork_from_page(
+                page_url, str(page.get("title") or title),
+                timeout=timeout, opener=opener,
+            )
+        except _BotChallengeError:
+            raise
+        except Exception:
+            art_found = None
+        if art_found:
+            art, art_provider = art_found
     return MetadataRecord(
         canonical_title=str(page.get("title") or title),
         description=str(page.get("extract") or "").strip(),
-        source_url=str(page.get("fullurl") or ""), artwork_url=art,
-        artwork_source_url=str(page.get("fullurl") or "") if art else "",
-        artwork_provider="wikipedia" if art else "", provider="wikipedia",
+        source_url=page_url, artwork_url=art,
+        artwork_source_url=page_url if art else "",
+        artwork_provider=art_provider, provider="wikipedia",
         provider_id=str(page.get("pageid") or ""), retrieved_at=utc_now(),
         confidence=min(score, 1.0), query=query,
     )
@@ -1702,18 +1755,28 @@ def lookup_metadata(title: str, *, cache_dir: Path, curated_dir: Path,
         # Preserve curated identity/facts. Wikipedia may supplement only missing
         # prose/image; Amiga-specific approved pages are then tried for artwork.
         supplement: Optional[MetadataRecord] = None
+        _wiki_art: Optional[tuple[str, str, str]] = None
         if not curated.description or not curated.artwork_url:
             try: supplement = wikipedia_lookup(title, timeout=timeout, opener=opener)
             except Exception: supplement = None
         if supplement:
             if not curated.description: curated.description = supplement.description
             if not curated.artwork_url and supplement.artwork_url:
-                curated.artwork_url = supplement.artwork_url
-                curated.artwork_source_url = supplement.artwork_source_url
-                curated.artwork_provider = supplement.artwork_provider
-                curated.provider = (curated.provider or "curated") + "+wikipedia"
+                # Hold the Wikipedia artwork as a fallback only. An Amiga-specific
+                # curated artwork page is a better source of box art than the
+                # generic encyclopedia image, so it is tried first below.
+                _wiki_art = (
+                    supplement.artwork_url, supplement.artwork_source_url,
+                    supplement.artwork_provider,
+                )
         if not curated.artwork_url:
             _discover_curated_artwork(curated, title, timeout=timeout, opener=opener)
+            # If the Amiga-specific pages yielded nothing, fall back to the
+            # Wikipedia image rather than leaving artwork empty.
+            if not curated.artwork_url and _wiki_art:
+                curated.artwork_url, curated.artwork_source_url, curated.artwork_provider = _wiki_art
+            if curated.artwork_url and "+wikipedia" not in (curated.provider or ""):
+                curated.provider = (curated.provider or "curated") + "+wikipedia"
         save_cached(cache_dir, title, curated)
         return curated, curated.provider or "curated", []
     if not refresh:
@@ -1743,6 +1806,7 @@ def lookup_metadata(title: str, *, cache_dir: Path, curated_dir: Path,
         _log(f"Querying {label}…")
         candidate = None
         outcome = "no_result"
+        failure_detail: dict[str, Any] = {}
         try:
             candidate = lookup()
             outcome = "candidate_returned"
@@ -1761,15 +1825,31 @@ def lookup_metadata(title: str, *, cache_dir: Path, curated_dir: Path,
                 outcome = "auth_error"
             else:
                 outcome = "parse_error"  # genuine unexpected parse/internal error
+            # Record the concrete failure detail so a production run says
+            # WHY a provider failed instead of only naming an outcome class.
+            # (GH-192: "when a provider fails, the app must make it obvious why")
+            _status = getattr(exc, "status", None)
+            if _status is None:
+                _status = getattr(exc, "code", None)
+            failure_detail = {
+                "exception_type": type(exc).__name__,
+                "exception_message": str(exc)[:400],
+                "http_status": _status if isinstance(_status, int) else None,
+            }
             candidate = None
         if candidate is None:
+            evidence = [outcome]
+            for _key in ("exception_type", "exception_message", "http_status"):
+                _value = failure_detail.get(_key)
+                if _value not in (None, ""):
+                    evidence.append(f"{_key}={_value}")
             relevance_events.append({
                 "provider": label,
                 "canonical_title": "",
                 "category": "not_found",
                 "confidence": 0.0,
                 "reason": outcome,
-                "evidence": [outcome],
+                "evidence": evidence,
             })
             return
         decision = validate_metadata_relevance(title, candidate, group=group)

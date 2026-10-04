@@ -61,6 +61,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from amiga_adf_library_builder.title_norm import _strip_parenthetical_disambiguators
 from amiga_adf_library_builder.library_state import (
     CurationStateFile,
     CurationStateManager,
@@ -2626,7 +2627,14 @@ class PreviewWidget(QWidget):
             # fields. The artwork URL is surfaced in the dialog but is NOT
             # written into path fields (artwork selection is a separate
             # curation action).
-            entry.title = candidate.get("title") or entry.title
+            # Providers return their own display title, which frequently carries a
+            # Wikipedia-style disambiguator ("Hacker (video game)") that must
+            # not leak into the library Title column. Strip the fixed
+            # qualifier set while preserving the raw provider title in the
+            # notes line for provenance. (GH-192 Task B)
+            raw_provider_title = candidate.get("title") or ""
+            display_title = _strip_parenthetical_disambiguators(raw_provider_title) or raw_provider_title
+            entry.title = display_title or entry.title
             entry.metadata_source = candidate.get("provider") or entry.metadata_source
             entry.match_confidence = candidate.get("confidence") or entry.match_confidence
             detail = (
