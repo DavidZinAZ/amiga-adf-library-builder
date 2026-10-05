@@ -325,7 +325,13 @@ def test_cached_record_is_trusted_and_not_revalidated(tmp_path: Path):
         "Example Cached Game", cache_dir=cache, curated_dir=curated)
     assert record is not None
     assert provider == "cache"
-    assert events == []
+    # GH-192 online-usability pass: a cache hit now emits an explicit
+    # diagnostic instead of an empty event list. Production runs previously
+    # could not distinguish "reused cache" from "fresh online match", which
+    # made the cache_reuse requirement unverifiable from the run log.
+    assert [ev["reason"] for ev in events] == ["cache_hit"]
+    assert events[0]["provider"] == "cache"
+    assert "network_requests_avoided=True" in events[0]["evidence"]
 
 
 def test_enrich_emits_relevance_rejected_event(tmp_path: Path):

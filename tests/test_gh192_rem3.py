@@ -273,28 +273,45 @@ class TestHallOfLightTransportVisibility:
     """Verify that Hall of Light transport failures are observable."""
 
     def test_search_fetch_transport_exception_propagates(self, monkeypatch):
-        """URLError during HOL search fetch propagates (not swallowed)."""
+        """URLError during HOL search fetch propagates (not swallowed).
+
+        (GH-192 production FAILURE 3) It is wrapped in a
+        ``ProviderRequestError`` which subclasses ``URLError``, so existing
+        ``except URLError`` handling is preserved while the run log gains the
+        URL, status and category.
+        """
         def _failing_opener(request, timeout=0):
             raise urllib.error.URLError("connection refused")
 
         with pytest.raises(urllib.error.URLError):
             hall_of_light_lookup("Some Game", opener=_failing_opener)
+        with pytest.raises(metadata_module.ProviderRequestError) as excinfo:
+            hall_of_light_lookup("Some Game", opener=_failing_opener)
+        assert excinfo.value.category == "network"
+        assert "amiga.abime.net" in excinfo.value.url
 
     def test_search_fetch_http_error_propagates(self, monkeypatch):
-        """HTTPError during HOL search fetch propagates."""
+        """HTTPError during HOL search fetch propagates with its status."""
         def _failing_opener(request, timeout=0):
             raise urllib.error.HTTPError("https://amiga.abime.net/search", 503, "Service Unavailable", {}, None)
 
-        with pytest.raises(urllib.error.HTTPError):
+        # The transport error is wrapped so the run log can carry the URL,
+        # status and category. ProviderRequestError subclasses URLError, so
+        # URLError handlers still catch it; it is no longer an HTTPError.
+        with pytest.raises(metadata_module.ProviderRequestError) as excinfo:
             hall_of_light_lookup("Some Game", opener=_failing_opener)
+        assert excinfo.value.status == 503
+        assert excinfo.value.category == "http_error"
 
     def test_search_fetch_timeout_propagates(self, monkeypatch):
-        """TimeoutError during HOL search fetch propagates."""
+        """TimeoutError during HOL search fetch propagates as a timeout."""
         def _failing_opener(request, timeout=0):
             raise TimeoutError("timed out")
 
-        with pytest.raises(TimeoutError):
+        with pytest.raises(metadata_module.ProviderRequestError) as excinfo:
             hall_of_light_lookup("Some Game", opener=_failing_opener)
+        assert excinfo.value.category == "timeout"
+        assert excinfo.value.exception_type == "TimeoutError"
 
     def test_genuine_no_match_still_returns_none(self, monkeypatch):
         """A clean no-match (HTML with no game links) still returns None."""
@@ -319,7 +336,11 @@ class TestLemonAmigaTransportVisibility:
     """Verify that Lemon Amiga transport failures are observable."""
 
     def test_game_page_transport_exception_propagates(self, monkeypatch):
-        """URLError during Lemon Amiga fetch propagates."""
+        """URLError during Lemon Amiga game page fetch propagates.
+
+        (GH-192 production FAILURE 3) Wrapped in ``ProviderRequestError``
+        (a ``URLError`` subclass) carrying URL + category.
+        """
         cfg = LemonAmigaConfig(enabled=True)
 
         def _failing_opener(request, timeout=0):
@@ -327,6 +348,9 @@ class TestLemonAmigaTransportVisibility:
 
         with pytest.raises(urllib.error.URLError):
             lemonamiga_lookup("Vroom", opener=_failing_opener, config=cfg)
+        with pytest.raises(metadata_module.ProviderRequestError) as excinfo:
+            lemonamiga_lookup("Vroom", opener=_failing_opener, config=cfg)
+        assert excinfo.value.url.endswith("/game/vroom")
 
     def test_game_page_http_error_propagates(self, monkeypatch):
         """HTTPError during Lemon Amiga fetch propagates."""
@@ -335,8 +359,9 @@ class TestLemonAmigaTransportVisibility:
         def _failing_opener(request, timeout=0):
             raise urllib.error.HTTPError("https://www.lemonamiga.com/game/vroom", 503, "Service Unavailable", {}, None)
 
-        with pytest.raises(urllib.error.HTTPError):
+        with pytest.raises(metadata_module.ProviderRequestError) as excinfo:
             lemonamiga_lookup("Vroom", opener=_failing_opener, config=cfg)
+        assert excinfo.value.status == 503
 
     def test_game_page_timeout_propagates(self, monkeypatch):
         """TimeoutError during Lemon Amiga fetch propagates."""
@@ -345,8 +370,9 @@ class TestLemonAmigaTransportVisibility:
         def _failing_opener(request, timeout=0):
             raise TimeoutError("timed out")
 
-        with pytest.raises(TimeoutError):
+        with pytest.raises(metadata_module.ProviderRequestError) as excinfo:
             lemonamiga_lookup("Vroom", opener=_failing_opener, config=cfg)
+        assert excinfo.value.category == "timeout"
 
     def test_genuine_no_match_still_returns_none(self, monkeypatch):
         """A clean no-match (HTML without game data) still returns None."""
@@ -672,7 +698,12 @@ class TestLemonAmigaChallengePropagation:
 
     def test_http403_without_challenge_body_still_raises_http_error(self):
         """When HTTP 403 is returned but body doesn't contain challenge
-        markers, the original HTTPError is still raised."""
+        markers, the failure is NOT relabelled as a bot challenge.
+
+        (GH-192 production FAILURE 3) It surfaces as a ProviderRequestError
+        with status=403 / category=http_error, so a genuine access-control
+        failure is never hidden behind a bot label.
+        """
         def _plain403_opener(request, timeout=0):
             raise urllib.error.HTTPError(
                 request.full_url, 403, "Forbidden", {},
@@ -680,8 +711,10 @@ class TestLemonAmigaChallengePropagation:
             )
 
         cfg = LemonAmigaConfig(enabled=True)
-        with pytest.raises(urllib.error.HTTPError):
+        with pytest.raises(metadata_module.ProviderRequestError) as excinfo:
             lemonamiga_lookup("Vroom", opener=_plain403_opener, config=cfg)
+        assert excinfo.value.status == 403
+        assert excinfo.value.category == "http_error"
 
     def test_transport_error_still_propagates(self):
         """Transport errors during Lemon Amiga fetch still propagate."""
@@ -766,8 +799,12 @@ class TestTryProviderBotChallengeClassification:
         assert lemon_events[0]["reason"] == "bot_challenge"
 
     def test_genuine_no_match_still_no_match(self, monkeypatch, tmp_path):
-        """Genuine no-match (provider returns None) still classified as
-        candidate_returned with no candidate."""
+        """Genuine no-match (provider returns None) is classified as no_result.
+
+        (GH-192 production FAILURE 2) It used to be labelled
+        ``candidate_returned`` with an empty candidate title, which is
+        self-contradictory and hid that nothing was ever retrieved.
+        """
         def _no_match_lookup(title=None, **kwargs):
             return None
 
@@ -791,7 +828,7 @@ class TestTryProviderBotChallengeClassification:
 
         hol_events = [e for e in relevance_events if e["provider"] == "hall-of-light"]
         assert len(hol_events) == 1
-        assert hol_events[0]["reason"] == "candidate_returned"
+        assert hol_events[0]["reason"] == "no_result"
 
     def test_ordinary_request_error_still_request_error(self, monkeypatch, tmp_path):
         """Ordinary URLError is still classified as request_error."""

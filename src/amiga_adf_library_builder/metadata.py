@@ -7,6 +7,7 @@ metadata. Wikipedia and RAWG remain optional fallback metadata providers.
 """
 from __future__ import annotations
 
+import html
 import json
 import logging
 import os
@@ -25,6 +26,18 @@ from typing import Any, Callable, Optional
 from .manual_approvals import validate_source_url
 from .title_norm import canonical_title
 from .utils import now_iso as utc_now
+from .wikipedia_client import (
+    DEFAULT_POLICY,
+    WikipediaGate,
+    WikipediaPolicy,
+    get_global_gate,
+    reset_global_gate,
+)
+from .wikipedia_query import (
+    QueryVariant,
+    build_query_variants,
+    candidate_is_same_subject,
+)
 
 USER_AGENT = f"AmigaADFLibraryBuilder/{__import__('amiga_adf_library_builder._version', fromlist=['__version__']).__version__} (+preservation metadata client)"
 _logger = logging.getLogger(__name__)
@@ -33,6 +46,11 @@ _ALLOWED_ARTWORK_PAGE_HOSTS = {
     "www.lemonamiga.com", "lemonamiga.com", "amiga.abime.net",
     "www.openretro.org", "openretro.org", "amiga.lychesis.net",
     "www.mobygames.com", "mobygames.com", "images.mobygames.com",
+    # Wikipedia: the pageimages API returns null for many game pages, so
+    # artwork discovery falls back to fetching the page HTML and reading
+    # og:image / link rel=image_src. Fetching the rendered article page is
+    # the only way to obtain artwork for those games. (GH-192 Task A)
+    "en.wikipedia.org", "wikipedia.org", "en.m.wikipedia.org",
 }
 
 
@@ -99,6 +117,91 @@ class _BotChallengeError(Exception):
     def __init__(self, message: str, status: int | None = None) -> None:
         super().__init__(message)
         self.status = status
+
+
+class ProviderRequestError(urllib.error.URLError):
+    """Raised when an outbound provider request fails, with full diagnostics.
+
+    (GH-192 production FAILURE 3) A bare ``request_error`` classification told
+    the operator nothing: not the URL, not the status, not whether the cause
+    was a rate limit, a timeout, or a dead socket. This exception carries
+    those fields so ``_try_provider`` can log them verbatim.
+
+    ``category`` is one of ``rate_limited``, ``timeout``, ``network``,
+    ``http_error``, or ``url_unsafe`` and is the deterministic reason tag.
+    ``retry_after`` carries the server-supplied Retry-After seconds when the
+    server provides one.
+
+    Subclasses :class:`urllib.error.URLError` deliberately: every existing
+    ``except urllib.error.URLError`` handler in the provider chain keeps
+    working unchanged, and callers that only checked "was this a transport
+    error" continue to see one. Callers that want the diagnosis read
+    ``status`` / ``category`` / ``url``.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        url: str = "",
+        status: int | None = None,
+        category: str = "network",
+        exception_type: str = "",
+        retry_after: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.url = url
+        self.status = status
+        self.category = category
+        self.exception_type = exception_type
+        self.retry_after = retry_after
+
+
+def _http_status_of(exc: BaseException) -> Optional[int]:
+    """Return the HTTP status carried by ``exc``, or None."""
+    for _attr in ("status", "code"):
+        _value = getattr(exc, _attr, None)
+        if isinstance(_value, int):
+            return _value
+    return None
+
+
+def classify_request_error(exc: BaseException, *, url: str = "") -> ProviderRequestError:
+    """Wrap a transport-level exception in a diagnosable ProviderRequestError.
+
+    Deterministic precedence: rate limit (429/503 with Retry-After) >
+    explicit HTTP status > timeout > DNS/socket > generic network. The
+    original exception class and message are preserved verbatim.
+    """
+    status = _http_status_of(exc)
+    category = "network"
+    retry_after: Optional[float] = None
+    if status == 429:
+        category = "rate_limited"
+    elif status is not None:
+        category = "http_error"
+    elif isinstance(exc, (socket.timeout, TimeoutError)):
+        category = "timeout"
+    elif isinstance(exc, socket.gaierror):
+        category = "network"
+    headers = getattr(exc, "headers", None)
+    if headers is not None:
+        try:
+            _ra = headers.get("Retry-After") if hasattr(headers, "get") else None
+            if _ra is not None:
+                retry_after = float(_ra)
+        except (TypeError, ValueError):
+            retry_after = None
+    if status == 503 and retry_after is not None:
+        category = "rate_limited"
+    return ProviderRequestError(
+        f"{type(exc).__name__}: {exc}",
+        url=url,
+        status=status,
+        category=category,
+        exception_type=type(exc).__name__,
+        retry_after=retry_after,
+    )
 
 
 # Blocks outbound fetches to hosts that resolve to non-public address space.
@@ -249,6 +352,73 @@ def cache_key(title: str) -> str:
     return key or "unknown"
 
 
+#: Providers that are externally bot-blocked and are therefore subject to the
+#: fail-fast circuit breaker. These are NOT recoverable in application code:
+#: Hall of Light serves a Within/Anubis interstitial and Lemon Amiga serves a
+#: Cloudflare challenge from this network, on every request, for every
+#: User-Agent.
+_BLOCKED_PROVIDERS = ("hall-of-light", "lemon-amiga")
+
+#: Number of consecutive challenges after which a provider is skipped for the
+#: remainder of a lookup run.
+BLOCKED_PROVIDER_THRESHOLD = 3
+
+
+@dataclass
+class BlockedProviderCircuit:
+    """Fail-fast breaker for providers blocked by external anti-bot protection.
+
+    Hall of Light (Within/Anubis) and Lemon Amiga (Cloudflare) are blocked from
+    every path this application has, on every request. Re-requesting them for
+    every release costs one wasted round trip per title and delays the one
+    provider that actually works.
+
+    The breaker is an explicit object owned by the caller rather than a module
+    global. A module-level counter looks convenient but is a real defect: it
+    leaks across runs and across independent test files in the same process, so
+    one test's blocked provider silently changes another test's outcome.
+
+    This is fail-fast only. It is NOT a challenge bypass and does not attempt
+    to defeat the protection.
+    """
+
+    threshold: int = BLOCKED_PROVIDER_THRESHOLD
+    counts: dict[str, int] = field(default_factory=dict)
+    reported: set[str] = field(default_factory=set)
+
+    def is_open(self, label: str) -> bool:
+        """True when ``label`` has been skipped already in this run."""
+        return label in self.reported
+
+    def note_challenge(self, label: str) -> None:
+        """Record a bot challenge for ``label``."""
+        if label in _BLOCKED_PROVIDERS:
+            self.counts[label] = self.counts.get(label, 0) + 1
+
+    def should_skip(self, label: str) -> bool:
+        """True when the threshold is reached and this has not been reported."""
+        return (self.counts.get(label, 0) >= self.threshold
+                and label not in self.reported)
+
+    def mark_reported(self, label: str) -> None:
+        self.reported.add(label)
+
+    def count(self, label: str) -> int:
+        return self.counts.get(label, 0)
+
+
+def reset_blocked_provider_circuit() -> None:
+    """Reset the process-wide blocked-provider circuit breaker.
+
+    Kept as a public no-op-compatible entry point so callers and tests have a
+    single obvious way to clear breaker state. The counters now live on an
+    explicit :class:`BlockedProviderCircuit` instance owned by the run rather
+    than in a module global, so there is no cross-run state to clear; the
+    function remains so existing call sites and tests keep working.
+    """
+    return None
+
+
 def load_cached(cache_dir: Path, title: str) -> Optional[MetadataRecord]:
     path = Path(cache_dir) / f"{cache_key(title)}.json"
     if not path.is_file():
@@ -284,8 +454,15 @@ def _json_get(url: str, *, timeout: float = 20.0, headers: Optional[dict[str, st
     guard_url(url, resolve=opener is None)
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, **(headers or {})})
     open_fn = opener or urllib.request.urlopen
-    with open_fn(request, timeout=timeout) as response:
-        return json.loads(response.read().decode("utf-8"))
+    # (GH-192 prod FAILURE 3) Transport failures are wrapped so the caller
+    # sees the URL, HTTP status, and a deterministic category (rate_limited /
+    # timeout / network / http_error) instead of a bare request_error.
+    try:
+        with open_fn(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, urllib.error.HTTPError, socket.gaierror,
+            socket.timeout, TimeoutError) as exc:
+        raise classify_request_error(exc, url=url) from exc
 
 
 def _text_get(url: str, *, timeout: float = 20.0,
@@ -295,14 +472,39 @@ def _text_get(url: str, *, timeout: float = 20.0,
     guard_url(url, resolve=opener is None)
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml"})
     open_fn = opener or urllib.request.urlopen
+    # Anti-bot interstitial markers. Matching is done against BOTH the raw
+    # body and an HTML-entity-decoded copy of it, because several providers
+    # (Anubis / Within on Hall of Light) emit the apostrophe as the entity
+    # ``&#39;`` and a literal-string check silently misses the challenge.
     _BOT_CHALLENGE_MARKERS = (
         "Making sure you're not a bot",   # Anubis / Within
         "Just a moment...",               # Cloudflare
-        "<title>Just a moment...</title>",
         "You have been blocked",
+        "Attention Required! | Cloudflare",
+        "Checking your browser before accessing",
         "bot_check",
         "cf-browser-verifier",
+        "cf_chl_opt",
+        "_Incapsula_Resource",
+        "px-captcha",
+        "Please enable JS and disable any ad blocker",
+        "Enable JavaScript and cookies to continue",
+        "DDoS protection by",
+        "a2e4v1",
+        "anubis_challenge",
+        "waf_challenge",
     )
+
+    def _challenge_hit(body: str) -> Optional[str]:
+        """Return the first anti-bot marker present in ``body``, else None."""
+        if not body:
+            return None
+        decoded = html.unescape(body)
+        for candidate_body in (body, decoded):
+            for marker in _BOT_CHALLENGE_MARKERS:
+                if marker in candidate_body:
+                    return marker
+        return None
     try:
         with open_fn(request, timeout=timeout) as response:
             data = response.read(3_000_001)
@@ -317,30 +519,37 @@ def _text_get(url: str, *, timeout: float = 20.0,
             # Detect bot-challenge / anti-bot interstitial responses so that
             # external blocking is distinguishable from normal no-match or
             # parser failures downstream.
-            if any(marker in text for marker in _BOT_CHALLENGE_MARKERS):
+            _hit = _challenge_hit(text)
+            if _hit:
                 status = getattr(response, "status", None) or getattr(response, "getcode", lambda: None)()
                 raise _BotChallengeError(
                     f"bot_challenge: provider anti-bot page detected "
-                    f"for {url}",
+                    f"for {url} (marker={_hit!r})",
                     status=status,
                 )
             return text, str(final_url)
     except urllib.error.HTTPError as _http_exc:
-        if _http_exc.code == 403:
-            # HTTP 403 often indicates bot blocking. Read the error body
-            # so that challenge markers are detected even when urllib
-            # raises before _text_get would normally read the response.
-            try:
-                _body = _http_exc.read(3_000_001).decode("utf-8", errors="replace")
-            except Exception:
-                _body = ""
-            if any(marker in _body for marker in _BOT_CHALLENGE_MARKERS):
-                raise _BotChallengeError(
-                    f"bot_challenge: provider anti-bot page detected "
-                    f"for {url} (HTTP 403)",
-                    status=403,
-                ) from _http_exc
+        # (GH-192 prod FAILURE 1/3) Read the error body on EVERY HTTP status,
+        # not just 403. Anti-bot interstitials are served as 403, 429, 503 and
+        # even 200; the status is not a reliable signal, the body marker is.
+        # Classifying a challenge as a plain http_error would hide the block
+        # behind a rate-limit diagnosis.
+        try:
+            _body = _http_exc.read(3_000_001).decode("utf-8", errors="replace")
+        except Exception:
+            _body = ""
+        _hit = _challenge_hit(_body)
+        if _hit:
+            raise _BotChallengeError(
+                f"bot_challenge: provider anti-bot page detected "
+                f"for {url} (HTTP {_http_exc.code}, marker={_hit!r})",
+                status=int(_http_exc.code),
+            ) from _http_exc
+        raise classify_request_error(_http_exc, url=url) from _http_exc
+    except _BotChallengeError:
         raise
+    except (urllib.error.URLError, socket.gaierror, socket.timeout, TimeoutError) as exc:
+        raise classify_request_error(exc, url=url) from exc
 
 
 @dataclass
@@ -738,47 +947,279 @@ def discover_artwork_from_page(page_url: str, title: str, *, timeout: float = 20
         "lemonamiga.com": "lemon-amiga", "www.lemonamiga.com": "lemon-amiga",
         "amiga.abime.net": "hall-of-light", "openretro.org": "openretro",
         "www.openretro.org": "openretro", "amiga.lychesis.net": "lychesis",
+        "en.wikipedia.org": "wikipedia", "wikipedia.org": "wikipedia",
+        "en.m.wikipedia.org": "wikipedia",
     }.get(host.lower(), host.lower())
     return image_url, provider
 
 
-def wikipedia_lookup(title: str, *, timeout: float = 20.0,
-                     opener: Optional[Callable[..., Any]] = None) -> Optional[MetadataRecord]:
-    query = f'"{title}" Amiga video game'
-    params = {
+_WIKIPEDIA_API = "https://en.wikipedia.org/w/api.php"
+
+
+def _wikipedia_api_params(variant: "QueryVariant") -> dict[str, str]:
+    """Build the deterministic API parameter set for one query form.
+
+    ``bare_quoted`` deliberately omits the ``Amiga video game`` context terms:
+    measured live on 2026-10-04, those terms EXCLUDE the correct article for
+    titles whose page does not use them ("Oil Barons" ranked the real article
+    7th without the context terms and returned only generic list pages with
+    them).
+    """
+    if variant.label == "bare_quoted":
+        search = f'"{variant.search}"'
+    else:
+        search = f'"{variant.search}" Amiga video game'
+    return {
         "action": "query", "format": "json", "formatversion": "2",
-        "generator": "search", "gsrsearch": query, "gsrlimit": "8",
+        "generator": "search",
+        "gsrsearch": search,
+        "gsrlimit": "8",
         "prop": "extracts|pageimages|info", "exintro": "1", "explaintext": "1",
         "piprop": "original|thumbnail", "pithumbsize": "1200", "inprop": "url",
     }
-    url = "https://en.wikipedia.org/w/api.php?" + urllib.parse.urlencode(params)
-    data = _json_get(url, timeout=timeout, opener=opener)
-    pages = (data.get("query") or {}).get("pages") or []
-    if not pages:
-        return None
-    target = _norm(title)
-    ranked = []
+
+
+def _wikipedia_fetch(url: str, *, timeout: float,
+                     opener: Optional[Callable[..., Any]],
+                     gate: "WikipediaGate",
+                     diagnostics: list[dict],
+                     attempt_label: str,
+                     allow_retry: bool = True) -> dict[str, Any]:
+    """Issue ONE Wikipedia API request with pacing and bounded retry.
+
+    Retry is bounded by ``gate.policy.max_retries``; there is no unbounded
+    loop. ``allow_retry=False`` forces a single attempt, used for query forms
+    after the first 429 so a rate-limited run does not multiply its request
+    count by the number of forms. A 429 opens a gate cooldown rather than
+    immediately re-requesting. Every decision is appended to ``diagnostics``.
+    """
+    attempt = 0
+    while True:
+        gate.begin_request()
+        gate.note_request()
+        try:
+            data = _json_get(url, timeout=timeout, opener=opener)
+        except ProviderRequestError as exc:
+            rate_limited = exc.category == "rate_limited" or exc.status == 429
+            entry = {
+                "attempt": attempt,
+                "query_variant": attempt_label,
+                "url": url,
+                "http_status": exc.status,
+                "rate_limited": rate_limited,
+                "retry_after": exc.retry_after,
+                "error_category": exc.category,
+                "gate_decision": gate.last_decision,
+            }
+            if not rate_limited:
+                entry["decision"] = "give_up_non_rate_limited"
+                diagnostics.append(entry)
+                raise
+            # Every 429 is counted, even when no retry follows, so the
+            # run-level rate-limit budget can stop further requests.
+            gate.note_rate_limited(retry_after=exc.retry_after)
+            if (not allow_retry or not gate.policy.retries_enabled
+                    or attempt >= gate.policy.max_retries):
+                entry["decision"] = "give_up_retry_budget_exhausted"
+                entry["rate_limit_events"] = gate.rate_limited_events
+                diagnostics.append(entry)
+                raise
+            wait = gate.cooldown_remaining()
+            entry["decision"] = "backoff"
+            entry["backoff_seconds"] = round(wait, 3)
+            diagnostics.append(entry)
+            gate.note_retry()
+            attempt += 1
+            continue
+        diagnostics.append({
+            "attempt": attempt,
+            "query_variant": attempt_label,
+            "url": url,
+            "http_status": 200,
+            "rate_limited": False,
+            "retry_after": None,
+            "gate_decision": gate.last_decision,
+            "decision": "ok",
+        })
+        return data
+
+
+def _rank_wikipedia_pages(title: str, pages: list[dict]) -> list[tuple[float, dict]]:
+    """Rank candidate pages for ``title`` with the conservative subject test."""
+    ranked: list[tuple[float, dict]] = []
     for page in pages:
         page_title = str(page.get("title") or "")
+        if not page_title:
+            continue
         extract = str(page.get("extract") or "")
-        score = SequenceMatcher(None, target, _norm(page_title)).ratio()
+        if not candidate_is_same_subject(title, page_title, extract=extract):
+            continue
         haystack = (page_title + " " + extract[:600]).lower()
-        if "video game" in haystack: score += 0.15
-        if "amiga" in haystack: score += 0.20
+        if "amiga" in haystack:
+            score = 0.95
+        elif "video game" in haystack:
+            score = 0.85
+        else:
+            score = 0.70
         ranked.append((score, page))
-    score, page = max(ranked, key=lambda item: item[0])
-    if score < 0.45:
+    return ranked
+
+
+def wikipedia_lookup(title: str, *, timeout: float = 20.0,
+                     opener: Optional[Callable[..., Any]] = None,
+                     gate: "Optional[WikipediaGate]" = None,
+                     policy: "Optional[WikipediaPolicy]" = None,
+                     diagnostics: Optional[list[dict]] = None,
+                     artwork: bool = True) -> Optional[MetadataRecord]:
+    """Look up ``title`` on Wikipedia with pacing, fallbacks and diagnostics.
+
+    Behaviour changes vs the previous single-query implementation:
+
+    - requests are paced and rate-limit aware (``gate``/``policy``);
+    - several deterministic query forms are tried, cheapest and most likely
+      first, stopping at the first acceptable subject;
+    - a candidate is accepted only when
+      :func:`candidate_is_same_subject` confirms it is the requested work;
+    - every request, wait, retry and rejection is recorded in ``diagnostics``.
+
+    ``opener`` injection still bypasses pacing entirely (the gate only counts
+    real requests), so offline tests never wait.
+    """
+    gate = gate or get_global_gate(policy)
+    trail: list[dict] = diagnostics if diagnostics is not None else []
+    # Once this lookup has seen a 429, later query forms must NOT retry.
+    # Retrying each of N forms would multiply the request count by
+    # ``max_retries + 1`` against an endpoint that has already told us it is
+    # rate limiting this client. Later forms still get ONE attempt each, so a
+    # differently-cached form can still succeed.
+    rate_limited_seen = False
+    if opener is not None:
+        # A caller-injected opener is a test/offline path: never sleep, but
+        # keep the SAME gate object so its counters, budget and rate-limit
+        # state stay observable to the caller that passed it in.
+        gate.without_sleeping()
+
+    variants = build_query_variants(title)
+    if not variants:
         return None
-    original = page.get("original") or page.get("thumbnail") or {}
+
+    best_page: Optional[dict] = None
+    best_score = 0.0
+    used_variant: Optional[QueryVariant] = None
+    #: First transport failure, re-raised once every query form is exhausted.
+    #: Returning None instead would discard the status/category/URL that
+    #: production needs to tell a rate limit from a timeout from a dead socket,
+    #: and would reintroduce exactly the opaque ``no_result`` diagnosis that
+    #: GH-192 round 2 was opened to fix.
+    first_error: Optional[ProviderRequestError] = None
+    #: True when some form was answered and simply held no acceptable match.
+    #: A real "no such article" answer must NOT be masked by an error from a
+    #: different form.
+    answered_any = False
+
+    for index, variant in enumerate(variants):
+        if not gate.request_allowed():
+            trail.append({
+                "query_variant": variant.label,
+                "decision": "budget_exhausted",
+                "rate_limited": False,
+                "gate_decision": "budget_exhausted",
+            })
+            break
+        params = _wikipedia_api_params(variant)
+        url = _WIKIPEDIA_API + "?" + urllib.parse.urlencode(params)
+        try:
+            data = _wikipedia_fetch(url, timeout=timeout, opener=opener,
+                                    gate=gate, diagnostics=trail,
+                                    attempt_label=variant.label,
+                                    allow_retry=not rate_limited_seen)
+        except ProviderRequestError as exc:
+            # A rate-limited form must not abort the whole lookup: another
+            # query form may still be served. The failure is retained and
+            # re-raised only if EVERY form failed (see below).
+            if first_error is None:
+                first_error = exc
+            if exc.category == "rate_limited" or exc.status == 429:
+                rate_limited_seen = True
+            if gate.rate_limited_exhausted():
+                break
+            continue
+        pages = (data.get("query") or {}).get("pages") or []
+        answered_any = True
+        ranked = _rank_wikipedia_pages(title, pages)
+        if ranked:
+            score, page = max(ranked, key=lambda item: item[0])
+            trail.append({
+                "query_variant": variant.label,
+                "decision": "candidate_accepted",
+                "candidate_title": str(page.get("title") or ""),
+                "candidate_url": str(page.get("fullurl") or ""),
+                "confidence": score,
+                "variant_index": index,
+            })
+            best_page, best_score, used_variant = page, score, variant
+            break
+        trail.append({
+            "query_variant": variant.label,
+            "decision": "no_acceptable_candidate",
+            "candidate_count": len(pages),
+        })
+        if gate.rate_limited_exhausted():
+            break
+
+    if best_page is None:
+        # Re-raise the transport failure when NO form produced a usable
+        # answer, so the caller sees the real diagnosis (429 / timeout /
+        # http_error with URL and Retry-After) instead of a bare None. When at
+        # least one form was answered, the genuine "no acceptable article"
+        # verdict wins and is returned as None.
+        if first_error is not None and not answered_any:
+            raise first_error
+        return None
+
+    query_text = (_wikipedia_api_params(used_variant)["gsrsearch"]
+                if used_variant else title)
+    original = best_page.get("original") or best_page.get("thumbnail") or {}
     art = str(original.get("source") or "")
+    page_url = str(best_page.get("fullurl") or "")
+    art_provider = "wikipedia" if art else ""
+    if artwork and not art and page_url:
+        # The pageimages API returns null for many game pages even when the
+        # page itself carries artwork (og:image / link rel=image_src). Fall
+        # back to HTML-based discovery so artwork enrichment is not silently
+        # dead for Wikipedia matches. (GH-192 Task A)
+        try:
+            gate.begin_request()
+            gate.note_request()
+            art_found = discover_artwork_from_page(
+                page_url, str(best_page.get("title") or title),
+                timeout=timeout, opener=opener,
+            )
+            trail.append({
+                "query_variant": "artwork_page",
+                "url": page_url,
+                "decision": "artwork_found" if art_found else "artwork_none",
+                "gate_decision": gate.last_decision,
+            })
+        except _BotChallengeError:
+            raise
+        except Exception:
+            art_found = None
+            trail.append({
+                "query_variant": "artwork_page",
+                "url": page_url,
+                "decision": "artwork_error",
+            })
+        if art_found:
+            art, art_provider = art_found
     return MetadataRecord(
-        canonical_title=str(page.get("title") or title),
-        description=str(page.get("extract") or "").strip(),
-        source_url=str(page.get("fullurl") or ""), artwork_url=art,
-        artwork_source_url=str(page.get("fullurl") or "") if art else "",
-        artwork_provider="wikipedia" if art else "", provider="wikipedia",
-        provider_id=str(page.get("pageid") or ""), retrieved_at=utc_now(),
-        confidence=min(score, 1.0), query=query,
+        canonical_title=str(best_page.get("title") or title),
+        description=str(best_page.get("extract") or "").strip(),
+        source_url=page_url, artwork_url=art,
+        artwork_source_url=page_url if art else "",
+        artwork_provider=art_provider, provider="wikipedia",
+        provider_id=str(best_page.get("pageid") or ""), retrieved_at=utc_now(),
+        confidence=min(best_score, 1.0), query=query_text,
     )
 
 
@@ -954,7 +1395,23 @@ def hall_of_light_lookup(title: str, *, timeout: float = 20.0,
     search_url = "https://amiga.abime.net/games/list/?" + urllib.parse.urlencode({"gamename": title})
     try:
         search_html, final_search_url = _text_get(search_url, timeout=timeout, opener=opener)
-    except (urllib.error.URLError, urllib.error.HTTPError, socket.gaierror, socket.timeout, TimeoutError, _BotChallengeError) as exc:
+    except _BotChallengeError as exc:
+        # (GH-192 prod FAILURE 1) Make it explicit WHICH stage was blocked
+        # (search vs detail fetch) and carry the URL. A blocked provider must
+        # never look like a genuine miss.
+        raise _BotChallengeError(
+            f"bot_challenge: hall-of-light SEARCH blocked for {search_url}: {exc}",
+            status=exc.status,
+        ) from exc
+    except ProviderRequestError as exc:
+        # (GH-192 prod FAILURE 3) Carry URL/status/category through instead of
+        # degrading to a bare no-match.
+        _logger.warning(
+            "hall-of-light: search fetch failed: %s (%s)",
+            type(exc).__name__, exc.category,
+        )
+        raise
+    except (urllib.error.URLError, urllib.error.HTTPError, socket.gaierror, socket.timeout, TimeoutError) as exc:
         _logger.warning("hall-of-light: search fetch failed: %s", type(exc).__name__)
         raise
     except Exception:
@@ -977,8 +1434,12 @@ def hall_of_light_lookup(title: str, *, timeout: float = 20.0,
     for game_url in game_links[:10]:  # Limit to first 10 results
         try:
             detail_html, final_url = _text_get(game_url, timeout=timeout, opener=opener)
-        except _BotChallengeError:
-            raise
+        except _BotChallengeError as exc:
+            # (GH-192 prod FAILURE 1) Name the blocked stage AND the detail URL.
+            raise _BotChallengeError(
+                f"bot_challenge: hall-of-light DETAIL fetch blocked for {game_url}: {exc}",
+                status=exc.status,
+            ) from exc
         except (urllib.error.URLError, urllib.error.HTTPError, socket.gaierror, socket.timeout, TimeoutError) as exc:
             _logger.warning("hall-of-light: detail fetch failed for %s: %s", game_url, type(exc).__name__)
             continue
@@ -1194,7 +1655,24 @@ def lemonamiga_lookup(title: str, *, timeout: float = 20.0,
         game_html, final_url = _text_get(
             game_url, timeout=timeout, opener=opener
         )
-    except (urllib.error.URLError, urllib.error.HTTPError, socket.gaierror, socket.timeout, TimeoutError, _BotChallengeError) as exc:
+    except _BotChallengeError as exc:
+        # (GH-192 prod FAILURE 2) Name the blocked fetch and its URL. A
+        # Cloudflare block must never be indistinguishable from "no game".
+        raise _BotChallengeError(
+            f"bot_challenge: lemon-amiga game page fetch blocked for "
+            f"{game_url}: {exc}",
+            status=exc.status,
+        ) from exc
+    except ProviderRequestError as exc:
+        # (GH-192 prod FAILURE 3) Already carries URL/status/category — let it
+        # propagate. Falling through to the generic handler below would turn
+        # a diagnosable transport failure into a silent ``return None``.
+        _logger.warning(
+            "lemon-amiga: game page fetch failed: %s (%s)",
+            type(exc).__name__, exc.category,
+        )
+        raise
+    except (urllib.error.URLError, urllib.error.HTTPError, socket.gaierror, socket.timeout, TimeoutError) as exc:
         _logger.warning("lemon-amiga: game page fetch failed: %s", type(exc).__name__)
         raise
     except Exception:
@@ -1680,6 +2158,8 @@ def lookup_metadata(title: str, *, cache_dir: Path, curated_dir: Path,
                     mobygames_api_key_env: str = "MOBYGAMES_API_KEY",
                     lemonamiga_enabled: bool = False,
                     halloflight_enabled: bool = True,
+                    wikipedia_gate: "Optional[WikipediaGate]" = None,
+                    blocked_circuit: "Optional[BlockedProviderCircuit]" = None,
                     activity: Optional[Callable[[str], None]] = None
                     ) -> tuple[Optional[MetadataRecord], str, list[dict]]:
     """Resolve metadata for ``title`` using the shared precedence chain.
@@ -1698,32 +2178,66 @@ def lookup_metadata(title: str, *, cache_dir: Path, curated_dir: Path,
     compatibility; disable via the ``[hall-of-light]`` config table.
     """
     curated = load_curated(curated_dir, title)
+    # The gate must exist before the curated branch: a curated record with
+    # missing prose/artwork still supplements from Wikipedia, and that request
+    # must be paced like every other one.
+    gate = wikipedia_gate or get_global_gate()
     if curated:
         # Preserve curated identity/facts. Wikipedia may supplement only missing
         # prose/image; Amiga-specific approved pages are then tried for artwork.
         supplement: Optional[MetadataRecord] = None
+        _wiki_art: Optional[tuple[str, str, str]] = None
         if not curated.description or not curated.artwork_url:
-            try: supplement = wikipedia_lookup(title, timeout=timeout, opener=opener)
+            try:
+                supplement = wikipedia_lookup(title, timeout=timeout,
+                                             opener=opener, gate=gate)
             except Exception: supplement = None
         if supplement:
             if not curated.description: curated.description = supplement.description
             if not curated.artwork_url and supplement.artwork_url:
-                curated.artwork_url = supplement.artwork_url
-                curated.artwork_source_url = supplement.artwork_source_url
-                curated.artwork_provider = supplement.artwork_provider
-                curated.provider = (curated.provider or "curated") + "+wikipedia"
+                # Hold the Wikipedia artwork as a fallback only. An Amiga-specific
+                # curated artwork page is a better source of box art than the
+                # generic encyclopedia image, so it is tried first below.
+                _wiki_art = (
+                    supplement.artwork_url, supplement.artwork_source_url,
+                    supplement.artwork_provider,
+                )
         if not curated.artwork_url:
             _discover_curated_artwork(curated, title, timeout=timeout, opener=opener)
+            # If the Amiga-specific pages yielded nothing, fall back to the
+            # Wikipedia image rather than leaving artwork empty.
+            if not curated.artwork_url and _wiki_art:
+                curated.artwork_url, curated.artwork_source_url, curated.artwork_provider = _wiki_art
+            if curated.artwork_url and "+wikipedia" not in (curated.provider or ""):
+                curated.provider = (curated.provider or "curated") + "+wikipedia"
         save_cached(cache_dir, title, curated)
         return curated, curated.provider or "curated", []
-    if not refresh:
-        cached = load_cached(cache_dir, title)
-        if cached: return cached, "cache", []
     # ONLINE candidates are validated for relevance before caching/accepting.
     # A rejected/review candidate is NEVER cached and NEVER returned; it falls
     # through to the next provider, then to offline/local. Curated and cached
     # paths above stay authoritative and skip validation.
     relevance_events: list[dict] = []
+    if not refresh:
+        cached = load_cached(cache_dir, title)
+        if cached:
+            # (GH-192 online-usability pass) An explicit cache hit is a
+            # first-class diagnostic. Previously a reused cache entry was
+            # indistinguishable from a fresh online match, so "why did this
+            # title not query the network?" was unanswerable from the run log.
+            relevance_events.append({
+                "provider": "cache",
+                "canonical_title": cached.canonical_title,
+                "category": "accepted",
+                "confidence": cached.confidence,
+                "reason": "cache_hit",
+                "evidence": [
+                    "cache_hit",
+                    f"cache_source={cached.provider or 'unknown'}",
+                    f"retrieved_at={cached.retrieved_at}",
+                    "network_requests_avoided=True",
+                ],
+            })
+            return cached, "cache", relevance_events
     accepted: Optional[MetadataRecord] = None
 
     # Live activity hook for on-screen diagnostics. Matches the pattern used
@@ -1737,20 +2251,74 @@ def lookup_metadata(title: str, *, cache_dir: Path, curated_dir: Path,
         except Exception:
             pass
 
+    # (GH-192 online-usability pass) Fail-fast circuit breaker for externally
+    # blocked providers. Hall of Light (Within/Anubis) and Lemon Amiga
+    # (Cloudflare) are blocked from every path this application has;
+    # re-requesting them for every release adds one wasted round trip per
+    # title and delays the provider that actually works.
+    #
+    # The breaker is caller-owned via ``blocked_circuit``: a pipeline run
+    # passes ONE instance across every title so the breaker actually opens and
+    # saves requests, while an unconfigured call (and every independent test)
+    # gets a fresh instance and therefore no cross-call leakage.
+    circuit = (blocked_circuit if blocked_circuit is not None
+               else BlockedProviderCircuit())
+
     def _try_provider(label: str,
                       lookup) -> None:
         nonlocal accepted
+        if circuit.should_skip(label):
+            circuit.mark_reported(label)
+            _log(f"{label}: blocked by anti-bot protection, skipping.")
+            relevance_events.append({
+                "provider": label,
+                "canonical_title": "",
+                "category": "not_found",
+                "confidence": 0.0,
+                "reason": "bot_challenge_circuit_open",
+                "evidence": [
+                    "bot_challenge",
+                    f"consecutive_bot_challenges={circuit.count(label)}",
+                    "provider_skipped_for_remainder_of_run=True",
+                ],
+            })
+            return
         _log(f"Querying {label}…")
         candidate = None
         outcome = "no_result"
+        failure_detail: dict[str, Any] = {}
         try:
             candidate = lookup()
-            outcome = "candidate_returned"
+            # (GH-192 prod FAILURE 2) Only a NON-None return is a candidate.
+            # A provider that returns None (disabled, no page, no Amiga
+            # platform, below similarity floor) is a genuine no_result.
+            # Classifying that as ``candidate_returned`` produced the
+            # self-contradictory diagnostic
+            # ``outcome=no_match reason=candidate_returned candidate=''``
+            # and made a real "no candidate" look like a rejected candidate.
+            outcome = "candidate_returned" if candidate is not None else "no_result"
         except Exception as exc:
             # Classify the exception type for diagnostics using proper
             # isinstance checks rather than string-containment heuristics.
             if isinstance(exc, _BotChallengeError):
                 outcome = "bot_challenge"
+                # The breaker only tracks providers known to be externally
+                # blocked; everything else is reported but not counted.
+                circuit.note_challenge(label)
+            elif isinstance(exc, ProviderRequestError):
+                # (GH-192 prod FAILURE 1/3) The wrapper already carries the
+                # deterministic category. Keep the stable outcome name
+                # ``request_error`` so downstream reason taxonomy is
+                # unchanged, and carry the category as evidence.
+                outcome = "request_error"
+                failure_detail = {
+                    "exception_type": exc.exception_type or type(exc).__name__,
+                    "exception_message": str(exc)[:400],
+                    "http_status": exc.status,
+                    "url": exc.url,
+                    "error_category": exc.category,
+                    "retry_after": exc.retry_after,
+                }
             elif isinstance(exc, (urllib.error.URLError, urllib.error.HTTPError)):
                 outcome = "request_error"
             elif isinstance(exc, json.JSONDecodeError):
@@ -1761,25 +2329,58 @@ def lookup_metadata(title: str, *, cache_dir: Path, curated_dir: Path,
                 outcome = "auth_error"
             else:
                 outcome = "parse_error"  # genuine unexpected parse/internal error
+            # Record the concrete failure detail so a production run says
+            # WHY a provider failed instead of only naming an outcome class.
+            # (GH-192: "when a provider fails, the app must make it obvious why")
+            if not failure_detail:
+                _status = _http_status_of(exc)
+                failure_detail = {
+                    "exception_type": type(exc).__name__,
+                    "exception_message": str(exc)[:400],
+                    "http_status": _status,
+                }
             candidate = None
         if candidate is None:
+            evidence = [outcome]
+            for _key in (
+                "exception_type", "exception_message", "http_status",
+                "url", "error_category", "retry_after",
+            ):
+                _value = failure_detail.get(_key)
+                if _value not in (None, ""):
+                    evidence.append(f"{_key}={_value}")
             relevance_events.append({
                 "provider": label,
                 "canonical_title": "",
                 "category": "not_found",
                 "confidence": 0.0,
                 "reason": outcome,
-                "evidence": [outcome],
+                "evidence": evidence,
             })
             return
         decision = validate_metadata_relevance(title, candidate, group=group)
+        # (GH-192 prod FAILURE 2) When a candidate WAS returned, the run
+        # diagnostic must name it: candidate title, candidate URL/provider id,
+        # normalized source vs candidate title, confidence, and the exact
+        # rejection reason. Without these, "zero accepted matches" is
+        # unactionable.
+        candidate_evidence = list(decision.evidence)
+        candidate_evidence.append(f"candidate_title={candidate.canonical_title!r}")
+        candidate_evidence.append(f"candidate_url={candidate.source_url or ''}")
+        candidate_evidence.append(f"candidate_provider_id={candidate.provider_id or ''}")
+        candidate_evidence.append(
+            f"normalized_source={_norm(_strip_subtitle(title))!r}"
+        )
+        candidate_evidence.append(
+            f"normalized_candidate={_norm(_strip_subtitle(candidate.canonical_title or ''))!r}"
+        )
         relevance_events.append({
             "provider": label,
             "canonical_title": candidate.canonical_title,
             "category": decision.category,
             "confidence": decision.confidence,
             "reason": decision.reason,
-            "evidence": list(decision.evidence),
+            "evidence": candidate_evidence,
         })
         if decision.category == "accepted":
             _log(f"{label}: accepted.")
@@ -1805,8 +2406,40 @@ def lookup_metadata(title: str, *, cache_dir: Path, curated_dir: Path,
                       lambda: lemonamiga_lookup(title, timeout=timeout, opener=opener,
                                                 config=LemonAmigaConfig(enabled=lemonamiga_enabled)))
     if accepted is None:
+        wiki_diagnostics: list[dict] = []
         _try_provider("wikipedia",
-                      lambda: wikipedia_lookup(title, timeout=timeout, opener=opener))
+                      lambda: wikipedia_lookup(
+                          title, timeout=timeout, opener=opener,
+                          gate=gate, diagnostics=wiki_diagnostics))
+        # (GH-192 online-usability pass) Surface the per-request decision trail:
+        # which query form was sent, the URL, HTTP status, rate-limit flag,
+        # Retry-After, the backoff/pause decision, candidate title, confidence,
+        # and the accept/reject reason. Without this the operator sees only a
+        # single opaque "not-found" for a rate-limited run.
+        for entry in wiki_diagnostics:
+            detail = (
+                f"query={entry.get('query_variant', '')!r} "
+                f"decision={entry.get('decision', '')} "
+                f"status={entry.get('http_status', '')} "
+                f"rate_limited={entry.get('rate_limited', False)} "
+                f"retry_after={entry.get('retry_after', '')} "
+                f"gate={entry.get('gate_decision', '')} "
+                f"url={entry.get('url', '')}"
+            )
+            for _key in ("backoff_seconds", "candidate_title", "candidate_url",
+                         "confidence", "candidate_count", "attempt",
+                         "error_category"):
+                _value = entry.get(_key)
+                if _value not in (None, ""):
+                    detail += f" {_key}={_value}"
+            relevance_events.append({
+                "provider": "wikipedia-request",
+                "canonical_title": str(entry.get("candidate_title") or ""),
+                "category": "not_found",
+                "confidence": float(entry.get("confidence") or 0.0),
+                "reason": "wikipedia_" + str(entry.get("decision") or "step"),
+                "evidence": [detail],
+            })
     if accepted is not None:
         save_cached(cache_dir, title, accepted)
         return accepted, accepted.provider, relevance_events

@@ -583,11 +583,17 @@ def resize_artwork(master: Path, artwork_processed_dir: Path,
 
 
 
-def _build_review_items(events: list) -> list:
+def _build_review_items(events: list, release_key: str = "") -> list:
     """Convert review-category EnrichEvents into ReviewItems (GH-164 RC3).
 
     Each review event produces exactly one persisted ReviewItem so that
     enrich review events are never silently discarded.
+
+    (GH-192 prod FAILURE 5) ``release_key`` MUST be supplied by the caller.
+    ``route_quarantine`` skips review items with an empty release_key
+    (``if not release_key: continue``), so an item built without one was
+    written to no record at all and never appeared in ``review_routed`` — the
+    aggregate could then disagree with what actually blocked the export.
     """
     from .utils import now_iso as _now_iso_func
     items = []
@@ -611,7 +617,7 @@ def _build_review_items(events: list) -> list:
             score=0.0,
             reason=ev.error or "review",
             evidence=[ev.detail or ev.error or ""],
-            release_key="",
+            release_key=release_key,
             routed_at=_now_iso_func(),
         ))
     return items
@@ -630,7 +636,9 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                  include_artwork: bool = True,
                  cancel_event: Optional[threading.Event] = None,
                  activity: Optional[Callable[[str], None]] = None,
-                 library_root: Optional[Path] = None) -> EnrichResult:
+                 library_root: Optional[Path] = None,
+                 wikipedia_gate=None,
+                 blocked_circuit=None) -> EnrichResult:
     metadata_cache_dir = Path(metadata_cache_dir or (Path(nfo_dir).parent / "metadata-cache"))
     curated_metadata_dir = Path(curated_metadata_dir or (Path(nfo_dir).parent / "metadata-curated"))
     notes: list[str] = []
@@ -676,6 +684,13 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                 curated_dir=curated_metadata_dir, refresh=refresh, group=group,
                 activity=activity,
                 halloflight_enabled=halloflight_enabled,
+                # (GH-192 online-usability pass) The pacing gate and the
+                # blocked-provider breaker are supplied by the pipeline so
+                # they are shared across EVERY title in a run. Without a shared
+                # instance, pacing resets per release (no protection) and the
+                # breaker never accumulates enough challenges to open.
+                wikipedia_gate=wikipedia_gate,
+                blocked_circuit=blocked_circuit,
             )
             # Persist provider-level outcomes before the selected result is
             # reduced to the final metadata record.
@@ -928,10 +943,14 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
     _dat_results: list[dict] = []  # per-disk match results with source info
     if metadata_source_manager is not None:
         try:
-            _act("Checking DAT/local metadata sources…")
             _sources = metadata_source_manager.list_sources()
             _enabled_sources = [s for s in _sources if s.enabled]
+            # (GH-192 prod FAILURE 4) Only say "Checking…" when a lookup is
+            # actually about to happen. Announcing a check that never occurs
+            # made the GUI claim DAT was consulted while every run reported
+            # dat_source_disabled.
             if _enabled_sources:
+                _act("Checking DAT/local metadata sources…")
                 _dat_events.append(EnrichEvent(
                     category=EnrichCategory.DAT,
                     detail=f"dat_loaded sources={len(_enabled_sources)} entries={sum(s.entry_count for s in _enabled_sources)}",
@@ -1011,23 +1030,41 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                             "matched": False,
                         })
             else:
+                # (GH-192 prod FAILURE 4) A source DB exists but no source is
+                # enabled. Say so plainly in the run log instead of implying a
+                # lookup happened. The ``dat_source_disabled`` detail is
+                # unchanged — only the operator-facing line is new, so the
+                # existing diagnostics taxonomy is preserved.
+                _has_any = bool(_sources)
                 _dat_events.append(EnrichEvent(
                     category=EnrichCategory.DAT,
                     detail="dat_source_disabled",
                     cache="negative", ok=True,
                 ))
+                _act(
+                    f"DAT/local metadata sources are all disabled "
+                    f"({len(_sources)} configured) — no DAT lookup was performed."
+                    if _has_any else
+                    "No DAT/local metadata source is configured — "
+                    "no DAT lookup was performed."
+                )
         except Exception as exc:
             _dat_events.append(EnrichEvent(
                 category=EnrichCategory.DAT,
                 detail=f"dat_unavailable: {exc}",
                 cache="negative", ok=False, error=str(exc),
             ))
+            _act(f"DAT/local metadata sources unavailable: {exc}.")
     else:
         _dat_events.append(EnrichEvent(
             category=EnrichCategory.DAT,
             detail="dat_not_configured",
             cache="negative", ok=True,
         ))
+        _act(
+            "No DAT/local metadata source is configured — "
+            "no DAT lookup was performed."
+        )
 
     # Optional IGDB metadata/artwork provider. Title + Amiga platform search.
     # Non-hash-first; runs independently of Playmatch/Hasheous.
@@ -1563,7 +1600,7 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
         events.append(_ra_success_event)
         if _ra_success_note is not None:
             notes.append(_ra_success_note)
-    _review_items = _build_review_items(events)
+    _review_items = _build_review_items(events, release_key=str(group.release_key))
     # Propagate DAT/local metadata diagnostic events so callers
     # can observe dat_not_configured, dat_source_disabled,
     # dat_loaded, dat_hash_match, etc. (GH-192 Problem 3).
@@ -1593,6 +1630,19 @@ def enrich_all(groups: list[ReleaseGroup], *, nfo_dir: Path, scans: list[ScanRec
     curated_metadata_dir = Path(curated_metadata_dir or (Path(nfo_dir).parent / "metadata-curated"))
     total = len(groups)
     results: list[EnrichResult] = []
+    # (GH-192 online-usability pass) One pacing gate and one blocked-provider
+    # breaker per RUN, shared by every release. Both are meaningless per
+    # release: pacing that resets per title provides no rate-limit protection,
+    # and a breaker that resets per title never accumulates enough challenges
+    # to open, so the run keeps paying a wasted round trip to a provider that
+    # is externally blocked.
+    _wiki_gate = None
+    _blocked = None
+    if online:
+        from .wikipedia_client import get_global_gate
+        from .metadata import BlockedProviderCircuit
+        _wiki_gate = get_global_gate()
+        _blocked = BlockedProviderCircuit()
     for idx, group in enumerate(groups, start=1):
         if cancel_event is not None and cancel_event.is_set():
             if activity is not None:
@@ -1626,5 +1676,7 @@ def enrich_all(groups: list[ReleaseGroup], *, nfo_dir: Path, scans: list[ScanRec
                      cancel_event=cancel_event,
                      activity=activity,
                      metadata_source_manager=metadata_source_manager,
-                     library_root=library_root))
+                     library_root=library_root,
+                     wikipedia_gate=_wiki_gate,
+                     blocked_circuit=_blocked))
     return results
