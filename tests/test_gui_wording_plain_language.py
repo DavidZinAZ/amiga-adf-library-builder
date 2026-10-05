@@ -225,34 +225,30 @@ def test_old_settings_file_still_round_trips(tmp_path: Path):
 def test_connection_success_wording(qt_offscreen: Path):
     """GH-42: Check Connection success shows explicit 'Connection successful' message."""
     mw = _make_window(qt_offscreen)
-    # Access the providers registry and test connection on a configured provider
     registry = mw._registry
-    
-    # Test Playmatch provider
-    playmatch = registry.get("playmatch")
-    assert playmatch is not None
-    playmatch.set_field("base_url", "https://test.example.com")
-    playmatch.set_enabled(True)
-    status = playmatch.test_connection()
+
+    # ScreenScraper is a configuration-only provider: its connection check
+    # reports the explicit GH-42 wording.
+    screenscraper = registry.get("screenscraper")
+    assert screenscraper is not None
+    screenscraper.set_field("base_url", "https://test.example.com")
+    screenscraper.set_enabled(True)
+    status = screenscraper.test_connection()
     assert status.ok is True
-    assert status.message == EXPECTED_CONNECTION_SUCCESS, f"Expected '{EXPECTED_CONNECTION_SUCCESS}', got '{status.message}'"
-    
-    # Test Hasheous provider
-    hasheous = registry.get("hasheous")
-    assert hasheous is not None
-    hasheous.set_field("base_url", "https://test.example.com")
-    hasheous.set_enabled(True)
-    status = hasheous.test_connection()
-    assert status.ok is True
-    assert status.message == EXPECTED_CONNECTION_SUCCESS, f"Expected '{EXPECTED_CONNECTION_SUCCESS}', got '{status.message}'"
-    
-    # Test IGDB provider
-    igdb = registry.get("igdb")
-    assert igdb is not None
-    igdb.set_field("base_url", "https://test.example.com")
-    igdb.set_enabled(True)
-    status = igdb.test_connection()
-    assert status.ok is True
-    assert status.message == EXPECTED_CONNECTION_SUCCESS, f"Expected '{EXPECTED_CONNECTION_SUCCESS}', got '{status.message}'"
-    
+    assert status.message == EXPECTED_CONNECTION_SUCCESS, (
+        f"Expected '{EXPECTED_CONNECTION_SUCCESS}', got '{status.message}'"
+    )
+
+    # Wikipedia's connection check performs ONE real known lookup and reports a
+    # transport outcome (OK / Rate limited / Network error / Disabled), so it is
+    # intentionally NOT subject to the "Connection successful" wording. It must
+    # never claim success while disabled.
+    wiki = registry.get("wikipedia")
+    assert wiki is not None
+    assert wiki.status().message in ("Ready", "Turned off")
+    wiki.set_enabled(False)
+    status = wiki.test_connection()
+    assert status.message == "Disabled"
+    assert status.ok is False
+
     mw.close()

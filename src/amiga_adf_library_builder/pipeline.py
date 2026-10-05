@@ -309,11 +309,8 @@ def run_pipeline(
     verified_artwork_height = run.verified_artwork_height
     local_media_config_path = run.local_media_config_path
     rtfm_config_path = run.rtfm_config_path
-    playmatch_config_path = run.playmatch_config_path
-    hasheous_config_path = run.hasheous_config_path
-    igdb_config_path = run.igdb_config_path
     screenscraper_config_path = run.screenscraper_config_path
-    retroachievements_config_path = run.retroachievements_config_path
+    wikipedia_config_path = run.wikipedia_config_path
     retrokit_config_path = run.retrokit_config_path
     one_per_game = run.one_per_game
     operator_decisions_path = run.operator_decisions_path
@@ -412,50 +409,6 @@ def run_pipeline(
                 local_media_provider.discover()
         except Exception:  # provider failure must not break the pipeline
             local_media_provider = None
-    # Optional Playmatch ROM-hash identity resolver. OPTIONAL and DISABLED by
-    # default; only built when a [playmatch] config is present AND enabled. The
-    # provider is non-fatal on outage/timeout/oversize (degrades to None so the
-    # pipeline continues unchanged). Hash-first: it reuses the sha256 already
-    # computed by the scanner (passed via scans) and never refetches.
-    playmatch_provider = None
-    if playmatch_config_path:
-        try:
-            from . import playmatch as pm
-            from .paths import load_playmatch_config
-
-            pm_cfg = pm.PlaymatchConfig.from_dict(
-                load_playmatch_config(playmatch_config_path)
-            )
-            if pm_cfg.enabled:
-                playmatch_provider = pm.PlaymatchProvider(
-                    pm_cfg, cfg.metadata_cache_dir
-                )
-                playmatch_provider.discover()
-        except Exception:  # provider failure must not break the pipeline
-            playmatch_provider = None
-    # Optional Hasheous ROM-hash identity resolver. OPTIONAL and DISABLED by
-    # default; only built when a [hasheous] config is present AND enabled. It
-    # mirrors the Playmatch wiring exactly (reuses the scanner-computed sha256,
-    # degrades to None on construction failure so the pipeline continues
-    # unchanged, non-fatal on outage/timeout/oversize). The Hasheous provider is
-    # invoked ALONGSIDE the PlaymatchProvider; both resolve the same hash-first
-    # identity layer. Exact-hash identity outranks any weaker signal.
-    hasheous_provider = None
-    if hasheous_config_path:
-        try:
-            from . import hasheous as hs
-            from .paths import load_hasheous_config
-
-            hs_cfg = hs.HasheousConfig.from_dict(
-                load_hasheous_config(hasheous_config_path)
-            )
-            if hs_cfg.enabled:
-                hasheous_provider = hs.HasheousProvider(
-                    hs_cfg, cfg.metadata_cache_dir
-                )
-                hasheous_provider.discover()
-        except Exception:  # provider failure must not break the pipeline
-            hasheous_provider = None
     # (GH-164 RC4) Optional DAT/local metadata source manager.
     metadata_source_manager = None
     if metadata_cache_dir:
@@ -465,35 +418,6 @@ def run_pipeline(
             )
         except Exception:
             metadata_source_manager = None
-    # Optional IGDB metadata/artwork provider. OPTIONAL and DISABLED by
-    # default; only built when an [igdb] config is present AND enabled.
-    # The provider uses title + Amiga platform search (not hash-first).
-    # Credentials (client_id, client_secret) come from the SecretStore
-    # / environment variables, never from config files.
-    igdb_provider = None
-    if igdb_config_path:
-        try:
-            from . import igdb as igdb_mod
-            from .paths import load_igdb_config
-
-            igdb_cfg = igdb_mod.IgdbConfig.from_dict(
-                load_igdb_config(igdb_config_path)
-            )
-            if igdb_cfg.enabled:
-                # Credentials from environment / SecretStore
-                client_id = os.environ.get("IGDB_CLIENT_ID", "").strip()
-                client_secret = os.environ.get("IGDB_CLIENT_SECRET", "").strip()
-                if client_id and client_secret:
-                    igdb_provider = igdb_mod.IgdbProvider(
-                        igdb_cfg, cfg.metadata_cache_dir,
-                        client_id=client_id, client_secret=client_secret
-                    )
-                    igdb_provider.discover()
-                else:
-                    # Missing credentials - provider stays disabled
-                    igdb_provider = None
-        except Exception:  # provider failure must not break the pipeline
-            igdb_provider = None
     # Optional ScreenScraper metadata/artwork/manual provider. OPTIONAL and DISABLED by
     # default; only built when a [screenscraper] config is present AND enabled.
     # The provider uses hash-first (CRC/MD5/SHA1) lookup, then cached provider ID
@@ -527,46 +451,44 @@ def run_pipeline(
                     screenscraper_provider = None
         except Exception:  # provider failure must not break the pipeline
             screenscraper_provider = None
-    # Optional RetroAchievements metadata/artwork provider. OPTIONAL and DISABLED
-    # by default; only built when a [retroachievements] config is present AND
-    # enabled AND the API key is in the environment. The provider uses exact
-    # MD5 hash-first identity (first non-special disk), with the game list
-    # fetched (and cached) from the RA Web API. Credentials (API key) come from
-    # the environment / SecretStore only.
-    retroachievements_provider = None
-    if retroachievements_config_path:
+    # (SCOPE 4) Install the EFFECTIVE Wikipedia policy on the shared request
+    # gate before any lookup happens. This is the single point where stored
+    # configuration becomes runtime behaviour: the shared gate is what every
+    # wikipedia_lookup() call site uses, so one application here governs every
+    # title in the run. Values that fail to parse fall back to the documented
+    # defaults inside WikipediaConfig rather than aborting the run.
+    wikipedia_settings = None
+    try:
+        from .wikipedia_config import apply_effective_policy
+        from .paths import load_wikipedia_config
+        # load_wikipedia_config(None) still discovers the default config file,
+        # so an operator's saved settings apply even when no explicit path was
+        # supplied. A missing table yields the documented defaults.
+        wikipedia_settings = apply_effective_policy(
+            load_wikipedia_config(wikipedia_config_path)
+        )
+    except Exception:  # config problems must not break the pipeline
+        wikipedia_settings = None
+    # (SCOPE 5) Report the EFFECTIVE Wikipedia settings at the start of an
+    # online run -- the values the shared gate is actually enforcing, read back
+    # off the gate itself rather than echoed from the GUI text.
+    if online:
         try:
-            from . import retroachievements as ra_mod
-            from .paths import load_retroachievements_config
+            from .wikipedia_client import get_global_gate
+            from .wikipedia_config import effective_settings_report
+            if wikipedia_settings is None:
+                from .wikipedia_config import WikipediaConfig
+                wikipedia_settings = WikipediaConfig.from_dict({})
+            report = effective_settings_report(
+                wikipedia_settings.to_dict(),
+                gate=get_global_gate(),
+                use_gate_policy=True,
+            )
+            for _key, _value in report.items():
+                _act(f"Wikipedia settings — {_key}: {_value}")
+        except Exception:  # diagnostics must never break a run
+            pass
 
-            ra_cfg = ra_mod.RaConfig.from_dict(
-                load_retroachievements_config(retroachievements_config_path)
-            )
-            if ra_cfg.enabled:
-                ra_api_key = os.environ.get("RETROACHIEVEMENTS_API_KEY", "").strip()
-                if ra_api_key:
-                    retroachievements_provider = ra_mod.RetroAchievementsProvider(
-                        ra_cfg, cfg.metadata_cache_dir, ra_api_key
-                    )
-                    retroachievements_provider.discover()
-                else:
-                    # Missing API key -- provider stays disabled
-                    retroachievements_provider = None
-        except Exception:  # provider failure must not break the pipeline
-            retroachievements_provider = None
-    # Hall of Light optional provider gating. OPTIONAL and ENABLED by
-    # default; disabled via the [hall-of-light] TOML table.
-    halloflight_enabled = True  # backward compatible default
-    if run.hall_of_light_config_path:
-        try:
-            from .paths import load_hall_of_light_config
-            from .metadata import HallOfLightConfig
-            hol_cfg = HallOfLightConfig.from_dict(
-                load_hall_of_light_config(run.hall_of_light_config_path)
-            )
-            halloflight_enabled = hol_cfg.enabled
-        except Exception:  # provider failure must not break the pipeline
-            halloflight_enabled = True  # fail open
     _act(
         f"Filling in missing metadata for {len(groups)} release(s) "
         + ("from online sources (this can take a while)."
@@ -584,12 +506,7 @@ def run_pipeline(
         online=online,
         refresh=refresh_metadata,
         local_media_provider=local_media_provider,
-        playmatch_provider=playmatch_provider,
-        hasheous_provider=hasheous_provider,
-        igdb_provider=igdb_provider,
         screenscraper_provider=screenscraper_provider,
-        retroachievements_provider=retroachievements_provider,
-        halloflight_enabled=halloflight_enabled,
         include_artwork=include_artwork,
         activity=activity,
         cancel_event=cancel_event,
@@ -707,40 +624,11 @@ def run_pipeline(
                         retrokit_sources = None
                         manual_trace["provider_statuses"].append("retrokit:error")
 
-                # (GH-183) Wire Lemon Amiga typed doc acquisition
-                # into the RTFM pipeline. Query Lemon Amiga for
-                # Hints/Solution/Cheat and convert to RtfmSource entries
-                # with DocType classification so the RTFM builder can
-                # produce readable RTFM with proper provenance.
-                lemonamiga_sources = []
-                try:
-                    from .rtfm import lemonamiga_to_rtfm_sources
-                    # Build a list of game objects from groups for
-                    # Lemon Amiga lookup.
-                    _games_for_lem = [
-                        g for g in groups
-                        if not g.quarantine_reason
-                    ]
-                    if _games_for_lem and online:
-                        lemonamiga_sources = lemonamiga_to_rtfm_sources(
-                            _games_for_lem,
-                            library_root=library_root,
-                        )
-                        _act(
-                            f"RTFM phase: Lemon Amiga returned "
-                            f"{len(lemonamiga_sources)} typed doc candidate(s)"
-                        )
-                        manual_trace["provider_statuses"].append("lemon-amiga:queried")
-                except Exception:  # Lemon Amiga failure must not break the run
-                    manual_trace["provider_statuses"].append("lemon-amiga:error")
 
-                # Combine all extra sources: RetroKit first, then
-                # Lemon Amiga typed docs.
+                # Combine all extra sources (RetroKit typed docs).
                 _all_extra_sources = []
                 if retrokit_sources:
                     _all_extra_sources.extend(retrokit_sources)
-                if lemonamiga_sources:
-                    _all_extra_sources.extend(lemonamiga_sources)
 
                 rtfm_results = rtfm_mod.build_rtfm_all(
                     groups,

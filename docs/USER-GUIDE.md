@@ -273,29 +273,30 @@ Each provider has a generic panel with:
 
 A provider being listed does not mean it must be enabled.
 
-### Hall of Light
+### Wikipedia
 
-**Hall of Light** is an Amiga-specific metadata source.
+**Wikipedia** is the primary online metadata and artwork source. It is enabled
+by default and requires no account or key.
 
-In v0.2.26 it is enabled by default in the provider registry and does not require credentials.
+Its settings control how politely requests are made:
 
-It is particularly relevant for Amiga title/release identification.
+| Setting | Default | Range |
+|---|---|---|
+| Minimum time between requests | 1.0 s | 0.5–10.0 s |
+| Retry when Wikipedia asks us to slow down | on | — |
+| Maximum retries | 2 | 0–10 |
+| Follow the server's requested wait | on | — |
+| Maximum wait when the server asks | 60 s | 0–600 s |
+| Reuse previously downloaded lookups | on | — |
 
-### Lemon Amiga
+If a run reports too many requests (HTTP 429), raise **Minimum time between
+requests** first. **Follow the server's requested wait** means that when
+Wikipedia instructs us to wait a set number of seconds, we obey that instead of
+guessing; **Maximum wait when the server asks** stops a long server-requested
+pause from stalling the run.
 
-**Lemon Amiga** is an Amiga-specific metadata source.
-
-It does not require credentials and is disabled by default in the provider registry.
-
-The current GUI provider describes it as metadata-only.
-
-### IGDB
-
-**IGDB** can provide metadata and artwork.
-
-It requires Twitch OAuth credentials and is disabled by default.
-
-Use **Set credentials...** rather than placing secrets in normal configuration fields.
+Use **Check connection...** to run one harmless known lookup. It reports **OK**,
+**Rate limited**, **Network error**, or **Disabled**.
 
 ### ScreenScraper
 
@@ -305,31 +306,13 @@ It supports several identification methods, including hash-first lookup and titl
 
 It requires ScreenScraper developer credentials. Member credentials may optionally be used depending on the account and service limits.
 
-### RetroAchievements
-
-**RetroAchievements** is an optional metadata/artwork provider with hash-oriented identity support.
-
-It requires an API key and is disabled by default.
-
-### Playmatch
-
-**Playmatch** is an optional ROM-hash identity resolver.
-
-It is disabled by default.
-
-Its intended role is identity correlation rather than simply title scraping.
-
-### Hasheous
-
-**Hasheous** is an optional ROM-hash identity resolver.
-
-It is disabled by default and supports a configured Hasheous-compatible endpoint.
-
 ### Provider safety
 
 Do not enable every provider merely because it exists.
 
-A sensible configuration is to begin with the Amiga-specific sources and only add credentialed providers when they provide something you actually need.
+A sensible configuration is to leave Wikipedia enabled, add local LaunchBox
+media for artwork and manuals, and enable ScreenScraper once developer
+credentials are available.
 
 ---
 
@@ -597,7 +580,7 @@ The lookup UI separates:
 
 Lookup can be performed in online or offline/local modes depending on the configured sources.
 
-The online view currently identifies Hall of Light and other configured source paths in the provider chain.
+The online view currently identifies Wikipedia and other configured source paths in the provider chain.
 
 ### Candidate review
 
@@ -771,13 +754,8 @@ Do not place API keys, passwords, or client secrets in:
 
 Use the application's **Set credentials...** mechanism where available.
 
-Examples of credentialed providers include:
-
-- IGDB
-- ScreenScraper
-- RetroAchievements
-
-Hall of Light and Lemon Amiga do not require credentials.
+ScreenScraper is the only credentialed supported provider. Wikipedia requires
+no credentials.
 
 ---
 
@@ -1096,7 +1074,6 @@ Version 0.2.26 includes important work around:
 
 - unified canonical identity;
 - metadata-source database path consistency;
-- Hall of Light parsing;
 - sequel rejection;
 - real document/RTFM association;
 - Manual Lookup persistence through Preview and Export;

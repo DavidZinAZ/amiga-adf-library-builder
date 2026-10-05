@@ -45,8 +45,8 @@ metadata reconciliation, export rules, or preservation checks.
 - `lookup_workflow.py` — shared online/offline/alternate lookup workflow.
 - `metadata_source.py` — indexed DAT/local metadata sources.
 - `local_media.py` — read-only local artwork/media matching.
-- provider modules such as `igdb.py`, `screenscraper.py`,
-  `retroachievements.py`, `playmatch.py`, `hasheous.py`, and `retrokit.py`.
+- provider modules `wikipedia_client.py` / `wikipedia_config.py`,
+  `screenscraper.py`, and `retrokit.py`.
 - `rtfm.py` / `rtfm_docs.py` — manual/document pipeline.
 - `artwork.py` — artwork processing.
 - `nfo_render.py` — Gotek-facing NFO rendering.

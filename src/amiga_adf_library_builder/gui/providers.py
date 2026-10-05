@@ -5,24 +5,42 @@ SINGLE generic panel (no per-provider UI). The GUI renders controls purely from
 the provider's metadata + capabilities, and routes actions (configure,
 test-connection, add/remove credentials) through the protocol.
 
-Playmatch and Hasheous (the two optional, DISABLED-by-default online
-resolvers in the core) are exposed here as generic providers. Their credentials
-(api tokens / base URLs) come from the :class:`SecretStore` -- never embedded in
-config or code. Each provider builds its own typed config and is enabled only
-when the operator turns it on AND the core ``run_pipeline`` is told to use it.
+Two providers are supported:
+
+- **Wikipedia** -- the primary online metadata/artwork provider. Enabled by
+  default, no credentials. Its adapter owns the effective request policy
+  (delay, retries, Retry-After handling) that the runtime request gate
+  actually enforces.
+- **ScreenScraper** -- optional, disabled until developer API access is
+  available. Out of scope for changes.
 
 The protocol intentionally mirrors what :func:`pipeline.run_pipeline` needs so
 the GUI can construct a provider-config TOML and pass it the same way the CLI
-does (``--playmatch-config`` / ``--hasheous-config`` / ``--config``).
+does (``--config``).
 """
 
 from __future__ import annotations
 
 import abc
+import logging
 import threading
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Optional
+
+from ..wikipedia_client import WikipediaGate
+from ..wikipedia_config import WikipediaConfig, coerce_bool
+
+logger = logging.getLogger(__name__)
+
+
+def _as_bool(value: Any, default: bool) -> bool:
+    """Interpret a GUI field value as a bool.
+
+    Thin alias over the config-layer coercion so the panel and the config file
+    agree on exactly one set of accepted truthy/falsy spellings.
+    """
+    return coerce_bool(value, default)
 
 #: Auth requirement for a provider.
 AuthRequired = str  # one of: "required" | "optional" | "none"
@@ -125,506 +143,231 @@ class Provider(abc.ABC):
         raise NotImplementedError(f"provider {self.metadata.id} has no credentials")
 
 
-# --- Playmatch provider adapter ----------------------------------------------
 
 
-def _playmatch_field_defaults() -> list[ProviderField]:
+# --- Wikipedia provider adapter ----------------------------------------------
+# PRIMARY supported online metadata provider. No credentials: the MediaWiki
+# API is public, so `auth_required` is ``none`` and ``requires_secret`` is
+# False. Wikipedia is ENABLED by default -- it is the provider the library
+# relies on.
+
+
+def _wikipedia_field_defaults() -> list[ProviderField]:
     return [
         ProviderField(
-            key="base_url",
-            label="Server address",
-            default="https://api.playmatch.example/v1",
-            placeholder="https://api.playmatch.example/v1",
-            help_text=(
-                "Address of your Playmatch server. Only the public hash of "
-                "each disk is ever sent — the disk itself never leaves this "
-                "machine."
-            ),
-        ),
-        ProviderField(
-            key="timeout_seconds",
-            label="Time limit per request (seconds)",
-            default="10.0",
-            help_text="How long to wait for the server before giving up (capped at 30 seconds).",
-        ),
-        ProviderField(
-            key="max_response_bytes",
-            label="Maximum response size (bytes)",
-            default="1000000",
-            help_text="Refuse to read more than this from the server (protection against oversized replies).",
-        ),
-        ProviderField(
-            key="confidence_threshold",
-            label="Minimum match confidence",
-            default="0.9",
-            help_text="A result is accepted automatically only if the server is at least this confident (0–1).",
-        ),
-    ]
-
-
-def _build_playmatch_config_dict(*, enabled: bool, base_url: str, timeout_seconds: str,
-                                 max_response_bytes: str, confidence_threshold: str) -> dict:
-    """Build a typed ``[playmatch]`` TOML table (mirrors PlaymatchConfig)."""
-    return {
-        "enabled": enabled,
-        "base_url": base_url or "https://api.playmatch.example/v1",
-        "timeout_seconds": float(timeout_seconds or 10.0),
-        "max_response_bytes": int(max_response_bytes or 1_000_000),
-        "confidence_threshold": float(confidence_threshold or 0.9),
-    }
-
-
-class PlaymatchProvider(Provider):
-    """Generic GUI adapter over the core Playmatch identity resolver.
-
-    The provider is OPTIONAL and DISABLED by default. Its api token (if the
-    operator's deployment requires one) lives in the SecretStore under the key
-    ``playmatch_token`` -- never in config. The base URL and bounds are
-    non-secret and rendered by the generic panel.
-    """
-
-    def __init__(self) -> None:
-        self.metadata = ProviderMetadata(
-            id="playmatch",
-            name="Playmatch",
-            description=(
-                "Optional ROM-hash identity resolver. Transmits only the public "
-                "sha256 of each disk; disabled by default."
-            ),
-            auth_required="optional",
-            fields=_playmatch_field_defaults(),
-            capabilities=[
-                ProviderCapability.ONLINE_LOOKUP,
-                ProviderCapability.HASH_RESOLUTION,
-                ProviderCapability.METADATA,
-            ],
-            requires_secret=True,
-        )
-        self._enabled = False
-        self._base_url = "https://api.playmatch.example/v1"
-        self._timeout_seconds = "10.0"
-        self._max_response_bytes = "1000000"
-        self._confidence_threshold = "0.9"
-        self._lock = threading.RLock()
-
-    # --- config ---------------------------------------------------------------
-    def is_configured(self) -> bool:
-        with self._lock:
-            return bool(self._base_url and self._base_url.strip())
-
-    def enabled(self) -> bool:
-        with self._lock:
-            return self._enabled and self.is_configured()
-
-    def set_field(self, key: str, value: str) -> None:
-        with self._lock:
-            if key == "base_url":
-                self._base_url = (value or "").rstrip("/")
-            elif key == "timeout_seconds":
-                self._timeout_seconds = value
-            elif key == "max_response_bytes":
-                self._max_response_bytes = value
-            elif key == "confidence_threshold":
-                self._confidence_threshold = value
-            elif key == "enabled":
-                self._enabled = (value == "true" or value is True)
-            else:
-                raise KeyError(f"unknown playmatch field: {key}")
-
-    def set_enabled(self, enabled: bool) -> None:
-        with self._lock:
-            self._enabled = bool(enabled)
-
-    def to_config_dict(self) -> dict:
-        with self._lock:
-            return _build_playmatch_config_dict(
-                enabled=self._enabled,
-                base_url=self._base_url,
-                timeout_seconds=self._timeout_seconds,
-                max_response_bytes=self._max_response_bytes,
-                confidence_threshold=self._confidence_threshold,
-            )
-
-    # --- status ---------------------------------------------------------------
-    def status(self) -> ProviderStatus:
-        with self._lock:
-            if not self._enabled:
-                return ProviderStatus(ok=True, message="Turned off", configured=self.is_configured())
-            if not self.is_configured():
-                return ProviderStatus(ok=False, message="Not set up yet — enter the server address below", configured=False)
-            return ProviderStatus(ok=True, message="Ready", configured=True)
-
-    def test_connection(self) -> ProviderStatus:
-        # The core provider performs the real SSRF-guarded fetch lazily; the GUI
-        # does not open sockets here. We report configured status only.
-        status = self.status()
-        if status.ok and status.message == "Ready":
-            # Explicit success wording for connection check (GH-42)
-            return ProviderStatus(ok=True, message="Connection successful", configured=status.configured, reachable=status.reachable)
-        return status
-
-    # --- secrets --------------------------------------------------------------
-    def add_credentials(self, secret_store: Any, **secrets: str) -> None:
-        token = secrets.get("token")
-        if token:
-            secret_store.set_secret("playmatch_token", token)
-
-    def remove_credentials(self, secret_store: Any) -> None:
-        secret_store.delete_secret("playmatch_token")
-
-
-# --- Hasheous provider adapter -----------------------------------------------
-
-
-def _hasheous_field_defaults() -> list[ProviderField]:
-    return [
-        ProviderField(
-            key="base_url",
-            label="Server address",
-            default="https://api.hasheous.example/v1",
-            placeholder="https://api.hasheous.example/v1",
-            help_text="Address of your Hasheous server. No sign-in is needed for lookups.",
-        ),
-        ProviderField(
-            key="timeout_seconds",
-            label="Time limit per request (seconds)",
-            default="10.0",
-            help_text="How long to wait for the server before giving up (capped at 30 seconds).",
-        ),
-        ProviderField(
-            key="max_response_bytes",
-            label="Maximum response size (bytes)",
-            default="1000000",
-            help_text="Refuse to read more than this from the server (protection against oversized replies).",
-        ),
-        ProviderField(
-            key="confidence_threshold",
-            label="Minimum match confidence",
-            default="0.9",
-            help_text="A result is accepted automatically only if the server is at least this confident (0–1).",
-        ),
-        ProviderField(
-            key="respect_rate_limit",
-            label="Honor the server's rate limits",
+            key="enabled",
+            label="Enable Wikipedia",
             default="true",
-            help_text="Pause and retry when the server asks us to slow down.",
+            help_text=(
+                "Look up release metadata and artwork on Wikipedia. "
+                "Turned on by default -- this is the main online source."
+            ),
+        ),
+        ProviderField(
+            key="min_interval_seconds",
+            label="Minimum time between requests (seconds)",
+            default="1.0",
+            help_text=(
+                "How long to wait between requests to Wikipedia. Raising this "
+                "value reduces HTTP 429 (too many requests) rate limiting. "
+                "Allowed range 0.5 to 10.0 seconds."
+            ),
+        ),
+        ProviderField(
+            key="retries_enabled",
+            label="Retry when Wikipedia asks us to slow down",
+            default="true",
+            help_text=(
+                "When Wikipedia rate limits a request, wait and try again "
+                "instead of dropping the release."
+            ),
+        ),
+        ProviderField(
+            key="max_retries",
+            label="Maximum retries",
+            default="2",
+            help_text="How many times to retry a request that was rate limited.",
+        ),
+        ProviderField(
+            key="respect_retry_after",
+            label="Follow the server's requested wait",
+            default="true",
+            help_text=(
+                "When Wikipedia asks us to wait a set number of seconds, obey "
+                "that instruction (up to the maximum wait below) rather than "
+                "guessing how long to pause."
+            ),
+        ),
+        ProviderField(
+            key="retry_after_cap_seconds",
+            label="Maximum wait when the server asks (seconds)",
+            default="60",
+            help_text=(
+                "The most we will ever wait for a server-requested pause. "
+                "A server asking for hours will not stall a library run."
+            ),
+        ),
+        ProviderField(
+            key="use_cache",
+            label="Reuse previously downloaded lookups",
+            default="true",
+            help_text=(
+                "Reuse lookups already downloaded, so repeated runs do not "
+                "re-request the same pages from Wikipedia."
+            ),
         ),
     ]
 
 
-def _build_hasheous_config_dict(*, enabled: bool, base_url: str, timeout_seconds: str,
-                                max_response_bytes: str, confidence_threshold: str,
-                                respect_rate_limit: str) -> dict:
-    """Build a typed ``[hasheous]`` TOML table (mirrors HasheousConfig)."""
-    return {
-        "enabled": enabled,
-        "base_url": base_url or "https://api.hasheous.example/v1",
-        "timeout_seconds": float(timeout_seconds or 10.0),
-        "max_response_bytes": int(max_response_bytes or 1_000_000),
-        "confidence_threshold": float(confidence_threshold or 0.9),
-        "respect_rate_limit": (respect_rate_limit == "true" or respect_rate_limit is True),
-    }
+class WikipediaProvider(Provider):
+    """GUI adapter owning the effective Wikipedia request policy.
 
+    The values shown here are not cosmetic. ``to_config_dict`` is written to
+    the provider config file, and the run-start path hands that table to
+    :func:`wikipedia_config.apply_effective_policy`, which installs it on the
+    process-wide request gate. Editing the delay in this panel therefore
+    changes the real pacing of real requests -- that is the whole point.
 
-class HasheousProvider(Provider):
-    """Generic GUI adapter over the core Hasheous identity resolver.
-
-    OPTIONAL and DISABLED by default. The live Hasheous lookup is
-    unauthenticated (no API key needed), so ``auth_required`` is ``none``; the
-    adapter still supports a secret token slot for self-hosted deployments that
-    require one, stored under ``hasheous_token`` in the SecretStore.
+    Internal matcher tuning (title matching, relevance thresholds, candidate
+    scoring, circuit-breaker internals) is deliberately NOT surfaced: those
+    are library implementation details, not operator settings.
     """
 
     def __init__(self) -> None:
         self.metadata = ProviderMetadata(
-            id="hasheous",
-            name="Hasheous",
+            id="wikipedia",
+            name="Wikipedia",
             description=(
-                "Optional ROM-hash identity resolver (real /Lookup/ByHash/sha256 "
-                "route). Unauthenticated; disabled by default."
+                "Primary online metadata and artwork provider. Looks up each "
+                "release on Wikipedia, pacing requests so the site is not "
+                "overloaded. No account or key required."
             ),
             auth_required="none",
-            fields=_hasheous_field_defaults(),
-            capabilities=[
-                ProviderCapability.ONLINE_LOOKUP,
-                ProviderCapability.HASH_RESOLUTION,
-                ProviderCapability.METADATA,
-            ],
-            requires_secret=False,
-        )
-        self._enabled = False
-        self._base_url = "https://api.hasheous.example/v1"
-        self._timeout_seconds = "10.0"
-        self._max_response_bytes = "1000000"
-        self._confidence_threshold = "0.9"
-        self._respect_rate_limit = "true"
-        self._lock = threading.RLock()
-
-    # --- config ---------------------------------------------------------------
-    def is_configured(self) -> bool:
-        with self._lock:
-            return bool(self._base_url and self._base_url.strip())
-
-    def enabled(self) -> bool:
-        with self._lock:
-            return self._enabled and self.is_configured()
-
-    def set_field(self, key: str, value: str) -> None:
-        with self._lock:
-            if key == "base_url":
-                self._base_url = (value or "").rstrip("/")
-            elif key == "timeout_seconds":
-                self._timeout_seconds = value
-            elif key == "max_response_bytes":
-                self._max_response_bytes = value
-            elif key == "confidence_threshold":
-                self._confidence_threshold = value
-            elif key == "respect_rate_limit":
-                self._respect_rate_limit = value
-            elif key == "enabled":
-                self._enabled = (value == "true" or value is True)
-            else:
-                raise KeyError(f"unknown hasheous field: {key}")
-
-    def set_enabled(self, enabled: bool) -> None:
-        with self._lock:
-            self._enabled = bool(enabled)
-
-    def to_config_dict(self) -> dict:
-        with self._lock:
-            return _build_hasheous_config_dict(
-                enabled=self._enabled,
-                base_url=self._base_url,
-                timeout_seconds=self._timeout_seconds,
-                max_response_bytes=self._max_response_bytes,
-                confidence_threshold=self._confidence_threshold,
-                respect_rate_limit=self._respect_rate_limit,
-            )
-
-    # --- status ---------------------------------------------------------------
-    def status(self) -> ProviderStatus:
-        with self._lock:
-            if not self._enabled:
-                return ProviderStatus(ok=True, message="Turned off", configured=self.is_configured())
-            if not self.is_configured():
-                return ProviderStatus(ok=False, message="Not set up yet — enter the server address below", configured=False)
-            return ProviderStatus(ok=True, message="Ready", configured=True)
-
-    def test_connection(self) -> ProviderStatus:
-        # Real fetch is performed lazily by the core provider under SSRF guards.
-        status = self.status()
-        if status.ok and status.message == "Ready":
-            # Explicit success wording for connection check (GH-42)
-            return ProviderStatus(ok=True, message="Connection successful", configured=status.configured, reachable=status.reachable)
-        return status
-
-    # --- secrets --------------------------------------------------------------
-    def add_credentials(self, secret_store: Any, **secrets: str) -> None:
-        token = secrets.get("token")
-        if token:
-            secret_store.set_secret("hasheous_token", token)
-
-    def remove_credentials(self, secret_store: Any) -> None:
-        secret_store.delete_secret("hasheous_token")
-
-
-# --- IGDB provider adapter ---------------------------------------------------
-
-
-def _igdb_field_defaults() -> list[ProviderField]:
-    return [
-        ProviderField(
-            key="base_url",
-            label="IGDB API endpoint",
-            default="https://api.igdb.com/v4",
-            placeholder="https://api.igdb.com/v4",
-            help_text=(
-                "IGDB API endpoint. Only change if using a self-hosted/enterprise "
-                "IGDB-compatible instance."
-            ),
-        ),
-        ProviderField(
-            key="timeout_seconds",
-            label="Time limit per request (seconds)",
-            default="10.0",
-            help_text="How long to wait for the server before giving up (capped at 30 seconds).",
-        ),
-        ProviderField(
-            key="max_response_bytes",
-            label="Maximum response size (bytes)",
-            default="1000000",
-            help_text="Refuse to read more than this from the server (protection against oversized replies).",
-        ),
-        ProviderField(
-            key="max_concurrency",
-            label="Maximum concurrent requests",
-            default="1",
-            help_text="Maximum number of concurrent API requests (capped at 8).",
-        ),
-        ProviderField(
-            key="confidence_threshold",
-            label="Minimum match confidence",
-            default="0.9",
-            help_text="A result is accepted automatically only if the match confidence is at least this (0–1).",
-        ),
-        ProviderField(
-            key="token_cache_ttl",
-            label="OAuth token cache TTL (seconds)",
-            default="5000000",
-            help_text="How long to cache the Twitch OAuth token (~58 days default). <= 0 disables reuse.",
-        ),
-        ProviderField(
-            key="respect_rate_limit",
-            label="Honor rate limits (429 Retry-After)",
-            default="true",
-            help_text="Pause and retry once when the server asks us to slow down (ToS compliance).",
-        ),
-        ProviderField(
-            key="rate_limit_backoff_seconds",
-            label="Rate limit backoff (seconds)",
-            default="1.0",
-            help_text="Default wait when server sends no Retry-After header (capped at 5s).",
-        ),
-    ]
-
-
-def _build_igdb_config_dict(*, enabled: bool, base_url: str, timeout_seconds: str,
-                            max_response_bytes: str, max_concurrency: str,
-                            confidence_threshold: str, token_cache_ttl: str,
-                            respect_rate_limit: str, rate_limit_backoff_seconds: str) -> dict:
-    """Build a typed ``[igdb]`` TOML table (mirrors IgdbConfig)."""
-    return {
-        "enabled": enabled,
-        "base_url": base_url or "https://api.igdb.com/v4",
-        "timeout_seconds": float(timeout_seconds or 10.0),
-        "max_response_bytes": int(max_response_bytes or 1_000_000),
-        "max_concurrency": int(max_concurrency or 1),
-        "confidence_threshold": float(confidence_threshold or 0.9),
-        "token_cache_ttl": float(token_cache_ttl or 5_000_000),
-        "respect_rate_limit": (respect_rate_limit == "true" or respect_rate_limit is True),
-        "rate_limit_backoff_seconds": float(rate_limit_backoff_seconds or 1.0),
-    }
-
-
-class IgdbProvider(Provider):
-    """Generic GUI adapter over the core IGDB metadata/artwork provider.
-
-    The provider is OPTIONAL and DISABLED by default. Its credentials
-    (client_id, client_secret) live in the SecretStore under the keys
-    ``igdb_client_id`` and ``igdb_client_secret`` -- never in config.
-    The base URL and bounds are non-secret and rendered by the generic panel.
-    """
-
-    def __init__(self) -> None:
-        self.metadata = ProviderMetadata(
-            id="igdb",
-            name="IGDB",
-            description=(
-                "Optional metadata and artwork lookup via IGDB (Internet Game Database). "
-                "Searches by title filtered to Amiga platform. Requires Twitch OAuth "
-                "credentials (client_id, client_secret) from Twitch Developer Console. "
-                "Disabled by default."
-            ),
-            auth_required="required",
-            fields=_igdb_field_defaults(),
+            fields=_wikipedia_field_defaults(),
             capabilities=[
                 ProviderCapability.ONLINE_LOOKUP,
                 ProviderCapability.METADATA,
                 ProviderCapability.ARTWORK,
             ],
-            requires_secret=True,
+            requires_secret=False,
         )
-        self._enabled = False
-        self._base_url = "https://api.igdb.com/v4"
-        self._timeout_seconds = "10.0"
-        self._max_response_bytes = "1000000"
-        self._max_concurrency = "1"
-        self._confidence_threshold = "0.9"
-        self._token_cache_ttl = "5000000"
-        self._respect_rate_limit = "true"
-        self._rate_limit_backoff_seconds = "1.0"
+        self._enabled = True
+        self._min_interval_seconds = "1.0"
+        self._retries_enabled = "true"
+        self._max_retries = "2"
+        self._respect_retry_after = "true"
+        self._retry_after_cap_seconds = "60"
+        self._use_cache = "true"
         self._lock = threading.RLock()
 
-    # --- config ---------------------------------------------------------------
+    # --- config -------------------------------------------------------------
     def is_configured(self) -> bool:
+        """Wikipedia needs no configuration to be usable."""
         with self._lock:
-            return bool(self._base_url and self._base_url.strip())
+            return True
 
     def enabled(self) -> bool:
         with self._lock:
-            return self._enabled and self.is_configured()
+            return self._enabled
 
     def set_field(self, key: str, value: str) -> None:
+        # Values are held as raw strings and sanitised on read-out through
+        # WikipediaConfig, so a half-typed value in the GUI can never produce
+        # an invalid policy. Unknown keys stay loud.
         with self._lock:
-            if key == "base_url":
-                self._base_url = (value or "").rstrip("/")
-            elif key == "timeout_seconds":
-                self._timeout_seconds = value
-            elif key == "max_response_bytes":
-                self._max_response_bytes = value
-            elif key == "max_concurrency":
-                self._max_concurrency = value
-            elif key == "confidence_threshold":
-                self._confidence_threshold = value
-            elif key == "token_cache_ttl":
-                self._token_cache_ttl = value
-            elif key == "respect_rate_limit":
-                self._respect_rate_limit = value
-            elif key == "rate_limit_backoff_seconds":
-                self._rate_limit_backoff_seconds = value
-            elif key == "enabled":
-                self._enabled = (value == "true" or value is True)
+            if key == "enabled":
+                self._enabled = _as_bool(value, True)
+            elif key == "min_interval_seconds":
+                self._min_interval_seconds = value
+            elif key == "retries_enabled":
+                self._retries_enabled = _as_bool(value, True)
+            elif key == "max_retries":
+                self._max_retries = value
+            elif key == "respect_retry_after":
+                self._respect_retry_after = _as_bool(value, True)
+            elif key == "retry_after_cap_seconds":
+                self._retry_after_cap_seconds = value
+            elif key == "use_cache":
+                self._use_cache = _as_bool(value, True)
             else:
-                raise KeyError(f"unknown igdb field: {key}")
+                raise KeyError(f"unknown wikipedia field: {key}")
 
     def set_enabled(self, enabled: bool) -> None:
         with self._lock:
             self._enabled = bool(enabled)
 
     def to_config_dict(self) -> dict:
-        with self._lock:
-            return _build_igdb_config_dict(
-                enabled=self._enabled,
-                base_url=self._base_url,
-                timeout_seconds=self._timeout_seconds,
-                max_response_bytes=self._max_response_bytes,
-                max_concurrency=self._max_concurrency,
-                confidence_threshold=self._confidence_threshold,
-                token_cache_ttl=self._token_cache_ttl,
-                respect_rate_limit=self._respect_rate_limit,
-                rate_limit_backoff_seconds=self._rate_limit_backoff_seconds,
-            )
+        """Return the sanitised ``[wikipedia]`` table actually used at runtime.
 
-    # --- status ---------------------------------------------------------------
+        Round-tripping through :class:`WikipediaConfig` is deliberate: the
+        panel then reports the value that will really be enforced, so a corrupt
+        field shows up as the documented default rather than as a silent
+        failure at request time.
+        """
+        with self._lock:
+            return WikipediaConfig.from_dict({
+                "enabled": self._enabled,
+                "min_interval_seconds": self._min_interval_seconds,
+                "retries_enabled": self._retries_enabled,
+                "max_retries": self._max_retries,
+                "respect_retry_after": self._respect_retry_after,
+                "retry_after_cap_seconds": self._retry_after_cap_seconds,
+                "use_cache": self._use_cache,
+            }).to_dict()
+
+    # --- status -------------------------------------------------------------
     def status(self) -> ProviderStatus:
         with self._lock:
             if not self._enabled:
-                return ProviderStatus(ok=True, message="Turned off", configured=self.is_configured())
-            if not self.is_configured():
-                return ProviderStatus(ok=False, message="Not set up yet — enter the API endpoint below", configured=False)
+                return ProviderStatus(ok=True, message="Turned off", configured=True)
             return ProviderStatus(ok=True, message="Ready", configured=True)
 
     def test_connection(self) -> ProviderStatus:
-        # The core provider performs the real SSRF-guarded fetch lazily; the GUI
-        # does not open sockets here. We report configured status only.
-        status = self.status()
-        if status.ok and status.message == "Ready":
-            # Explicit success wording for connection check (GH-42)
-            return ProviderStatus(ok=True, message="Connection successful", configured=status.configured, reachable=status.reachable)
-        return status
+        """Run one harmless known lookup and report a plain-language result.
 
-    # --- secrets --------------------------------------------------------------
+        Returns one of: Disabled / OK / Rate limited / Network error. Never
+        raises into the GUI and never blocks longer than the lookup timeout --
+        this is a button press, not a background job.
+        """
+        with self._lock:
+            enabled = self._enabled
+        if not enabled:
+            return ProviderStatus(ok=False, message="Disabled", configured=True)
+
+        policy = WikipediaConfig.from_dict(self.to_config_dict()).to_policy()
+        # A dedicated gate: a connectivity test must not consume the shared
+        # per-run request budget or trip the shared rate-limit cooldown for the
+        # rest of the run.
+        gate = WikipediaGate(policy=policy).without_sleeping()
+        try:
+            from ..metadata import wikipedia_lookup
+            record = wikipedia_lookup(
+                "Amiga",
+                timeout=10.0,
+                gate=gate,
+                diagnostics=[],
+            )
+        except Exception as exc:                       # noqa: BLE001
+            logger.warning("Wikipedia test lookup failed: %s", exc)
+            return ProviderStatus(ok=False, message="Network error", configured=True)
+
+        if record is not None:
+            return ProviderStatus(ok=True, message="OK", configured=True,
+                                  reachable=True)
+        if gate.rate_limited_events:
+            return ProviderStatus(ok=False, message="Rate limited", configured=True,
+                                  reachable=True)
+        if gate.requests_made == 0:
+            return ProviderStatus(ok=False, message="Network error", configured=True)
+        # A request went out and did not fail -- the title simply had no match.
+        return ProviderStatus(ok=True, message="OK", configured=True, reachable=True)
+
+    # --- secrets -------------------------------------------------------------
     def add_credentials(self, secret_store: Any, **secrets: str) -> None:
-        client_id = secrets.get("client_id")
-        client_secret = secrets.get("client_secret")
-        if client_id:
-            secret_store.set_secret("igdb_client_id", client_id)
-        if client_secret:
-            secret_store.set_secret("igdb_client_secret", client_secret)
+        raise NotImplementedError("wikipedia has no credentials")
 
     def remove_credentials(self, secret_store: Any) -> None:
-        secret_store.delete_secret("igdb_client_id")
-        secret_store.delete_secret("igdb_client_secret")
+        raise NotImplementedError("wikipedia has no credentials")
 
 
 # --- ScreenScraper provider adapter ----------------------------------------
@@ -897,448 +640,6 @@ class ScreenScraperProvider(Provider):
         secret_store.delete_secret("screenscraper_sspassword")
 
 
-# --- RetroAchievements provider adapter (GH-13) ------------------------------
-
-
-def _retroachievements_field_defaults() -> list[ProviderField]:
-    return [
-        ProviderField(
-            key="base_url",
-            label="Server address",
-            default="https://retroachievements.org",
-            placeholder="https://retroachievements.org",
-            help_text="RetroAchievements Web API origin. Self-hosted mirrors are supported.",
-        ),
-        ProviderField(
-            key="console_name",
-            label="Console name",
-            default="amiga",
-            help_text="RA console (system) name resolved at runtime from the console list. "
-                      "A missing console degrades the provider to a clean miss.",
-        ),
-        ProviderField(
-            key="timeout_seconds",
-            label="Time limit per request (seconds)",
-            default="10.0",
-            help_text="How long to wait for the server before giving up (capped at 30 seconds).",
-        ),
-        ProviderField(
-            key="max_response_bytes",
-            label="Maximum response size (bytes)",
-            default="2000000",
-            help_text="Refuse to read more than this from the server (protection against oversized replies).",
-        ),
-        ProviderField(
-            key="cache_ttl",
-            label="Game-list cache age (seconds)",
-            default="86400",
-            help_text="How long to reuse the cached game list. 0 disables reuse.",
-        ),
-        ProviderField(
-            key="respect_rate_limit",
-            label="Honor the server's rate limits",
-            default="true",
-            help_text="Pause and retry once when the server asks us to slow down (HTTP 429).",
-        ),
-    ]
-
-
-def _build_retroachievements_config_dict(*, enabled: bool, base_url: str,
-                                         console_name: str, timeout_seconds: str,
-                                         max_response_bytes: str, cache_ttl: str,
-                                         respect_rate_limit: str) -> dict:
-    """Build a typed ``[retroachievements]`` TOML table (mirrors RaConfig)."""
-    return {
-        "enabled": enabled,
-        "base_url": base_url or "https://retroachievements.org",
-        "console_name": console_name or "amiga",
-        "timeout_seconds": float(timeout_seconds or 10.0),
-        "max_response_bytes": int(max_response_bytes or 2_000_000),
-        "cache_ttl": float(cache_ttl or 86400),
-        "respect_rate_limit": (respect_rate_limit == "true" or respect_rate_limit is True),
-    }
-
-
-class RetroAchievementsProvider(Provider):
-    """Generic GUI adapter over the core RetroAchievements identity resolver.
-
-    OPTIONAL and DISABLED by default. Hash-first: the group's first non-special
-    disk is MD5-hashed locally (read-only) and matched against the RA game
-    list's public ``Hashes`` array. Requires an RA API key stored under
-    ``retroachievements_api_key`` in the SecretStore -- never embedded in
-    config or code.
-    """
-
-    def __init__(self) -> None:
-        self.metadata = ProviderMetadata(
-            id="retroachievements",
-            name="RetroAchievements",
-            description=(
-                "Optional metadata/artwork provider (GH-13). Hash-first identity "
-                "via the RetroAchievements Web API (exact MD5, confidence 1.0). "
-                "Disabled by default; requires an RA API key."
-            ),
-            auth_required="required",
-            fields=_retroachievements_field_defaults(),
-            capabilities=[
-                ProviderCapability.ONLINE_LOOKUP,
-                ProviderCapability.HASH_RESOLUTION,
-                ProviderCapability.METADATA,
-                ProviderCapability.ARTWORK,
-            ],
-            requires_secret=True,
-        )
-        self._enabled = False
-        self._base_url = "https://retroachievements.org"
-        self._console_name = "amiga"
-        self._timeout_seconds = "10.0"
-        self._max_response_bytes = "2000000"
-        self._cache_ttl = "86400"
-        self._respect_rate_limit = "true"
-        self._lock = threading.RLock()
-
-    # --- config ---------------------------------------------------------------
-    def is_configured(self) -> bool:
-        with self._lock:
-            return bool(self._base_url and self._base_url.strip())
-
-    def enabled(self) -> bool:
-        with self._lock:
-            return self._enabled and self.is_configured()
-
-    def set_field(self, key: str, value: str) -> None:
-        with self._lock:
-            if key == "base_url":
-                self._base_url = (value or "").rstrip("/")
-            elif key == "console_name":
-                self._console_name = (value or "").strip().lower()
-            elif key == "timeout_seconds":
-                self._timeout_seconds = value
-            elif key == "max_response_bytes":
-                self._max_response_bytes = value
-            elif key == "cache_ttl":
-                self._cache_ttl = value
-            elif key == "respect_rate_limit":
-                self._respect_rate_limit = value
-            elif key == "enabled":
-                self._enabled = (value == "true" or value is True)
-            else:
-                raise KeyError(f"unknown retroachievements field: {key}")
-
-    def set_enabled(self, enabled: bool) -> None:
-        with self._lock:
-            self._enabled = bool(enabled)
-
-    def to_config_dict(self) -> dict:
-        with self._lock:
-            return _build_retroachievements_config_dict(
-                enabled=self._enabled,
-                base_url=self._base_url,
-                console_name=self._console_name,
-                timeout_seconds=self._timeout_seconds,
-                max_response_bytes=self._max_response_bytes,
-                cache_ttl=self._cache_ttl,
-                respect_rate_limit=self._respect_rate_limit,
-            )
-
-    # --- status ---------------------------------------------------------------
-    def status(self) -> ProviderStatus:
-        with self._lock:
-            if not self._enabled:
-                return ProviderStatus(ok=True, message="Turned off", configured=self.is_configured())
-            if not self.is_configured():
-                return ProviderStatus(ok=False, message="Not set up yet — enter the server address below", configured=False)
-            return ProviderStatus(ok=True, message="Ready", configured=True)
-
-    def test_connection(self) -> ProviderStatus:
-        # Real fetch is performed lazily by the core provider under SSRF guards.
-        status = self.status()
-        if status.ok and status.message == "Ready":
-            # Explicit success wording for connection check (GH-42)
-            return ProviderStatus(ok=True, message="Connection successful", configured=status.configured, reachable=status.reachable)
-        return status
-
-    # --- secrets --------------------------------------------------------------
-    def add_credentials(self, secret_store: Any, **secrets: str) -> None:
-        api_key = secrets.get("api_key")
-        if api_key:
-            secret_store.set_secret("retroachievements_api_key", api_key)
-
-    def remove_credentials(self, secret_store: Any) -> None:
-        secret_store.delete_secret("retroachievements_api_key")
-
-
-# --- Lemon Amiga provider adapter ---------------------------------------
-# Metadata-only provider. Disabled by default. No credentials required.
-
-
-def _lemonamiga_field_defaults() -> list[ProviderField]:
-    return [
-        ProviderField(
-            key="enabled",
-            label="Enable Lemon Amiga provider",
-            default="false",
-            help_text=(
-                "Opt-in metadata-only provider (disabled by default). "
-                "Parses factual metadata from lemonamiga.com. "
-                "No images are downloaded in the base integration."
-            ),
-        ),
-        ProviderField(
-            key="timeout_seconds",
-            label="Time limit per request (seconds)",
-            default="20.0",
-            help_text="How long to wait for the server before giving up (capped at 30 seconds).",
-        ),
-        ProviderField(
-            key="max_response_bytes",
-            label="Maximum response size (bytes)",
-            default="3000000",
-            help_text="Refuse to read more than this from the server (protection against oversized replies).",
-        ),
-        ProviderField(
-            key="cache_ttl",
-            label="Cache TTL (seconds)",
-            default="86400",
-            help_text="How long to cache successful lookups (24h default; <= 0 disables).",
-        ),
-    ]
-
-
-def _build_lemonamiga_config_dict(*, enabled: bool, timeout_seconds: str,
-                                   max_response_bytes: str, cache_ttl: str) -> dict:
-    """Build a typed ``[lemonamiga]`` TOML table (mirrors LemonAmigaConfig)."""
-    return {
-        "enabled": enabled,
-        "timeout_seconds": float(timeout_seconds or 20.0),
-        "max_response_bytes": int(max_response_bytes or 3_000_000),
-        "cache_ttl": float(cache_ttl or 86400.0),
-    }
-
-
-class LemonAmigaProvider(Provider):
-    """Generic GUI adapter over the core Lemon Amiga metadata resolver.
-
-    OPTIONAL and DISABLED by default. The live Lemon Amiga lookup is
-    unauthenticated (no API key needed), so ``auth_required`` is
-    ``none``. Metadata-only: no image downloading.
-    """
-
-    def __init__(self) -> None:
-        self.metadata = ProviderMetadata(
-            id="lemon-amiga",
-            name="Lemon Amiga",
-            description=(
-                "Optional Amiga-specific metadata lookup via Lemon Amiga "
-                "(lemonamiga.com). Unauthenticated; disabled by default. "
-                "Metadata only — no images are downloaded."
-            ),
-            auth_required="none",
-            fields=_lemonamiga_field_defaults(),
-            capabilities=[
-                ProviderCapability.ONLINE_LOOKUP,
-                ProviderCapability.METADATA,
-            ],
-            requires_secret=False,
-        )
-        self._enabled = False
-        self._timeout_seconds = "20.0"
-        self._max_response_bytes = "3000000"
-        self._cache_ttl = "86400"
-        self._lock = threading.RLock()
-
-    # --- config --------------------------------------------------------------
-    def is_configured(self) -> bool:
-        with self._lock:
-            return True
-
-    def enabled(self) -> bool:
-        with self._lock:
-            return self._enabled
-
-    def set_field(self, key: str, value: str) -> None:
-        with self._lock:
-            if key == "timeout_seconds":
-                self._timeout_seconds = value
-            elif key == "max_response_bytes":
-                self._max_response_bytes = value
-            elif key == "cache_ttl":
-                self._cache_ttl = value
-            elif key == "enabled":
-                self._enabled = (value == "true" or value is True)
-            else:
-                raise KeyError(f"unknown lemonamiga field: {key}")
-
-    def set_enabled(self, enabled: bool) -> None:
-        with self._lock:
-            self._enabled = bool(enabled)
-
-    def to_config_dict(self) -> dict:
-        with self._lock:
-            return _build_lemonamiga_config_dict(
-                enabled=self._enabled,
-                timeout_seconds=self._timeout_seconds,
-                max_response_bytes=self._max_response_bytes,
-                cache_ttl=self._cache_ttl,
-            )
-
-    # --- status ---------------------------------------------------------------
-    def status(self) -> ProviderStatus:
-        with self._lock:
-            if not self._enabled:
-                return ProviderStatus(ok=True, message="Turned off", configured=True)
-            return ProviderStatus(ok=True, message="Ready", configured=True)
-
-    def test_connection(self) -> ProviderStatus:
-        status = self.status()
-        if status.ok and status.message == "Ready":
-            return ProviderStatus(ok=True, message="Connection successful", configured=status.configured)
-        return status
-
-    # --- secrets --------------------------------------------------------------
-    def add_credentials(self, secret_store: Any, **secrets: str) -> None:
-        raise NotImplementedError("lemon-amiga has no credentials")
-
-    def remove_credentials(self, secret_store: Any) -> None:
-        raise NotImplementedError("lemon-amiga has no credentials")
-
-
-# --- Hall of Light provider adapter -------------------------------------
-# Unauthenticated provider. Enabled by default (backward compatible).
-# No credentials required.
-
-
-def _halloflight_field_defaults() -> list[ProviderField]:
-    return [
-        ProviderField(
-            key="enabled",
-            label="Enable Hall of Light provider",
-            default="true",
-            help_text=(
-                "Hall of Light (amiga.abime.net) metadata lookup. "
-                "Enabled by default (backward compatible). "
-                "Metadata only — no images are downloaded."
-            ),
-        ),
-        ProviderField(
-            key="timeout_seconds",
-            label="Time limit per request (seconds)",
-            default="20.0",
-            help_text="How long to wait for the server before giving up.",
-        ),
-        ProviderField(
-            key="max_response_bytes",
-            label="Maximum response size (bytes)",
-            default="3000000",
-            help_text="Refuse to read more than this from the server.",
-        ),
-        ProviderField(
-            key="cache_ttl",
-            label="Cache TTL (seconds)",
-            default="86400",
-            help_text="How long to cache successful lookups (24h default).",
-        ),
-    ]
-
-
-def _build_halloflight_config_dict(*, enabled: bool, timeout_seconds: str,
-                                     max_response_bytes: str, cache_ttl: str) -> dict:
-    """Build a typed ``[hall-of-light]`` TOML table (mirrors HallOfLightConfig)."""
-    return {
-        "enabled": enabled,
-        "timeout_seconds": float(timeout_seconds or 20.0),
-        "max_response_bytes": int(max_response_bytes or 3_000_000),
-        "cache_ttl": float(cache_ttl or 86400.0),
-    }
-
-
-class HallOfLightProvider(Provider):
-    """Generic GUI adapter over the core Hall of Light metadata resolver.
-
-    Enabled by default (backward compatible). The live Hall of Light
-    lookup is unauthenticated (no API key needed), so ``auth_required``
-    is ``none``. Metadata-only: no images are downloaded.
-    """
-
-    def __init__(self) -> None:
-        self.metadata = ProviderMetadata(
-            id="hall-of-light",
-            name="Hall of Light",
-            description=(
-                "Optional Amiga metadata lookup via Hall of Light "
-                "(amiga.abime.net). Unauthenticated; enabled by default. "
-                "Metadata only — no images are downloaded."
-            ),
-            auth_required="none",
-            fields=_halloflight_field_defaults(),
-            capabilities=[
-                ProviderCapability.ONLINE_LOOKUP,
-                ProviderCapability.METADATA,
-            ],
-            requires_secret=False,
-        )
-        self._enabled = True
-        self._timeout_seconds = "20.0"
-        self._max_response_bytes = "3000000"
-        self._cache_ttl = "86400"
-        self._lock = threading.RLock()
-
-    # --- config --------------------------------------------------------------
-    def is_configured(self) -> bool:
-        with self._lock:
-            return True
-
-    def enabled(self) -> bool:
-        with self._lock:
-            return self._enabled
-
-    def set_field(self, key: str, value: str) -> None:
-        with self._lock:
-            if key == "timeout_seconds":
-                self._timeout_seconds = value
-            elif key == "max_response_bytes":
-                self._max_response_bytes = value
-            elif key == "cache_ttl":
-                self._cache_ttl = value
-            elif key == "enabled":
-                self._enabled = (value == "true" or value is True)
-            else:
-                raise KeyError(f"unknown hall-of-light field: {key}")
-
-    def set_enabled(self, enabled: bool) -> None:
-        with self._lock:
-            self._enabled = bool(enabled)
-
-    def to_config_dict(self) -> dict:
-        with self._lock:
-            return _build_halloflight_config_dict(
-                enabled=self._enabled,
-                timeout_seconds=self._timeout_seconds,
-                max_response_bytes=self._max_response_bytes,
-                cache_ttl=self._cache_ttl,
-            )
-
-    # --- status --------------------------------------------------------------
-    def status(self) -> ProviderStatus:
-        with self._lock:
-            if not self._enabled:
-                return ProviderStatus(ok=True, message="Turned off", configured=True)
-            return ProviderStatus(ok=True, message="Ready", configured=True)
-
-    def test_connection(self) -> ProviderStatus:
-        status = self.status()
-        if status.ok and status.message == "Ready":
-            return ProviderStatus(ok=True, message="Connection successful", configured=status.configured)
-        return status
-
-    # --- secrets --------------------------------------------------------------
-    def add_credentials(self, secret_store: Any, **secrets: str) -> None:
-        raise NotImplementedError("hall-of-light has no credentials")
-
-    def remove_credentials(self, secret_store: Any) -> None:
-        raise NotImplementedError("hall-of-light has no credentials")
-
-
 # --- Registry ----------------------------------------------------------------
 
 
@@ -1375,13 +676,12 @@ class ProviderRegistry:
 
 
 def default_registry() -> ProviderRegistry:
-    """Return a registry pre-loaded with the core online resolvers."""
+    """Return a registry pre-loaded with the supported online providers.
+
+    Exactly two providers remain: Wikipedia (primary, enabled by default) and
+    ScreenScraper (opt-in, pending developer API access).
+    """
     reg = ProviderRegistry()
-    reg.register(PlaymatchProvider())
-    reg.register(HasheousProvider())
-    reg.register(IgdbProvider())
+    reg.register(WikipediaProvider())
     reg.register(ScreenScraperProvider())
-    reg.register(RetroAchievementsProvider())
-    reg.register(LemonAmigaProvider())
-    reg.register(HallOfLightProvider())
     return reg

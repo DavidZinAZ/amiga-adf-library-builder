@@ -22,7 +22,7 @@ The authoritative mapping (from ``cli.py``):
     --selection-manifest     -> selection_manifest_path
 
 The CLI additionally passes ``--config`` as the provider-config file (which is
-also where ``[playmatch]`` / ``[hasheous]`` live); the GUI passes the same file
+also where ``[wikipedia]`` / ``[screenscraper]`` live); the GUI passes the same file
 path, or an explicit provider config path, to ``run_pipeline``.
 """
 from __future__ import annotations
@@ -80,8 +80,9 @@ class GuiState:
     progressive_prompt_callback: Optional[Callable[[str, str], bool]] = field(default=None)
 
     # --- provider config -----------------------------------------------------
-    # Optional explicit provider-config TOML path (where [playmatch]/[hasheous]
-    # live). When empty, the GUI's own config file is used (same as ``--config``
+    # Optional explicit provider-config TOML path (where [wikipedia] and
+    # [screenscraper] live). When empty, the GUI's own config file is used (same
+    # as ``--config``
     # in the CLI). Secrets are NOT here.
     provider_config_path: str = ""
 
@@ -392,8 +393,7 @@ def build_pipeline_kwargs(
         # (GH-173) RTFM config path resolved from GUI settings;
         # falls back to discovered default config (CLI-only [rtfm]).
         rtfm_config_path=rtfm_config_path,
-        playmatch_config_path=provider_cfg,
-        hasheous_config_path=provider_cfg,
+        wikipedia_config_path=provider_cfg,
         retrokit_config_path=rk_config_path,
         # (GH-102) Progressive JPEG conversion policy.
         convert_progressive_jpeg=str(getattr(state, "convert_progressive_jpeg", "never")),

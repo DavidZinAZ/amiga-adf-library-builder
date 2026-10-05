@@ -1,24 +1,16 @@
-"""Guard GH-183 provider parsing and identity boundaries without network access."""
+"""Guard provider-agnostic metadata identity boundaries without network access.
+
+The original file also asserted Hall of Light parser details. That provider has
+been removed, so those assertions are gone; the sequel-rejection and
+numeral-equivalence guards below are provider-INDEPENDENT
+(``validate_metadata_relevance`` is shared by every online lookup) and are kept
+because they still protect the accepted/rejected contract.
+"""
 import pytest
 
 from amiga_adf_library_builder.metadata import (
-    MetadataRecord, _HallOfLightDetailParser, validate_metadata_relevance,
+    MetadataRecord, validate_metadata_relevance,
 )
-
-
-@pytest.mark.parametrize("href", [
-    "/games/view/hacker", "/doc/hacker/763", "/cheat/hacker/480",
-])
-def test_hol_links_do_not_require_lemon_document_parser_state(href):
-    parser = _HallOfLightDetailParser()
-    parser.feed(
-        '<h1>Hacker</h1>'
-        '<dl><dt>Platform</dt><dd>Amiga</dd></dl>'
-        f'<div class="docs"><a href="{href}">Link</a></div>'
-    )
-    assert parser.canonical_title == "Hacker"
-    assert parser.platforms == ["Amiga"]
-    assert parser.game_id == ("hacker" if href.startswith("/games/view/") else "")
 
 
 @pytest.mark.parametrize("base,sequel", [

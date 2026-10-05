@@ -111,9 +111,9 @@ class TestOnlineMetadataNormalization:
             platforms=["amiga"],
         )
         provider_results = [
-            {"provider": "hall-of-light", "canonical_title": "Wrong Game", "category": "rejected",
+            {"provider": "wikipedia", "canonical_title": "Wrong Game", "category": "rejected",
              "confidence": 0.1, "reason": "different_game", "evidence": []},
-            {"provider": "lemon-amiga", "canonical_title": "", "category": "not_found",
+            {"provider": "screenscraper", "canonical_title": "", "category": "not_found",
              "confidence": 0.0, "reason": "request_error", "evidence": ["request_error"]},
             {"provider": "wikipedia", "canonical_title": metadata.canonical_title, "category": "accepted",
              "confidence": 1.0, "reason": "exact_identity", "evidence": ["canonical_match"]},
@@ -141,9 +141,11 @@ class TestOnlineMetadataNormalization:
             release_key=f"{requested}|standard",
         )
         outcomes = {attempt.provider: attempt.outcome for attempt in attempts}
-        assert outcomes["hall-of-light"] == "no_match"
-        assert outcomes["lemon-amiga"] == "error"
+        # wikipedia contributes both a rejected candidate and an accepted one;
+        # the roll-up resolves the provider to its accepted outcome.
         assert outcomes["wikipedia"] == "matched"
+        # screenscraper carries reason=request_error -> provider error.
+        assert outcomes["screenscraper"] == "error"
 
     def test_packaged_pipeline_metadata_fixtures(self, monkeypatch) -> None:
         fixtures = [
@@ -156,19 +158,23 @@ class TestOnlineMetadataNormalization:
             ("UFO Enemy Unknown", "U.F.O.: Enemy Unknown"),
         ]
 
-        def hall_of_light_fixture(query: str, **kwargs):
+        # NOTE: this fixture previously monkeypatched ``hall_of_light_lookup``.
+        # That provider has been removed, so the same end-to-end pipeline
+        # normalisation coverage now runs through ``wikipedia_lookup``, which is
+        # the primary online provider.
+        def wikipedia_fixture(query: str, **kwargs):
             query_key = query.casefold()
             for requested, candidate in fixtures:
                 if query_key.startswith(requested.casefold()):
                     return MetadataRecord(
                         canonical_title=candidate,
-                        provider="hall-of-light",
+                        provider="wikipedia",
                         confidence=0.95,
                         platforms=["Amiga"],
                     )
             return None
 
-        monkeypatch.setattr(metadata_module, "hall_of_light_lookup", hall_of_light_fixture)
+        monkeypatch.setattr(metadata_module, "wikipedia_lookup", wikipedia_fixture)
         with tempfile.TemporaryDirectory() as tmp:
             library_root = Path(tmp) / "library"
             for directory in ("data", "catalog", "original"):
@@ -181,12 +187,12 @@ class TestOnlineMetadataNormalization:
                 cfg=cfg,
                 run=RunConfig(online=True, include_artwork=False),
             )
-            hol = next(
+            wiki = next(
                 provider for provider in result["provider_diagnostics"]["providers"]
-                if provider["provider"] == "hall-of-light"
+                if provider["provider"] == "wikipedia"
             )
-            assert hol["attempts"] == len(fixtures)
-            assert hol["matched"] == len(fixtures)
+            assert wiki["attempts"] == len(fixtures)
+            assert wiki["matched"] == len(fixtures)
             assert len(result["per_group"]) == len(fixtures)
             assert all(
                 any(event["category"] == "metadata_provider_attempt"

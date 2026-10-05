@@ -383,56 +383,6 @@ def load_local_media_config(config: Optional[str] = None) -> dict:
         return {}
     return dict(lm)
 
-
-def load_playmatch_config(config: Optional[str] = None) -> dict:
-    """Return the ``[playmatch]`` TOML table from the resolved config file.
-
-    Mirrors :func:`load_local_media_config` EXACTLY: same precedence chain
-    (explicit ``config`` > env > XDG > system), returns ``{}`` when no config
-    file is found or no ``[playmatch]`` table is present. ``playmatch.py``
-    provides the typed :class:`~amiga_adf_library_builder.playmatch.PlaymatchConfig`
-    and the provider; this helper is the paths-layer entry point so the
-    precedence logic stays in one module.
-
-    The Playmatch provider is OPTIONAL and DISABLED by default; ``{}`` (no
-    table) means disabled, so nothing in the pipeline changes.
-    """
-    path = _discover_config_file(config)
-    if path is None:
-        return {}
-    data = _read_config_file(path)
-    pm = data.get("playmatch")
-    if not isinstance(pm, dict):
-        return {}
-    return dict(pm)
-
-
-def load_hasheous_config(config: Optional[str] = None) -> dict:
-    """Return the ``[hasheous]`` TOML table from the resolved config file.
-
-    Mirrors :func:`load_playmatch_config` EXACTLY: same precedence chain
-    (explicit ``config`` > env > XDG > system), returns ``{}`` when no config
-    file is found or no ``[hasheous]`` table is present. ``hasheous.py``
-    provides the typed :class:`~amiga_adf_library_builder.hasheous.HasheousConfig`
-    and the provider; this helper is the paths-layer entry point so the
-    precedence logic stays in one module.
-
-    The Hasheous provider is OPTIONAL and DISABLED by default; ``{}`` (no
-    table) means disabled, so nothing in the pipeline changes. The live Hasheous
-    lookup is platform-scoped and requires a self-hosted/compatible endpoint;
-    the bundled provider is config-driven and disabled by default (see issue
-    #12 governance).
-    """
-    path = _discover_config_file(config)
-    if path is None:
-        return {}
-    data = _read_config_file(path)
-    hs = data.get("hasheous")
-    if not isinstance(hs, dict):
-        return {}
-    return dict(hs)
-
-
 def load_rtfm_config(config: Optional[str] = None) -> dict:
     """Return the ``[rtfm]`` TOML table from the resolved config file.
 
@@ -455,37 +405,35 @@ def load_rtfm_config(config: Optional[str] = None) -> dict:
         return {}
     return dict(rc)
 
+def load_wikipedia_config(config: Optional[str] = None) -> dict:
+    """Return the ``[wikipedia]`` TOML table from the resolved config file.
 
-def load_igdb_config(config: Optional[str] = None) -> dict:
-    """Return the ``[igdb]`` TOML table from the resolved config file.
-
-    Mirrors :func:`load_playmatch_config` EXACTLY: same precedence chain
+    Mirrors :func:`load_screenscraper_config` exactly: same precedence chain
     (explicit ``config`` > env > XDG > system), returns ``{}`` when no config
-    file is found or no ``[igdb]`` table is present. ``igdb.py`` provides the
-    typed :class:`~amiga_adf_library_builder.igdb.IgdbConfig` and the
-    provider; this helper is the paths-layer entry point so the precedence logic
-    stays in one module.
+    file is found or no ``[wikipedia]`` table is present. An absent table means
+    "use the documented defaults", so Wikipedia stays enabled.
 
-    The IGDB provider is OPTIONAL and DISABLED by default; ``{}`` (no
-    table) means disabled, so nothing in the pipeline changes. Credentials
-    (client_id, client_secret) are NEVER in config files -- they come from
-    the SecretStore / environment only.
+    Obsolete tables left behind by a previous install (``[hall-of-light]``,
+    ``[lemonamiga]``, ``[playmatch]``, ``[igdb]``, ``[retroachievements]``,
+    ``[hasheous]``) are simply never read. They are ignored rather than
+    rejected, so an existing portable configuration upgrades without a crash
+    and without resetting any unrelated setting.
     """
     path = _discover_config_file(config)
     if path is None:
         return {}
     data = _read_config_file(path)
-    igdb = data.get("igdb")
-    if not isinstance(igdb, dict):
+    wiki = data.get("wikipedia")
+    if not isinstance(wiki, dict):
         return {}
-    return dict(igdb)
+    return dict(wiki)
 
 
 def load_screenscraper_config(config: Optional[str] = None) -> dict:
     """Return the ``[screenscraper]`` TOML table from the resolved config file.
 
-    Mirrors :func:`load_playmatch_config` EXACTLY: same precedence chain
-    (explicit ``config`` > env > XDG > system), returns ``{}`` when no config
+    Same precedence chain as :func:`load_wikipedia_config` (explicit ``config``
+    > env > XDG > system), returns ``{}`` when no config
     file is found or no ``[screenscraper]`` table is present. ``screenscraper.py``
     provides the typed :class:`~amiga_adf_library_builder.screenscraper.ScreenScraperConfig`
     and the provider; this helper is the paths-layer entry point so the
@@ -505,38 +453,12 @@ def load_screenscraper_config(config: Optional[str] = None) -> dict:
         return {}
     return dict(ss)
 
-
-def load_retroachievements_config(config: Optional[str] = None) -> dict:
-    """Return the ``[retroachievements]`` TOML table from the resolved config file.
-
-    Mirrors :func:`load_screenscraper_config` EXACTLY: same precedence chain
-    (explicit ``config`` > env > XDG > system), returns ``{}`` when no config
-    file is found or no ``[retroachievements]`` table is present.
-    ``retroachievements.py`` provides the typed :class:`~amiga_adf_library_builder.retroachievements.RaConfig`
-    and the provider; this helper is the paths-layer entry point so the
-    precedence logic stays in one module.
-
-    The RetroAchievements provider is OPTIONAL and DISABLED by default; ``{}``
-    (no table) means disabled, so nothing in the pipeline changes. The API key
-    is NEVER in config files -- it comes from the SecretStore / environment
-    (``RETROACHIEVEMENTS_API_KEY``) only.
-    """
-    path = _discover_config_file(config)
-    if path is None:
-        return {}
-    data = _read_config_file(path)
-    ra = data.get("retroachievements")
-    if not isinstance(ra, dict):
-        return {}
-    return dict(ra)
-
-
 def load_retrokit_config(config: Optional[str] = None) -> dict:
     """Return the ``[retrokit_manuals]`` TOML table from the resolved config file.
 
-    Mirrors :func:`load_playmatch_config` EXACTLY: same precedence chain
-    (explicit ``config`` > env > XDG > system), returns ``{}`` when no config
-    file is found or no ``[retrokit_manuals]`` table is present.
+    Same precedence chain as :func:`load_wikipedia_config` (explicit ``config``
+    > env > XDG > system), returns ``{}`` when no config file is found or no
+    ``[retrokit_manuals]`` table is present.
     ``retrokit.py`` provides the typed
     :class:`~amiga_adf_library_builder.retrokit.RetroKitConfig` and the
     provider; this helper is the paths-layer entry point so the precedence
@@ -555,29 +477,6 @@ def load_retrokit_config(config: Optional[str] = None) -> dict:
     if not isinstance(rk, dict):
         return {}
     return dict(rk)
-
-
-def load_hall_of_light_config(config: Optional[str] = None) -> dict:
-    """Return the ``[hall-of-light]`` TOML table from the resolved config file.
-
-    Mirrors :func:`load_playmatch_config` EXACTLY: same precedence chain
-    (explicit ``config`` > env > XDG > system), returns ``{}`` when no config
-    file is found or no ``[hall-of-light]`` table is present.
-    ``metadata.py`` provides the typed :class:`~amiga_adf_library_builder.metadata.HallOfLightConfig`;
-    this helper is the paths-layer entry point so the precedence logic stays in one module.
-
-    The Hall of Light provider is OPTIONAL and ENABLED by default;
-    ``{}`` (no table) means enabled with default settings (backward compatible).
-    """
-    path = _discover_config_file(config)
-    if path is None:
-        return {}
-    data = _read_config_file(path)
-    hol = data.get("hall-of-light")
-    if not isinstance(hol, dict):
-        return {}
-    return dict(hol)
-
 
 # --- Discovery + precedence ---------------------------------------------------
 

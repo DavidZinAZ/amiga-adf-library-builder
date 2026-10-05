@@ -223,13 +223,8 @@ Providers
 Examples:
 
 ```text
-Hall of Light
-Lemon Amiga
-IGDB
+Wikipedia
 ScreenScraper
-RetroAchievements
-Playmatch
-Hasheous
 ```
 
 A live provider may contact a remote API or website.
@@ -249,109 +244,6 @@ Examples:
 - local indexed metadata folders
 
 Metadata Sources are indexed local data, not live web providers.
-
----
-
-# 9. Hall of Light
-
-Provider name:
-
-```text
-Hall of Light
-```
-
-Provider ID:
-
-```text
-hall-of-light
-```
-
-Current behavior:
-
-- enabled by default;
-- no credentials required;
-- Amiga-specific metadata lookup;
-- relevance validated;
-- can parse Hall of Light game pages;
-- participates in the main lookup pipeline.
-
-Hall of Light is one of the strongest Amiga-specific sources in the base configuration.
-
-The current GUI adapter describes it as metadata-only, while the lower metadata layer can also discover artwork from approved Hall of Light pages when the artwork workflow uses those pages.
-
-That distinction matters: the provider panel's advertised capability is not necessarily the entire artwork-discovery machinery available elsewhere in the core.
-
----
-
-# 10. Lemon Amiga
-
-Provider name:
-
-```text
-Lemon Amiga
-```
-
-Provider ID:
-
-```text
-lemon-amiga
-```
-
-Current behavior:
-
-- disabled by default;
-- no credentials required;
-- Amiga-specific metadata lookup;
-- metadata-only in the GUI provider adapter;
-- also used by typed-document/manual workflows.
-
-Lemon Amiga can expose game metadata and typed documents such as:
-
-- manuals;
-- instructions;
-- cheats/hints;
-- other document links.
-
-The Manual Lookup tab contains a dedicated:
-
-```text
-Typed-document search (Lemon Amiga)
-```
-
-workflow.
-
----
-
-# 11. IGDB
-
-Provider name:
-
-```text
-IGDB
-```
-
-Current capabilities:
-
-- metadata;
-- artwork;
-- online title lookup.
-
-Requirements:
-
-- Twitch OAuth client ID;
-- Twitch OAuth client secret.
-
-The provider is disabled by default.
-
-Credentials should be stored using the GUI's:
-
-```text
-Set credentials…
-```
-
-workflow or supported environment variables.
-
-Do not put client secrets into public configuration files.
 
 ---
 
@@ -403,84 +295,6 @@ The provider also supports:
 
 ---
 
-# 13. RetroAchievements
-
-Provider name:
-
-```text
-RetroAchievements
-```
-
-Capabilities:
-
-- hash-first identity;
-- metadata;
-- artwork.
-
-The provider hashes the relevant disk locally and compares it against the public RetroAchievements hash set.
-
-An exact hash match is treated as high-confidence identity evidence.
-
-Requires:
-
-```text
-RetroAchievements API key
-```
-
-Disabled by default.
-
----
-
-# 14. Playmatch
-
-Provider name:
-
-```text
-Playmatch
-```
-
-Purpose:
-
-- ROM-hash identity correlation;
-- metadata correlation.
-
-The intended privacy model is to transmit only limited public identity material such as:
-
-```text
-SHA-256
-canonical title
-```
-
-rather than local filesystem paths or collection structure.
-
-Disabled by default.
-
-Playmatch is useful when you operate a compatible resolver service.
-
----
-
-# 15. Hasheous
-
-Provider name:
-
-```text
-Hasheous
-```
-
-Purpose:
-
-- ROM-hash identity;
-- external correlation IDs;
-- metadata correlation.
-
-It is disabled by default.
-
-The bundled configuration expects a configured compatible endpoint rather than assuming one universal public endpoint.
-
-No credential is required for the supported subset in the current design.
-
----
-
 # 16. MobyGames
 
 MobyGames exists in the core metadata/provider architecture and has dedicated documentation/configuration, but it is not currently surfaced in the same generic GUI provider registry shown in v0.2.26.
@@ -511,9 +325,8 @@ The API key is expected through an environment variable rather than written dire
 
 # 17. Wikipedia
 
-Wikipedia is part of the lower-level metadata fallback machinery.
-
-It is not presented as one of the main configurable GUI provider panels.
+Wikipedia is the **primary supported online metadata provider**. It appears in
+the GUI Providers section, is enabled by default, and needs no account or key.
 
 It can supply:
 
@@ -523,7 +336,33 @@ It can supply:
 
 ADF Builder applies relevance validation before accepting online results.
 
-Wikipedia should be viewed as a fallback/general source rather than the primary authority for exact Amiga release identity.
+## 17.1 Wikipedia settings
+
+Configure under:
+
+```text
+Providers -> Wikipedia
+```
+
+or in the `[wikipedia]` table of the configuration file. These settings are the
+effective runtime policy, not decoration: they are applied to the shared
+request gate that every Wikipedia request in a run passes through.
+
+| Setting | Default | Range | Meaning |
+|---|---|---|---|
+| Enabled | on | — | Look up metadata and artwork on Wikipedia |
+| Minimum time between requests | 1.0 s | 0.5–10.0 s | Floor between two outbound requests. Raising it reduces HTTP 429 rate limiting. |
+| Retry when Wikipedia asks us to slow down | on | — | On HTTP 429, wait and retry instead of dropping the release |
+| Maximum retries | 2 | 0–10 | Retries **after** the first attempt |
+| Follow the server's requested wait | on | — | Obey a `Retry-After` instruction instead of guessing |
+| Maximum wait when the server asks | 60 s | 0–600 s | Hard cap on any server-requested pause |
+| Reuse previously downloaded lookups | on | — | Avoid re-requesting pages already downloaded |
+
+A corrupt or out-of-range value falls back to the default rather than failing
+the run.
+
+At the start of an online run the effective values are logged, so the run log
+always shows what was actually enforced.
 
 ---
 
@@ -666,15 +505,15 @@ No credentials are required.
 
 ---
 
-# 24. Typed-document search
+# 24. Document override
 
-Manual Lookup includes:
+Manual Lookup includes a **Document override** table.
 
-```text
-Typed-document search (Lemon Amiga)
-```
-
-This is a specialized document workflow rather than ordinary game metadata search.
+Documents already present in the library can be associated with a release by
+hand, then persisted with **Apply Selection**. Online typed-document DISCOVERY
+is not offered: it was provided by Lemon Amiga, which is no longer a supported
+provider. This is a document association workflow rather than ordinary game
+metadata search.
 
 Typical fields include:
 
@@ -750,8 +589,7 @@ may come from:
 
 ```text
 parsed filename
-Hall of Light
-Lemon Amiga
+Wikipedia
 DAT source
 manual override
 ```
@@ -895,13 +733,6 @@ Credentialed providers must keep secrets separate from ordinary config.
 
 Examples:
 
-### IGDB
-
-```text
-IGDB_CLIENT_ID
-IGDB_CLIENT_SECRET
-```
-
 ### ScreenScraper
 
 ```text
@@ -910,12 +741,6 @@ SCREENSCRAPER_DEV_PASSWORD
 SCREENSCRAPER_SOFTNAME
 SCREENSCRAPER_SSID
 SCREENSCRAPER_SSPASSWORD
-```
-
-### RetroAchievements
-
-```text
-RETROACHIEVEMENTS_API_KEY
 ```
 
 ### MobyGames
@@ -1014,16 +839,7 @@ Always visually verify suspicious titles.
 
 Hash-based identity is generally stronger than title matching.
 
-Providers such as:
-
-```text
-ScreenScraper
-RetroAchievements
-Playmatch
-Hasheous
-```
-
-can use hashes or external hash correlation.
+ScreenScraper can use ROM hashes for hash-first identity.
 
 Advantages:
 
@@ -1116,13 +932,9 @@ This helps keep export-facing files small while retaining machine-readable/human
 For a typical Amiga user:
 
 ```text
-1. Hall of Light
-2. Lemon Amiga if desired
-3. Local LaunchBox/media sources
-4. ScreenScraper if credentials are available
-5. IGDB as supplemental metadata/artwork
-6. RetroAchievements for hash-supported identity
-7. Specialized hash resolvers only if you operate/use them
+1. Wikipedia (enabled by default)
+2. Local LaunchBox/media sources
+3. ScreenScraper once developer credentials are available
 ```
 
 Do not enable every source by default.
@@ -1162,52 +974,6 @@ Check:
 - Diagnostics log.
 
 Try Alternate Search with a clean canonical title.
-
----
-
-# 46. Troubleshooting: Hall of Light finds the wrong sequel
-
-Use:
-
-```text
-Unified Lookup
-Manual Lookup
-Explain Match / Provenance
-```
-
-Verify the exact canonical title and provider page.
-
-Do not Accept Match until the sequel identity is correct.
-
----
-
-# 47. Troubleshooting: Lemon Amiga manual exists but is not attached
-
-Check:
-
-```text
-Manual Lookup
-  -> Typed-document search (Lemon Amiga)
-```
-
-Search the clean title.
-
-Inspect the typed-document results.
-
-Select the correct manual.
-
-Click:
-
-```text
-Apply Selection
-```
-
-Then verify:
-
-```text
-Preview & Curation
-  -> Missing RTFM
-```
 
 ---
 
@@ -1346,15 +1112,9 @@ This is useful for preservation environments and repeatable library builds.
 
 | Source | Type | Credentials | Metadata | Artwork | Manuals | Hash identity | Default |
 |---|---|---|---|---|---|---|---|
-| Hall of Light | Online Amiga provider | No | Yes | Core can discover | No | No | Enabled |
-| Lemon Amiga | Online Amiga provider | No | Yes | Limited/core discovery | Typed docs | No | Disabled |
-| IGDB | Online provider | Twitch OAuth | Yes | Yes | No | No | Disabled |
+| Wikipedia | Primary online provider | No | Yes | Yes | No | No | Enabled |
 | ScreenScraper | Online provider | Developer credentials | Yes | Yes | Yes | Yes | Disabled |
-| RetroAchievements | Online provider | API key | Yes | Yes | No | Yes | Disabled |
-| Playmatch | Identity resolver | Optional token | Correlation | No | No | Yes | Disabled |
-| Hasheous | Identity resolver | No for current subset | Correlation | No | No | Yes | Disabled |
 | MobyGames | Core online provider | API key | Yes | Yes | No | No | Disabled |
-| Wikipedia | Fallback | No | Yes | Possible | No | No | Fallback |
 | RAWG | Fallback | API key | Yes | Yes | No | No | Optional |
 | LaunchBox/local media | Local | No | Limited identity support | Yes | Yes | No | User configured |
 | DAT sources | Local indexed | No | Yes | No | No | Depends on data | User configured |

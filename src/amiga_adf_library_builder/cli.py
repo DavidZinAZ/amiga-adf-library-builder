@@ -132,14 +132,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--export-gate-acknowledged", action="store_true",
         help="Operator confirms the Gotek export safety gate is satisfied.",
     )
-    build_cmd.add_argument(
-        "--playmatch-config", dest="playmatch_config", default=None,
-        help="explicit config file for the optional Playmatch identity resolver",
-    )
-    build_cmd.add_argument(
-        "--hasheous-config", dest="hasheous_config", default=None,
-        help="explicit config file for the optional Hasheous identity resolver",
-    )
     build_cmd.add_argument("--json", action="store_true", help="emit JSON result")
     build_cmd.add_argument(
         "--library-state-path", type=str, default=None,
@@ -557,12 +549,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 upstream_task_closed=bool(args.export_gate_acknowledged),
                 local_media_config_path=getattr(args, "config", None),
                 rtfm_config_path=getattr(args, "config", None),
-                playmatch_config_path=getattr(args, "playmatch_config", None) or getattr(args, "config", None),
-                hasheous_config_path=getattr(args, "hasheous_config", None) or getattr(args, "config", None),
                 screenscraper_config_path=getattr(args, "config", None),
-                retroachievements_config_path=getattr(args, "config", None),
+                wikipedia_config_path=getattr(args, "config", None),
                 retrokit_config_path=getattr(args, "config", None),
-                hall_of_light_config_path=getattr(args, "config", None),
                 library_state_path=getattr(args, "library_state_path", None),
             ),
         )
@@ -600,13 +589,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                     selection_manifest_path=getattr(args, "selection_manifest", None),
                     local_media_config_path=getattr(args, "config", None),
                     rtfm_config_path=getattr(args, "config", None),
-                    playmatch_config_path=getattr(args, "playmatch_config", None) or getattr(args, "config", None),
-                    hasheous_config_path=getattr(args, "hasheous_config", None) or getattr(args, "config", None),
                     screenscraper_config_path=getattr(args, "config", None),
-                    retroachievements_config_path=getattr(args, "config", None),
-                    retrokit_config_path=getattr(args, "config", None),
-                    hall_of_light_config_path=getattr(args, "config", None),
-                    library_state_path=getattr(args, "library_state_path", None),
+                    wikipedia_config_path=getattr(args, "config", None),
+                        retrokit_config_path=getattr(args, "config", None),
+                        library_state_path=getattr(args, "library_state_path", None),
                 ),
             )
         except ValueError as exc:

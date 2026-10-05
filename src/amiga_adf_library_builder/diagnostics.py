@@ -58,7 +58,7 @@ REASON_OK = "ok"                                   # at least one asset attached
 class ProviderAttempt:
     """One structured diagnostic record for one (provider, release) attempt.
 
-    ``provider`` is the normalized provider id (e.g. ``playmatch``, ``igdb``,
+    ``provider`` is the normalized provider id (e.g. ``screenscraper``,
     ``metadata-online``, ``artwork-online``). ``outcome`` is one of
     ``matched`` / ``no_match`` / ``error`` / ``review``. ``error`` is a
     sanitized, human-readable provider error (already bounded; redacted again
@@ -146,7 +146,7 @@ def attempt_from_enrich_events(
 
     The events are the single source of truth per release (emitted by
     ``enrich_group``). We map the identity-provider categories
-    (playmatch/hasheous/igdb/screenscraper/retroachievements + their
+    (screenscraper + its
     ``*_MISS`` / ``*_REVIEW`` variants) and the online metadata/artwork
     pipeline onto provider attempts. Pure: ``events`` may be EnrichEvent
     objects or their ``.to_dict()`` form.
@@ -162,11 +162,7 @@ def attempt_from_enrich_events(
 
     # Identity providers: category prefix -> normalized provider id.
     _IDENTITY = (
-        ("playmatch", "playmatch"),
-        ("hasheous", "hasheous"),
-        ("igdb", "igdb"),
         ("screenscraper", "screenscraper"),
-        ("retroachievements", "retroachievements"),
     )
 
     attempts: list[ProviderAttempt] = []

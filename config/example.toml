@@ -67,51 +67,6 @@ cheats = ["/path/to/cheats"]
 # DEFERRED in M1. Parsed and ignored. Online must stay disabled.
 enabled = false
 
-# --- Playmatch ROM-hash identity resolver (OPTIONAL, DISABLED by default) -----
-# Opt-in correlation to a Playmatch ROM-hash service. Hash-first: a precomputed
-# public SHA-256 (already computed by the intake scanner) is the PRIMARY lookup
-# signal; an exact-hash match OUTRANKS any title fallback. A returned provider
-# correlation id is captured for downstream providers. The service receives ONLY
-# the public SHA-256 and the canonical title -- never private ROM filenames,
-# local paths, or collection details. Disabled unless enabled = true. Self-host
-# by pointing base_url at your own instance.
-[playmatch]
-enabled = false
-# base_url = "https://api.playmatch.example/v1"
-# timeout_seconds = 10.0
-# max_response_bytes = 1000000
-# max_concurrency = 1
-# confidence_threshold = 0.9
-# cache_ttl = 0  # seconds; <= 0 disables canonical-reuse cache
-
-# --- Hasheous ROM-hash identity resolver (OPTIONAL, DISABLED by default) -----
-# Opt-in correlation to a Hasheous ROM-hash service. Hash-first: a precomputed
-# public SHA-256 (already computed by the intake scanner) is the PRIMARY lookup
-# signal; an exact-hash match OUTRANKS any title fallback. A returned provider
-# correlation id AND normalized external correlations (e.g. igdb_id) are
-# captured for downstream providers. The service receives ONLY the public
-# SHA-256 and the canonical title -- never private ROM filenames, local paths,
-# or collection details. Disabled unless enabled = true. Self-host by pointing
-# base_url at your own Hasheous-compatible instance.
-#
-# ACCESS LIMITATION (per issue #12 governance):
-#   (1) the live Hasheous lookup is platform-scoped and requires a self-hosted /
-#       Hasheous-compatible endpoint. This bundled provider is CONFIG-DRIVEN
-#       and DISABLED by DEFAULT; the default base_url is a placeholder example
-#       host, NOT a live endpoint.
-#   (2) NO live API key is required for the supported subset (hash + title
-#       lookup). If a future operation needs a credential, that is a separate
-#       operator gate.
-#   (3) the public repo's tests are SYNTHETIC / MOCK ONLY -- no live network.
-[hasheous]
-enabled = false
-# base_url = "https://api.hasheous.example/v1"
-# timeout_seconds = 10.0
-# max_response_bytes = 1000000
-# max_concurrency = 1
-# confidence_threshold = 0.9
-# cache_ttl = 0  # seconds; <= 0 disables canonical-reuse cache
-
 # --- Issue #14 LaunchBox Games Database online provider (BLOCKED) --------------
 # FEASIBILITY: INFEASIBLE / BLOCKED — see docs/issue14-launchbox-gamesdb-feasibility.md
 #
@@ -155,30 +110,30 @@ enabled = false
 # preferred_image_types = ["cover", "screenshot", "box"]
 # timeout = 20.0
 
-# --- IGDB metadata/artwork provider (OPTIONAL, DISABLED by default) -----------
-# Opt-in metadata and artwork lookup via IGDB (Internet Game Database).
-# Requires a Twitch OAuth client credentials pair (client_id, client_secret)
-# from the Twitch Developer Console. Credentials are NEVER stored in config
-# files; they come from the SecretStore / environment variables
-# (IGDB_CLIENT_ID, IGDB_CLIENT_SECRET) only.
+# --- Wikipedia metadata/artwork provider (PRIMARY, enabled by default) -------
+# Wikipedia is the main online source for release metadata and artwork. It needs
+# no account, key or signup. Requests are PACED so the site is not overloaded:
+# the settings below are applied to the shared request gate that every
+# Wikipedia request in a run goes through.
 #
-# The provider searches IGDB by game title filtered to the Amiga platform (ID 12).
-# Exact title + platform matches are preferred; fuzzy matches route to review
-# when ambiguous. Cover artwork and screenshots are fetched from IGDB's CDN.
-#
-# The provider is OFFLINE at import time. No network calls occur until a real
-# fetch with --online. Tests inject fake openers; no live network in test suite.
-# All outbound requests are guarded by the existing SSRF guard (metadata.guard_url).
-[igdb]
-enabled = false
-# base_url = "https://api.igdb.com/v4"
-# timeout_seconds = 10.0
-# max_response_bytes = 1000000
-# max_concurrency = 1
-# confidence_threshold = 0.9
-# token_cache_ttl = 5000000  # seconds; ~58 days, <= 0 disables token reuse
-# respect_rate_limit = true
-# rate_limit_backoff_seconds = 1.0
+# These values are the effective runtime policy, not decoration. They can also
+# be edited in the GUI Providers section, which writes the same table.
+[wikipedia]
+enabled = true
+# Minimum wall-clock seconds between two outbound requests. Raising this
+# reduces HTTP 429 rate limiting. Allowed range 0.5 - 10.0.
+min_interval_seconds = 1.0
+# When Wikipedia asks us to slow down (HTTP 429), wait and retry instead of
+# dropping the release.
+retries_enabled = true
+# How many times to retry a rate-limited request (after the first attempt).
+max_retries = 2
+# Obey a server-supplied "wait this many seconds" instruction...
+respect_retry_after = true
+# ...but never wait longer than this, even if the server asks for hours.
+retry_after_cap_seconds = 60
+# Reuse lookups already downloaded instead of re-requesting them.
+use_cache = true
 
 # --- ScreenScraper metadata/artwork/manual provider (OPTIONAL, DISABLED by default) --
 # Opt-in metadata, artwork, and manual lookup via ScreenScraper WebAPI.
@@ -214,34 +169,6 @@ enabled = false
 # cache_ttl = 86400  # seconds; <= 0 disables reuse
 # respect_rate_limit = true
 # rate_limit_backoff_seconds = 5.0
-
-# --- RetroAchievements metadata/artwork provider (GH-13, OPTIONAL, DISABLED by default) --
-# Opt-in metadata and artwork lookup via the RetroAchievements Web API.
-# Hash-first identity: the group's FIRST non-special disk is hashed locally
-# (read-only, MD5) and matched against the game's public Hashes array fetched
-# from the RA game list for the configured console (default "Amiga"). An exact
-# MD5 match is auto-accepted with confidence 1.0; a non-matching hash is a
-# clean miss, never a fuzzy guess. No private ROM filenames, paths, or
-# collection details are transmitted -- only the public MD5 and console name.
-#
-# The API key is NEVER stored in config files. It comes from the environment
-# variable RETROACHIEVEMENTS_API_KEY (or SecretStore) only.
-#
-# The provider is OFFLINE at import time. No network calls occur until a real
-# fetch with --online. The game list is cached under the managed metadata cache
-# dir with a bounded TTL. Tests inject fake openers; no live network in test suite.
-# All outbound requests are guarded by the existing SSRF guard (metadata.guard_url).
-[retroachievements]
-enabled = false
-# base_url = "https://retroachievements.org"
-# timeout_seconds = 10.0
-# max_response_bytes = 2000000
-# cache_ttl = 86400
-# negative_ttl = 3600
-# console_name = "Amiga"
-# respect_rate_limit = true
-# rate_limit_backoff_seconds = 1.0
-# confidence_threshold = 1.0
 
 # ---------------------------------------------------------------------------
 # Optional RetroKit / Archive.org MANUAL provider (GH-10). MANUALS ONLY --

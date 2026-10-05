@@ -35,8 +35,8 @@ EXAMPLE_FOLDER_A = "Example Quest III"
 EXAMPLE_FOLDER_B = "Example Quest III (Variant)"
 EXAMPLE_CANON_TITLE = "Example Quest III"
 EXAMPLE_NFO_TITLE_LINE = f"Title: {EXAMPLE_CANON_TITLE}"
-# Operator-provided authoritative source for Example Quest III (Lemon Amiga).
-EXAMPLE_SOURCE_URL = "https://www.lemonamiga.com/games/details.php?id=example"
+# Operator-provided authoritative source for Example Quest III.
+EXAMPLE_SOURCE_URL = "https://en.wikipedia.org/wiki/Example_Quest_III"
 
 
 def _cfg(root: Path) -> PathConfig:
@@ -305,7 +305,7 @@ def test_approve_writes_record_with_hashes(tmp_path):
     rc = cli_mod.main([
         "approve", "--library-root", str(tmp_path),
         "--release-key", "foo", "--title", "Foo Quest", "--folder", "Foo Quest",
-        "--source-url", "https://www.lemonamiga.com/games/details.php?id=1",
+        "--source-url", "https://en.wikipedia.org/wiki/Amiga",
         "--role", "metadata", "--allow-incomplete", "--reason", "unit test approval",
     ])
     assert rc == 0
@@ -316,7 +316,7 @@ def test_approve_writes_record_with_hashes(tmp_path):
     assert rec["canonical_title"] == "Foo Quest"
     assert rec["expected_sha256"]["Foo_Boot.adf"] == _sha_str(b"BOOTDISK-CONTENTS-1234")
     assert rec["source_urls"] == [
-        {"url": "https://www.lemonamiga.com/games/details.php?id=1", "role": "metadata"}
+        {"url": "https://en.wikipedia.org/wiki/Amiga", "role": "metadata"}
     ]
     assert orig.joinpath("Foo_Boot.adf").read_bytes() == b"BOOTDISK-CONTENTS-1234"
 
@@ -499,8 +499,8 @@ def test_nfo_cites_approved_source_per_role(tmp_path):
         data_root = Path(td) / "data"
         (data_root / "config").mkdir(parents=True, exist_ok=True)
         orig = _make_pseudo_original(data_root)
-        meta_url = "https://www.lemonamiga.com/games/details.php?id=example"
-        art_url = "https://amiga.abime.net/screenshots/foo.png"
+        meta_url = "https://en.wikipedia.org/wiki/Example_Quest_III"
+        art_url = "https://en.wikipedia.org/wiki/Special:FilePath/Foo.png"
         rec = {
             "schema_version": 1, "approval_id": "apr_foo", "release_keys": ["foo"],
             "canonical_title": "Foo Quest", "approved_folder": "Foo Quest",

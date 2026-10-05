@@ -53,9 +53,9 @@ def _cli_build_kwargs(library_root: str, original_dir: str) -> dict:
         "upstream_task_closed": bool(args.export_gate_acknowledged),
         "local_media_config_path": getattr(args, "config", None),
         "rtfm_config_path": getattr(args, "config", None),
-        "playmatch_config_path": getattr(args, "playmatch_config", None)
+        "wikipedia_config_path": getattr(args, "config", None)
         or getattr(args, "config", None),
-        "hasheous_config_path": getattr(args, "hasheous_config", None)
+        "screenscraper_config_path": getattr(args, "config", None)
         or getattr(args, "config", None),
         "retrokit_config_path": getattr(args, "config", None),
     }
@@ -93,9 +93,9 @@ def _cli_export_kwargs(
         "verified_artwork_height": pipeline.VERIFIED_ARTWORK_HEIGHT,
         "local_media_config_path": getattr(args, "config", None),
         "rtfm_config_path": getattr(args, "config", None),
-        "playmatch_config_path": getattr(args, "playmatch_config", None)
+        "wikipedia_config_path": getattr(args, "config", None)
         or getattr(args, "config", None),
-        "hasheous_config_path": getattr(args, "hasheous_config", None)
+        "screenscraper_config_path": getattr(args, "config", None)
         or getattr(args, "config", None),
     }
 
@@ -178,7 +178,7 @@ def test_equiv_build_produces_identical_artifacts(tmp_path: Path):
         "operator_decisions_path", "selection_manifest_path",
         "library_state_path", "verified_artwork_width", "verified_artwork_height",
         "local_media_config_path", "rtfm_config_path",
-        "playmatch_config_path", "hasheous_config_path",
+        "wikipedia_config_path", "screenscraper_config_path",
         "retrokit_config_path",
     }
     gui_only_keys = _run_config_kwarg_names - set(cli_kwargs)
