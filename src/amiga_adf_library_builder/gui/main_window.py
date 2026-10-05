@@ -19,7 +19,7 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QEvent, QRect, QSize, Qt
+from PySide6.QtCore import QEvent, QRect, QSize, Qt, QThread
 from PySide6.QtGui import QGuiApplication, QRegion
 from PySide6.QtWidgets import (
     QApplication,
@@ -389,7 +389,9 @@ class MainWindow(QMainWindow):
         self._run_mode = "build"
         self._worker = None
         self._cancel_event = None
-        self._state = "IDLE"  # IDLE, RUNNING, CANCELLING, JOINING
+        self._finalize_worker = None
+        self._finalize_thread = None
+        self._state = "IDLE"  # IDLE, RUNNING, CANCELLING, JOINING, FINISHING
         # (Issue #18) Re-apply the maximized flag now that the window is fully
         # built, so widget construction cannot clobber it. ``setWindowState``
         # (not ``showMaximized``) keeps a hidden window hidden -- the flag
@@ -2331,7 +2333,9 @@ class MainWindow(QMainWindow):
         self._append_diag(line)
 
     def _on_cancel(self) -> None:
-        if self._state in ("CANCELLING", "JOINING"):
+        if self._state in ("CANCELLING", "JOINING", "FINISHING"):
+            # FINISHING means the pipeline already completed and only post-run
+            # bookkeeping is outstanding; there is nothing left to cancel.
             return
         if self._cancel_event is not None:
             self._cancel_event.set()
@@ -2349,21 +2353,28 @@ class MainWindow(QMainWindow):
 
     def _on_finished(self, result, error: str, cancelled: bool, cfg=None) -> None:
         self._run_in_progress = False
-        self._run_button.setEnabled(True)
-        self._cancel_button.setEnabled(False)
-        self._state = "IDLE"
         if cancelled:
+            self._cancel_button.setEnabled(False)
+            self._finish_run_to_idle()
             self._status_label.setText("Cancelled.")
             self._run_marker("Run cancelled by the operator.")
             self._run_marker("=== RUN END (cancelled) ===")
             return
         if error:
+            self._cancel_button.setEnabled(False)
+            self._finish_run_to_idle()
             # Errors never contain secret values; they are core/CLI messages.
             self._status_label.setText("Failed.")
             self._append_diag(f"ERROR: {error}")
             self._run_marker("=== RUN END (failed) ===")
             QMessageBox.critical(self, "Run failed", error)
             return
+        # (GH-192) Progress transition running -> finishing. The pipeline is
+        # done and the export is already written; Run is re-enabled NOW so the
+        # operator is never left waiting on post-run bookkeeping.
+        self._cancel_button.setEnabled(False)
+        self._run_button.setEnabled(True)
+        self._state = "FINISHING"
         self._progress.setValue(100)
         groups = result.get("groups", 0) if result else 0
         self._status_label.setText(f"Done. {groups} group(s) processed.")
@@ -2374,35 +2385,22 @@ class MainWindow(QMainWindow):
             self._append_diag(line)
         self._run_marker("=== RUN END (done) ===")
 
-        # structured logging: persist a per-run diagnostic log under logs_dir.
-        # This mirrors the CLI's _emit() behavior. Failures are swallowed.
         if cfg is not None:
-            from ..logging_utils import write_run_log
-            from datetime import datetime, timezone
-
-            started_at = datetime.now(timezone.utc).isoformat()
-            # The worker emits activity lines but doesn't track argv/command;
-            # use minimal values for the GUI context.
-            write_run_log(
-                logs_dir=cfg.logs_dir,
-                run_id=result.get("run_id") or "unknown",
-                config_label="gui",
-                cfg=cfg,
-                argv=["gui"],
-                command=self._run_mode,
-                result=result,
-                started_at=started_at,
-                return_code=0,
-            )
-            # Remember the logs_dir so the "Open Logs" button opens the right place.
+            # (GH-192) The CHEAP post-run state stays on the GUI thread: the
+            # GH-66 review-button count and the local-media provider anchoring
+            # are small JSON reads, NOT the blocking operations, and
+            # tests/test_gui_issue66_review_threshold.py asserts them on this
+            # same call (no event-loop pumping). Only the two heavy steps
+            # (run-log write, curation-state rebuild) move off-thread below.
+            # Remember the logs_dir so "Open Logs" opens the right place.
             self._last_run_logs_dir = cfg.logs_dir
             # (GH-66) Surface the review queue this run produced. The pipeline
             # builds the local-media provider (and its persisted
             # review_queue.json) on cfg.artwork_original_dir, so the Review
             # button and the Match Review window must anchor to that same
             # directory. Without this the button never left its disabled
-            # "Review 0" state, so review-band (review <= score < auto) and
-            # near-tie local matches vanished without a selection prompt.
+            # "Review 0" state, so review-band and near-tie local matches
+            # vanished without a selection prompt.
             self._last_run_local_media_dir = cfg.artwork_original_dir
             self._last_run_local_media_config_path = (
                 self._resolve_run_local_media_config_path(cfg)
@@ -2412,27 +2410,111 @@ class MainWindow(QMainWindow):
             self._local_media_provider = None
             self._refresh_review_button()
 
-            # (GH-86) Build and load curation state for Preview & Curation tab
-            try:
-                from ..pipeline import build_staged_library_from_result
-                state_path = build_staged_library_from_result(
-                    result,
-                    library_root=cfg.library_root,
-                    run_id=result.get("run_id", "unknown"),
-                    identity_store=self._identity_store,
-                    original_dir=cfg.original_dir,
-                )
-                if state_path and state_path.exists():
-                    self._preview_widget.load_state_file(state_path)
-                    self._append_diag(f"Loaded curation state: {state_path.name}")
-                    # (GH-107 Slice 4) The run may have created/updated the
-                    # canonical DB — reload the Manual Lookup panel.
-                    self._refresh_manual_lookup_panel()
-            except Exception as exc:
-                # Preview population is best-effort; never break a completed run
-                logger.debug("Preview curation state load failed: %s", exc)
-                self._append_diag(f"Preview state load skipped: {exc}")
-        # (GH-54) Match Review dialog --------------------------------------------------
+        # (GH-192) Hand the two HEAVY blocking steps to FinalizationWorker on
+        # its own thread: run-log serialization and the curation-state rebuild
+        # (a content-hash pass over every ADF in the corpus). That pass was
+        # blocking the GUI event loop and is what Windows painted "Not
+        # Responding" for. The GUI stays live while it runs; the curation
+        # state lands asynchronously via _on_run_finalized.
+        self._start_run_finalization(result, cfg)
+
+    # --- run finalization (GH-192) --------------------------------------------
+    def _start_run_finalization(self, result, cfg) -> None:
+        """Hand the two heavy post-run steps to a worker thread.
+
+        The pipeline (including export) has already finished and the cheap
+        post-run state (GH-66 review button, provider anchoring) has already
+        been applied synchronously in :meth:`_on_finished`. What remains are
+        the two blocking steps -- run-log serialization and the curation-state
+        rebuild (a content-hash pass over every ADF) -- which
+        ``FinalizationWorker`` performs on its own thread. It emits a
+        plain-data payload; the curation state is applied back on the GUI
+        thread in :meth:`_on_run_finalized`. No thread is ever waited on here.
+        """
+        from datetime import datetime, timezone
+
+        # (GH-192) Only the two heavy blocking steps run here, on a worker
+        # thread: run-log serialization and the curation-state rebuild.
+        if cfg is None:
+            self._finish_run_to_idle()
+            return
+
+        from .finalizer import FinalizationWorker
+
+        worker = FinalizationWorker(
+            result=result or {},
+            cfg=cfg,
+            run_mode=getattr(self, "_run_mode", "build"),
+            identity_store=self._identity_store,
+            started_at=datetime.now(timezone.utc).isoformat(),
+        )
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finalized.connect(self._on_run_finalized)
+        worker.step_started.connect(lambda name: self._append_diag(
+            f"Finalize: {name} starting"))
+        worker.step_done.connect(
+            lambda name, ms: self._append_diag(f"Finalize: {name} {ms:.0f} ms"))
+        worker.step_failed.connect(
+            lambda name, msg: self._append_diag(
+                f"Finalize: {name} skipped ({redact(str(msg))})"))
+        # Keep a reference so the thread/worker are not garbage collected
+        # mid-run; cleared in _on_run_finalized. NOTE: we deliberately do NOT
+        # call thread.wait() anywhere on the GUI thread.
+        self._finalize_worker = worker
+        self._finalize_thread = thread
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._forget_finalization)
+        thread.start()
+
+    def _forget_finalization(self) -> None:
+        """Drop the finished finalizer's thread reference (never blocks)."""
+        thread = getattr(self, "_finalize_thread", None)
+        if thread is not None:
+            thread.deleteLater()
+        self._finalize_thread = None
+        self._finalize_worker = None
+
+    def _on_run_finalized(self, payload: dict) -> None:
+        """Apply the off-thread finalization result on the GUI thread.
+
+        Only the cheap widget mutation happens here -- the two heavy steps
+        (run-log write, curation-state rebuild) already completed on the
+        worker thread. The GH-66 review-button state was already applied
+        synchronously in :meth:`_on_finished`. Every step is individually
+        guarded so a failure here can never leave the GUI out of idle.
+        """
+        from .finalizer import format_timing_report
+
+        failures = payload.get("failures") or []
+        state_path = payload.get("state_path")
+
+        # (GH-86) Load the curation state into the Preview & Curation tab.
+        try:
+            if state_path and Path(state_path).exists():
+                self._preview_widget.load_state_file(state_path)
+                self._append_diag(f"Loaded curation state: {Path(state_path).name}")
+                # (GH-107 Slice 4) The run may have created/updated the
+                # canonical DB -- reload the Manual Lookup panel.
+                self._refresh_manual_lookup_panel()
+        except Exception as exc:
+            # Preview population is best-effort; never break a completed run.
+            logger.debug("Preview curation state load failed: %s", exc)
+            self._append_diag(f"Preview state load skipped: {exc}")
+
+        for line in format_timing_report(payload.get("timings") or {},
+                                         failures):
+            self._append_diag(line)
+        self._finish_run_to_idle()
+
+    def _finish_run_to_idle(self) -> None:
+        """Terminal UI state: running -> finishing -> idle, always reachable."""
+        self._run_in_progress = False
+        self._run_button.setEnabled(True)
+        self._cancel_button.setEnabled(False)
+        self._state = "IDLE"
+
     def _local_media_cache_dir(self) -> Path:
         """GH-66: the directory the local-media provider's persisted state
         (review_queue.json / manual_locks.json) lives under.
@@ -2556,7 +2638,11 @@ class MainWindow(QMainWindow):
         # (Issue #18) the same call also persists the window geometry. Never
         # blocks or crashes the close (see _persist_defaults).
         # (GH-84) Bounded wait for worker thread before destroying window.
-        if self._worker is not None and self._thread is not None and self._thread.isRunning():
+        # (GH-192) self._thread is not a window attribute (pre-existing bug: the
+        # check raised AttributeError and aborted close mid-run); resolve it
+        # defensively instead.
+        worker_thread = getattr(self, "_thread", None)
+        if self._worker is not None and worker_thread is not None and worker_thread.isRunning():
             if self._cancel_event is not None:
                 self._cancel_event.set()
             self._status_label.setText("Stopping worker…")
@@ -2565,6 +2651,18 @@ class MainWindow(QMainWindow):
             if not finished:
                 logger.warning("Worker did not stop within timeout; abandoning thread")
                 self._append_diag("Worker did not stop within timeout; abandoning thread")
+        # (GH-192) The finalization thread is a child of this window; a bounded
+        # wait here (close path only -- never from a signal handler) is what
+        # keeps Qt from destroying a thread that is still running. Same bounded
+        # pattern as GH-84: it can time out, it never blocks indefinitely.
+        finalize_thread = getattr(self, "_finalize_thread", None)
+        if finalize_thread is not None and finalize_thread.isRunning():
+            self._status_label.setText("Finishing up…")
+            self._append_diag("Waiting for post-run finalization to finish…")
+            if not finalize_thread.wait(3000):
+                logger.warning("Finalization did not stop within timeout; abandoning it")
+                self._append_diag(
+                    "Finalization did not stop within timeout; abandoning it")
         self._persist_defaults()
         if self._cancel_event is not None:
             self._cancel_event.set()
