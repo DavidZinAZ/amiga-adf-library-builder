@@ -217,7 +217,7 @@ def build_query_variants(title: str, *, limit: int = 6) -> list[QueryVariant]:
     return variants
 
 
-def subject_tokens(value: str) -> list[str]:
+def subject_tokens(value: str, *, strip_version_suffix: bool = False) -> list[str]:
     """Split a title into comparison tokens, keeping Roman numerals separate.
 
     ``canonical_title`` deliberately collapses a title into one opaque string
@@ -230,8 +230,25 @@ def subject_tokens(value: str) -> list[str]:
     year, and dropped otherwise. Dropping it unconditionally would make
     "Doom (1993 video game)" and "Doom (2016 video game)" indistinguishable —
     two entirely different games.
+
+    ``strip_version_suffix`` removes a trailing release-version suffix
+    ("... v1.12") before tokenizing. (GH-192/#189 RC4) Without it,
+    "Hacker II The Doomsday Papers v1.0" tokenizes to
+    ['hacker','v2','doomsday','papers','v1','0'] and the bare '0' is read as
+    VERSION 0 by ``_version_number``, which is decisively unequal to the real
+    article's version, so the correct article is rejected.
+
+    It is applied to the REQUESTED release string only, never to the candidate
+    article title. Stripping both sides would make "Foo v1.0" and "Foo v2.0"
+    indistinguishable and merge two genuinely different releases into one
+    library entry.
     """
     text = _clean(value or "")
+    # (GH-192/#189 RC4) Strip a trailing release-version suffix before
+    # tokenizing, but ONLY when the caller opts in (the requested-release
+    # side). See the docstring for why the candidate side must keep it.
+    if strip_version_suffix:
+        text = _VERSION_SUFFIX_RE.sub("", text).strip() or text
     qualifier = ""
     match = _PAREN_QUALIFIER_RE.search(text)
     if match:
@@ -319,7 +336,9 @@ def candidate_is_same_subject(requested_title: str, candidate_title: str,
     deliberately NOT used to override the title comparison: a matching intro
     sentence is not evidence that the article is about this release.
     """
-    req_tokens = subject_tokens(requested_title)
+    req_tokens = subject_tokens(requested_title, strip_version_suffix=True)
+    # The candidate side NEVER strips: "Foo v1.0" and "Foo v2.0" are different
+    # releases and must not collapse into one another (GH-192/#189 RC4).
     cand_tokens = subject_tokens(candidate_title)
     if not req_tokens or not cand_tokens:
         return False
