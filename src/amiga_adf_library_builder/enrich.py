@@ -19,9 +19,6 @@ from . import artwork as artwork_mod
 from .logging_utils import redact
 from .metadata import MetadataRecord, cache_key, guard_url, lookup_metadata
 from .metadata_source import MetadataSourceManager
-from .playmatch import PlaymatchMatchMethod
-from .hasheous import HasheousMatchMethod
-from .igdb import IgdbMatchMethod
 from . import screenscraper as ss_mod
 from .models import ReleaseGroup, ScanRecord
 from .utils import write_json_atomic, now_iso as _now_iso
@@ -81,10 +78,8 @@ class EnrichResult:
     # DAT/local metadata results per release, with source identifiers.
     # Each entry: {"source_id", "source_name", "match_type", "title", "matched"}.
     dat_results: list = field(default_factory=list)
-    # Cross-provider fail-safe flag. Set True when two enabled hash-first identity
-    # providers (Playmatch + Hasheous) resolve the SAME sha256 to DISAGREEING
-    # exact-hash identities; the group is routed to manual review rather than
-    # silently accepting a winner. Additive; defaults False for all existing paths.
+    # Manual-review routing flag. Set True when a provider result or event
+    # requires operator attention. Defaults False for all existing paths.
     needs_manual_review: bool = False
     # (GH-99) Canonical metadata match confidence from the resolved
     # MetadataRecord, when one was found. None when no metadata resolved.
@@ -125,21 +120,9 @@ class EnrichCategory(str, Enum):
     ROUTE_REVIEW = "route_review"
     METADATA_RELEVANCE_REJECTED = "metadata_relevance_rejected"
     METADATA_RELEVANCE_REVIEW = "metadata_relevance_review"
-    PLAYMATCH = "playmatch"
-    PLAYMATCH_MISS = "playmatch_miss"
-    PLAYMATCH_REVIEW = "playmatch_review"
-    HASHEOUS = "hasheous"
-    HASHEOUS_MISS = "hasheous_miss"
-    HASHEOUS_REVIEW = "hasheous_review"
-    IGDB = "igdb"
-    IGDB_MISS = "igdb_miss"
-    IGDB_REVIEW = "igdb_review"
     SCREENSCRAPER = "screenscraper"
     SCREENSCRAPER_MISS = "screenscraper_miss"
     SCREENSCRAPER_REVIEW = "screenscraper_review"
-    RETROACHIEVEMENTS = "retroachievements"
-    RETROACHIEVEMENTS_MISS = "retroachievements_miss"
-    RETROACHIEVEMENTS_REVIEW = "retroachievements_review"
     DAT = "dat"
 
 
@@ -601,11 +584,7 @@ def _build_review_items(events: list, release_key: str = "") -> list:
         if ev.category not in (
             EnrichCategory.METADATA_RELEVANCE_REVIEW,
             EnrichCategory.LOCAL_MEDIA_REVIEW,
-            EnrichCategory.PLAYMATCH_REVIEW,
-            EnrichCategory.HASHEOUS_REVIEW,
-            EnrichCategory.IGDB_REVIEW,
             EnrichCategory.SCREENSCRAPER_REVIEW,
-            EnrichCategory.RETROACHIEVEMENTS_REVIEW,
         ):
             continue
         items.append(ReviewItem(
@@ -627,18 +606,14 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                  artwork_original_dir: Path, artwork_processed_dir: Path,
                  metadata_cache_dir: Optional[Path] = None, curated_metadata_dir: Optional[Path] = None,
                  online: bool = False, refresh: bool = False,
-                 local_media_provider=None, playmatch_provider=None,
-                 hasheous_provider=None, igdb_provider=None,
+                 local_media_provider=None,
                  screenscraper_provider=None,
-                 retroachievements_provider=None,
-                 halloflight_enabled: bool = True,
                  metadata_source_manager: MetadataSourceManager = None,
                  include_artwork: bool = True,
                  cancel_event: Optional[threading.Event] = None,
                  activity: Optional[Callable[[str], None]] = None,
                  library_root: Optional[Path] = None,
-                 wikipedia_gate=None,
-                 blocked_circuit=None) -> EnrichResult:
+                 wikipedia_gate=None) -> EnrichResult:
     metadata_cache_dir = Path(metadata_cache_dir or (Path(nfo_dir).parent / "metadata-cache"))
     curated_metadata_dir = Path(curated_metadata_dir or (Path(nfo_dir).parent / "metadata-curated"))
     notes: list[str] = []
@@ -683,14 +658,11 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                 lookup_title, cache_dir=metadata_cache_dir,
                 curated_dir=curated_metadata_dir, refresh=refresh, group=group,
                 activity=activity,
-                halloflight_enabled=halloflight_enabled,
-                # (GH-192 online-usability pass) The pacing gate and the
-                # blocked-provider breaker are supplied by the pipeline so
-                # they are shared across EVERY title in a run. Without a shared
-                # instance, pacing resets per release (no protection) and the
-                # breaker never accumulates enough challenges to open.
+                # (GH-192 online-usability pass) The pacing gate is supplied by
+                # the pipeline so it is shared across EVERY title in a run.
+                # Without a shared instance, pacing resets per release and
+                # provides no rate-limit protection at all.
                 wikipedia_gate=wikipedia_gate,
-                blocked_circuit=blocked_circuit,
             )
             # Persist provider-level outcomes before the selected result is
             # reduced to the final metadata record.
@@ -807,133 +779,6 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
         else:  # metadata / reference
             metadata = metadata or MetadataRecord(canonical_title=lookup_title or group.title or "Unknown")
             metadata.source_url = url
-    # Optional Playmatch ROM-hash identity resolver. Hash-first; reuses the
-    # scanner-computed sha256 (passed via `scans`) and never refetches. A
-    # returned provider_id is captured for downstream correlation. Failures are
-    # fully non-fatal (the provider already degrades to a NONE result); we only
-    # record structured diagnostics and never let it break the run.
-    # Cross-provider fail-safe bookkeeping. We DEFER committing each provider's
-    # "success" event/note until after BOTH providers have resolved, so a
-    # disagreeing authoritative exact-hash identity for the same ROM hash can be
-    # routed to manual review instead of silently accepted (issue #11/#12
-    # hash-first fail-safe posture). The non-found / manual-review / miss paths
-    # below stay fully immediate and unchanged.
-    _pm_success_event: Optional[EnrichEvent] = None
-    _pm_success_note: Optional[str] = None
-    _hs_success_event: Optional[EnrichEvent] = None
-    _hs_success_note: Optional[str] = None
-
-    playmatch_result = None
-    if playmatch_provider is not None:
-        try:
-            _act("Trying playmatch identity resolver…")
-            playmatch_result = playmatch_provider.resolve(group, scans=scans)
-            if playmatch_result is not None:
-                if playmatch_result.found:
-                    _pm_success_event = EnrichEvent(
-                        category=EnrichCategory.PLAYMATCH,
-                        detail=(f"resolved via {playmatch_result.match_method.value} "
-                                f"conf={playmatch_result.confidence:.2f} "
-                                f"provider_id={playmatch_result.provider_id}"),
-                        ok=True,
-                    )
-                    _act(f"Playmatch resolved identity (provider_id: {playmatch_result.provider_id}).")
-                    if playmatch_result.provider_id:
-                        _pm_success_note = (
-                            f"playmatch provider_id: {playmatch_result.provider_id}"
-                        )
-                elif playmatch_result.needs_manual_review:
-                    events.append(EnrichEvent(
-                        category=EnrichCategory.PLAYMATCH_REVIEW,
-                        detail=(f"playmatch needs manual review: "
-                                f"{playmatch_result.manual_review_reason}"),
-                        ok=False, error=playmatch_result.manual_review_reason,
-                    ))
-                    notes.append("playmatch: routed to manual review")
-                    _act("Playmatch: routed to manual review.")
-                else:
-                    _pm_te = getattr(playmatch_result, "transport_error", None)
-                    reason = f"transport error: {_pm_te}" if _pm_te else "no hash match"
-                    _act(f"Playmatch: no match ({reason}).")
-                    events.append(EnrichEvent(
-                        category=EnrichCategory.PLAYMATCH_MISS,
-                        detail="playmatch: no identity match"
-                        + (f" (transport: {_pm_te})" if _pm_te else ""),
-                        cache="miss",
-                        ok=not _pm_te,
-                        error=_pm_te,
-                    ))
-        except Exception as exc:  # defensive: never break enrich
-            events.append(EnrichEvent(
-                category=EnrichCategory.PLAYMATCH_MISS,
-                detail=f"playmatch resolve raised: {exc}",
-                ok=False, error=str(exc),
-            ))
-            _act(f"Playmatch error: {exc}.")
-
-    # Optional Hasheous ROM-hash identity resolver. Hash-first; reuses the
-    # scanner-computed sha256 (passed via `scans`) and never refetches. A
-    # returned provider_id / external_ids is captured for downstream correlation.
-    # Failures are fully non-fatal (the provider already degrades to a NONE
-    # result); we only record structured diagnostics and never let it break the
-    # run. Exact-hash identity from Hasheous outranks any weaker signal already
-    # present (mirrors the Playmatch contract; the Hasheous provider itself
-    # ranks EXACT_HASH highest, so when both providers are enabled the stronger
-    # hash identity wins deterministically).
-    hasheous_result = None
-    if hasheous_provider is not None:
-        try:
-            _act("Trying hasheous identity resolver…")
-            hasheous_result = hasheous_provider.resolve(group, scans=scans)
-            if hasheous_result is not None:
-                if hasheous_result.found:
-                    _hs_success_event = EnrichEvent(
-                        category=EnrichCategory.HASHEOUS,
-                        detail=(
-                            f"resolved via {hasheous_result.match_method.value} "
-                            f"conf={hasheous_result.confidence:.2f} "
-                            f"provider_id={hasheous_result.provider_id}"
-                            + (f" external_ids={hasheous_result.external_ids}"
-                               if hasheous_result.external_ids else "")
-                        ),
-                        ok=True,
-                    )
-                    _act(f"Hasheous resolved identity (provider_id: {hasheous_result.provider_id}).")
-                    if hasheous_result.provider_id:
-                        _hs_success_note = (
-                            f"hasheous provider_id: {hasheous_result.provider_id}"
-                        )
-                elif hasheous_result.needs_manual_review:
-                    events.append(EnrichEvent(
-                        category=EnrichCategory.HASHEOUS_REVIEW,
-                        detail=(
-                            f"hasheous needs manual review: "
-                            f"{hasheous_result.manual_review_reason}"
-                        ),
-                        ok=False, error=hasheous_result.manual_review_reason,
-                    ))
-                    notes.append("hasheous: routed to manual review")
-                    _act("Hasheous: routed to manual review.")
-                else:
-                    _hs_te = getattr(hasheous_result, "transport_error", None)
-                    reason = f"transport error: {_hs_te}" if _hs_te else "no hash match"
-                    _act(f"Hasheous: no match ({reason}).")
-                    events.append(EnrichEvent(
-                        category=EnrichCategory.HASHEOUS_MISS,
-                        detail="hasheous: no identity match"
-                        + (f" (transport: {_hs_te})" if _hs_te else ""),
-                        cache="miss",
-                        ok=not _hs_te,
-                        error=_hs_te,
-                    ))
-        except Exception as exc:  # defensive: never break enrich
-            events.append(EnrichEvent(
-                category=EnrichCategory.HASHEOUS_MISS,
-                detail=f"hasheous resolve raised: {exc}",
-                ok=False, error=str(exc),
-            ))
-            _act(f"Hasheous error: {exc}.")
-
     # (GH-164 RC4) DAT/local metadata participation.
     # Queryed after exact-hash providers and before online metadata,
     # with identity outranking fuzzy online title matches.
@@ -1066,89 +911,6 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
             "no DAT lookup was performed."
         )
 
-    # Optional IGDB metadata/artwork provider. Title + Amiga platform search.
-    # Non-hash-first; runs independently of Playmatch/Hasheous.
-    _igdb_success_event: Optional[EnrichEvent] = None
-    _igdb_success_note: Optional[str] = None
-    igdb_result = None
-    if igdb_provider is not None:
-        try:
-            _act("Trying igdb metadata lookup…")
-            igdb_result = igdb_provider.resolve(group)
-            if igdb_result is not None:
-                if igdb_result.found:
-                    _igdb_success_event = EnrichEvent(
-                        category=EnrichCategory.IGDB,
-                        detail=(f"resolved via {igdb_result.match_method.value} "
-                                f"conf={igdb_result.confidence:.2f} "
-                                f"provider_id={igdb_result.provider_id}"),
-                        ok=True,
-                    )
-                    _act(f"Igdb resolved identity (provider_id: {igdb_result.provider_id}).")
-                    if igdb_result.provider_id:
-                        _igdb_success_note = (
-                            f"igdb provider_id: {igdb_result.provider_id}"
-                        )
-                    # Merge IGDB metadata into the main metadata record if it improves things
-                    if igdb_result.metadata and (not metadata or igdb_result.confidence > (metadata.confidence or 0.0)):
-                        # Use IGDB metadata as primary source
-                        if metadata is None:
-                            metadata = MetadataRecord(canonical_title=lookup_title or group.title or "Unknown")
-                        # Merge fields - IGDB is authoritative for online metadata
-                        md = igdb_result.metadata
-                        if md.get("canonical_title"):
-                            metadata.canonical_title = md["canonical_title"]
-                        if md.get("description"):
-                            metadata.description = md["description"]
-                        if md.get("year"):
-                            metadata.year = md["year"]
-                        if md.get("genres"):
-                            metadata.genres = md["genres"]
-                        if md.get("platforms"):
-                            metadata.platforms = md["platforms"]
-                        if md.get("source_url"):
-                            metadata.source_url = md["source_url"]
-                        if md.get("provider_id"):
-                            metadata.provider_id = md["provider_id"]
-                        metadata.provider = "igdb"
-                        metadata.confidence = max(metadata.confidence, igdb_result.confidence)
-                        # Artwork URLs from IGDB
-                        if md.get("artwork_urls"):
-                            metadata.artwork_page_urls = md["artwork_urls"]
-                            metadata.artwork_provider = md.get("artwork_provider", "igdb")
-                        # External IDs
-                        if igdb_result.external_ids:
-                            # Store external IDs for potential downstream use
-                            pass
-                elif igdb_result.needs_manual_review:
-                    events.append(EnrichEvent(
-                        category=EnrichCategory.IGDB_REVIEW,
-                        detail=(f"igdb needs manual review: "
-                                f"{igdb_result.manual_review_reason}"),
-                        ok=False, error=igdb_result.manual_review_reason,
-                    ))
-                    notes.append("igdb: routed to manual review")
-                    _act("Igdb: routed to manual review.")
-                else:
-                    _igdb_te = getattr(igdb_result, "transport_error", None)
-                    reason = f"transport error: {_igdb_te}" if _igdb_te else "no title match"
-                    _act(f"Igdb: no match ({reason}).")
-                    events.append(EnrichEvent(
-                        category=EnrichCategory.IGDB_MISS,
-                        detail="igdb: no identity match"
-                        + (f" (transport: {_igdb_te})" if _igdb_te else ""),
-                        cache="miss",
-                        ok=not _igdb_te,
-                        error=_igdb_te,
-                    ))
-        except Exception as exc:  # defensive: never break enrich
-            events.append(EnrichEvent(
-                category=EnrichCategory.IGDB_MISS,
-                detail=f"igdb resolve raised: {exc}",
-                ok=False, error=str(exc),
-            ))
-            _act(f"Igdb error: {exc}.")
-
     # Optional ScreenScraper metadata/artwork/manual provider. Hash-first (CRC/MD5/SHA1),
     # then cached provider ID reuse, then title + system search.
     # Non-fatal; failures are caught and logged as structured events.
@@ -1245,150 +1007,6 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
             ))
             _act(f"ScreenScraper error: {exc}.")
 
-    # Optional RetroAchievements metadata/artwork provider. Exact-MD5 hash-first
-    # identity (first non-special disk), with the game list fetched (and cached)
-    # from the RA Web API. Independent of the sha256-based Playmatch/Hasheous
-    # identity sources: it resolves a DIFFERENT hash in a DIFFERENT namespace
-    # (RA game id), so it is NOT part of the cross-provider exact-hash fail-safe
-    # below. Non-fatal; failures degrade to a clean miss and are logged.
-    _ra_success_event: Optional[EnrichEvent] = None
-    _ra_success_note: Optional[str] = None
-    ra_result = None
-    if retroachievements_provider is not None:
-        try:
-            _act("Trying retroachievements metadata lookup…")
-            ra_result = retroachievements_provider.resolve(group, scans=scans, online=online)
-            if ra_result is not None:
-                if ra_result.found:
-                    _ra_success_event = EnrichEvent(
-                        category=EnrichCategory.RETROACHIEVEMENTS,
-                        detail=(f"resolved via {ra_result.match_method.value} "
-                                f"conf={ra_result.confidence:.2f} "
-                                f"provider_id={ra_result.provider_id}"),
-                        ok=True,
-                    )
-                    _act(f"RetroAchievements resolved identity (provider_id: {ra_result.provider_id}).")
-                    if ra_result.provider_id:
-                        _ra_success_note = (
-                            f"retroachievements provider_id: {ra_result.provider_id}"
-                        )
-                    # Merge RA metadata if it improves things. Exact MD5 (conf 1.0)
-                    # is the strongest identity signal; it wins unless the existing
-                    # record is already conf 1.0 (deterministic tiebreak: first).
-                    if ra_result.metadata and (not metadata or ra_result.confidence > (metadata.confidence or 0.0)):
-                        if metadata is None:
-                            metadata = MetadataRecord(canonical_title=lookup_title or group.title or "Unknown")
-                        md = ra_result.metadata
-                        if md.get("canonical_title"):
-                            metadata.canonical_title = md["canonical_title"]
-                        if md.get("source_url"):
-                            metadata.source_url = md["source_url"]
-                        if md.get("provider_id"):
-                            metadata.provider_id = md["provider_id"]
-                        metadata.provider = "retroachievements"
-                        metadata.confidence = max(metadata.confidence, ra_result.confidence)
-                        metadata.retrieved_at = md.get("retrieved_at") or metadata.retrieved_at
-                        ra_icons = md.get("artwork_urls") or []
-                        if ra_icons:
-                            metadata.artwork_url = ra_icons[0]
-                            metadata.artwork_page_urls = list(ra_icons)
-                            metadata.artwork_source_url = metadata.artwork_source_url or md.get("source_url", "")
-                            metadata.artwork_provider = md.get("artwork_provider") or "retroachievements"
-                elif ra_result.needs_manual_review:
-                    events.append(EnrichEvent(
-                        category=EnrichCategory.RETROACHIEVEMENTS_REVIEW,
-                        detail=(f"retroachievements needs manual review: "
-                                f"{ra_result.manual_review_reason}"),
-                        ok=False, error=ra_result.manual_review_reason,
-                    ))
-                    notes.append("retroachievements: routed to manual review")
-                    _act("RetroAchievements: routed to manual review.")
-                else:
-                    _ra_te = getattr(ra_result, "transport_error", None)
-                    reason = f"transport error: {_ra_te}" if _ra_te else f"no match ({ra_result.match_method.value})"
-                    _act(f"RetroAchievements: no match ({reason}).")
-                    events.append(EnrichEvent(
-                        category=EnrichCategory.RETROACHIEVEMENTS_MISS,
-                        detail=(f"retroachievements: no identity match "
-                                f"({ra_result.match_method.value})"),
-                        cache="miss",
-                        ok=not _ra_te,
-                        error=_ra_te,
-                    ))
-        except Exception as exc:  # defensive: never break enrich
-            events.append(EnrichEvent(
-                category=EnrichCategory.RETROACHIEVEMENTS_MISS,
-                detail=f"retroachievements resolve raised: {exc}",
-                ok=False, error=str(exc),
-            ))
-            _act(f"RetroAchievements error: {exc}.")
-
-    # --- Cross-provider exact-hash fail-safe (issue #11/#12 hash-first posture) ---
-    # When BOTH hash-first providers are enabled and each resolves the SAME
-    # sha256 to an EXACT-HASH identity (match_method == EXACT_HASH, conf 1.0),
-    # and those authoritative identities DISAGREE, the combined result MUST
-    # fail-safe: route to manual review and SUPPRESS both per-provider success
-    # records so no conflicting provider_id is ever presented as an accepted
-    # identity. We NEVER pick a winner.
-    #   * Exact-hash AGREEMENT (same identity) -> record both normally (unchanged).
-    #   * Only one provider is exact-hash (the other is a miss / needs_review /
-    #     title fallback) -> do NOT force review; preserve hash-first precedence
-    #     (exact-hash outranks title; CANONICAL_REUSE 0.95 < EXACT_HASH 1.0).
-    #   * Single-provider conflicts are handled by each provider's own
-    #     needs_manual_review path above and remain untouched.
-    needs_manual_review = False
-    if (playmatch_provider is not None and hasheous_provider is not None
-            and playmatch_result is not None and hasheous_result is not None
-            and playmatch_result.found and hasheous_result.found
-            and playmatch_result.match_method == PlaymatchMatchMethod.EXACT_HASH
-            and hasheous_result.match_method == HasheousMatchMethod.EXACT_HASH):
-        def _authoritative_ids(result):
-            ids: set = set()
-            if result.provider_id:
-                ids.add(("provider_id", result.provider_id))
-            # PlaymatchResult carries no external_ids; HasheousResult does.
-            ext = getattr(result, "external_ids", None) or {}
-            for k, v in ext.items():
-                if v is not None:
-                    ids.add(("external_ids", f"{k}={v}"))
-            return ids
-
-        if _authoritative_ids(playmatch_result) != _authoritative_ids(hasheous_result):
-            needs_manual_review = True
-            events.append(EnrichEvent(
-                category=EnrichCategory.PLAYMATCH_REVIEW,
-                detail=(f"cross-provider exact-hash disagreement: playmatch="
-                        f"{playmatch_result.provider_id} vs hasheous="
-                        f"{hasheous_result.provider_id}; routed to manual review"),
-                ok=False, error="cross-provider exact-hash identity conflict",
-            ))
-            events.append(EnrichEvent(
-                category=EnrichCategory.HASHEOUS_REVIEW,
-                detail=(f"cross-provider exact-hash disagreement: playmatch="
-                        f"{playmatch_result.provider_id} vs hasheous="
-                        f"{hasheous_result.provider_id}; routed to manual review"),
-                ok=False, error="cross-provider exact-hash identity conflict",
-            ))
-            notes.append(
-                "cross-provider exact-hash identity conflict: routed to manual review"
-            )
-            # Suppress both per-provider success records so no conflicting id is
-            # presented as an accepted identity.
-            _pm_success_event = None
-            _pm_success_note = None
-            _hs_success_event = None
-            _hs_success_note = None
-            _ss_success_event = None
-            _ss_success_note = None
-
-    if _pm_success_event is not None:
-        events.append(_pm_success_event)
-        if _pm_success_note is not None:
-            notes.append(_pm_success_note)
-    if _hs_success_event is not None:
-        events.append(_hs_success_event)
-        if _hs_success_note is not None:
-            notes.append(_hs_success_note)
     if _ss_success_event is not None:
         events.append(_ss_success_event)
         if _ss_success_note is not None:
@@ -1571,35 +1189,17 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
     )
 
     # Combine every manual-review routing signal into a single flag for the
-    # returned EnrichResult (acceptance check #10). The cross-provider
-    # exact-hash fail-safe above already sets `needs_manual_review` True on
-    # disagreement; per-provider `needs_manual_review` results and any
-    # routing-to-review events must surface here too, so callers get one
-    # reliable signal. No event category/detail/ok/note is altered.
+    # returned EnrichResult (acceptance check #10). Per-provider
+    # `needs_manual_review` results and any routing-to-review events must
+    # surface here too, so callers get one reliable signal.
     needs_manual_review = (
         needs_manual_review
-        or (playmatch_result is not None and playmatch_result.needs_manual_review)
-        or (hasheous_result is not None and hasheous_result.needs_manual_review)
-        or (igdb_result is not None and igdb_result.needs_manual_review)
         or (screenscraper_result is not None and screenscraper_result.needs_manual_review)
-        or (ra_result is not None and ra_result.needs_manual_review)
         or any(e.category in (
-            EnrichCategory.PLAYMATCH_REVIEW,
-            EnrichCategory.HASHEOUS_REVIEW,
-            EnrichCategory.IGDB_REVIEW,
             EnrichCategory.SCREENSCRAPER_REVIEW,
-            EnrichCategory.RETROACHIEVEMENTS_REVIEW,
             EnrichCategory.LOCAL_MEDIA_REVIEW,
         ) for e in events)
     )
-    if _igdb_success_event is not None:
-        events.append(_igdb_success_event)
-        if _igdb_success_note is not None:
-            notes.append(_igdb_success_note)
-    if _ra_success_event is not None:
-        events.append(_ra_success_event)
-        if _ra_success_note is not None:
-            notes.append(_ra_success_note)
     _review_items = _build_review_items(events, release_key=str(group.release_key))
     # Propagate DAT/local metadata diagnostic events so callers
     # can observe dat_not_configured, dat_source_disabled,
@@ -1615,11 +1215,8 @@ def enrich_all(groups: list[ReleaseGroup], *, nfo_dir: Path, scans: list[ScanRec
                metadata_cache_dir: Optional[Path] = None,
                curated_metadata_dir: Optional[Path] = None,
                online: bool = False, refresh: bool = False,
-               local_media_provider=None, playmatch_provider=None,
-               hasheous_provider=None, igdb_provider=None,
+               local_media_provider=None,
                screenscraper_provider=None,
-               retroachievements_provider=None,
-               halloflight_enabled: bool = True,
                include_artwork: bool = True,
                cancel_event: Optional[threading.Event] = None,
                activity: Optional[Callable[[str], None]] = None,
@@ -1630,19 +1227,16 @@ def enrich_all(groups: list[ReleaseGroup], *, nfo_dir: Path, scans: list[ScanRec
     curated_metadata_dir = Path(curated_metadata_dir or (Path(nfo_dir).parent / "metadata-curated"))
     total = len(groups)
     results: list[EnrichResult] = []
-    # (GH-192 online-usability pass) One pacing gate and one blocked-provider
-    # breaker per RUN, shared by every release. Both are meaningless per
-    # release: pacing that resets per title provides no rate-limit protection,
-    # and a breaker that resets per title never accumulates enough challenges
-    # to open, so the run keeps paying a wasted round trip to a provider that
-    # is externally blocked.
+    # (GH-192 online-usability pass) One pacing gate per RUN, shared by every
+    # release. It is meaningless per release: pacing that resets per title
+    # provides no rate-limit protection, so a burst across titles is exactly
+    # what trips the endpoint's budget. The gate carries the operator's
+    # configured policy (delay / retries / Retry-After), so a single
+    # application here governs every title in the run.
     _wiki_gate = None
-    _blocked = None
     if online:
         from .wikipedia_client import get_global_gate
-        from .metadata import BlockedProviderCircuit
         _wiki_gate = get_global_gate()
-        _blocked = BlockedProviderCircuit()
     for idx, group in enumerate(groups, start=1):
         if cancel_event is not None and cancel_event.is_set():
             if activity is not None:
@@ -1666,17 +1260,11 @@ def enrich_all(groups: list[ReleaseGroup], *, nfo_dir: Path, scans: list[ScanRec
                      curated_metadata_dir=curated_metadata_dir,
                      online=online, refresh=refresh,
                      local_media_provider=local_media_provider,
-                     playmatch_provider=playmatch_provider,
-                     hasheous_provider=hasheous_provider,
-                     igdb_provider=igdb_provider,
                      screenscraper_provider=screenscraper_provider,
-                     retroachievements_provider=retroachievements_provider,
-                     halloflight_enabled=halloflight_enabled,
-                     include_artwork=include_artwork,
+                          include_artwork=include_artwork,
                      cancel_event=cancel_event,
                      activity=activity,
                      metadata_source_manager=metadata_source_manager,
                      library_root=library_root,
-                     wikipedia_gate=_wiki_gate,
-                     blocked_circuit=_blocked))
+                     wikipedia_gate=_wiki_gate))
     return results

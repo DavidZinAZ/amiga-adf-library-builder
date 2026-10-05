@@ -1,13 +1,12 @@
 """Online metadata and artwork discovery with persistent provenance-aware cache.
 
 Curated Amiga records remain authoritative. Missing artwork can be discovered
-from operator-approved Amiga database pages (Lemon Amiga, Hall of Light,
+from operator-approved Amiga database pages (OpenRetro, Lychesis,
 OpenRetro, Lychesis) by reading standard OpenGraph/Twitter/JSON-LD image
 metadata. Wikipedia and RAWG remain optional fallback metadata providers.
 """
 from __future__ import annotations
 
-import html
 import json
 import logging
 import os
@@ -43,7 +42,6 @@ USER_AGENT = f"AmigaADFLibraryBuilder/{__import__('amiga_adf_library_builder._ve
 _logger = logging.getLogger(__name__)
 
 _ALLOWED_ARTWORK_PAGE_HOSTS = {
-    "www.lemonamiga.com", "lemonamiga.com", "amiga.abime.net",
     "www.openretro.org", "openretro.org", "amiga.lychesis.net",
     "www.mobygames.com", "mobygames.com", "images.mobygames.com",
     # Wikipedia: the pageimages API returns null for many game pages, so
@@ -104,19 +102,6 @@ def _roman_numerals_to_arabic(text: str) -> str:
 
 class UnsafeUrlError(ValueError):
     """Raised when an outbound fetch URL targets a private/loopback/link-local address."""
-
-
-class _BotChallengeError(Exception):
-    """Raised when a provider returns an anti-bot challenge page instead of content.
-
-    The HTTP status code is captured when available. This lets downstream
-    diagnostics distinguish bot blocking (bot_challenge) from normal
-    no-match, parser failure, or generic network/request errors.
-    """
-
-    def __init__(self, message: str, status: int | None = None) -> None:
-        super().__init__(message)
-        self.status = status
 
 
 class ProviderRequestError(urllib.error.URLError):
@@ -352,73 +337,6 @@ def cache_key(title: str) -> str:
     return key or "unknown"
 
 
-#: Providers that are externally bot-blocked and are therefore subject to the
-#: fail-fast circuit breaker. These are NOT recoverable in application code:
-#: Hall of Light serves a Within/Anubis interstitial and Lemon Amiga serves a
-#: Cloudflare challenge from this network, on every request, for every
-#: User-Agent.
-_BLOCKED_PROVIDERS = ("hall-of-light", "lemon-amiga")
-
-#: Number of consecutive challenges after which a provider is skipped for the
-#: remainder of a lookup run.
-BLOCKED_PROVIDER_THRESHOLD = 3
-
-
-@dataclass
-class BlockedProviderCircuit:
-    """Fail-fast breaker for providers blocked by external anti-bot protection.
-
-    Hall of Light (Within/Anubis) and Lemon Amiga (Cloudflare) are blocked from
-    every path this application has, on every request. Re-requesting them for
-    every release costs one wasted round trip per title and delays the one
-    provider that actually works.
-
-    The breaker is an explicit object owned by the caller rather than a module
-    global. A module-level counter looks convenient but is a real defect: it
-    leaks across runs and across independent test files in the same process, so
-    one test's blocked provider silently changes another test's outcome.
-
-    This is fail-fast only. It is NOT a challenge bypass and does not attempt
-    to defeat the protection.
-    """
-
-    threshold: int = BLOCKED_PROVIDER_THRESHOLD
-    counts: dict[str, int] = field(default_factory=dict)
-    reported: set[str] = field(default_factory=set)
-
-    def is_open(self, label: str) -> bool:
-        """True when ``label`` has been skipped already in this run."""
-        return label in self.reported
-
-    def note_challenge(self, label: str) -> None:
-        """Record a bot challenge for ``label``."""
-        if label in _BLOCKED_PROVIDERS:
-            self.counts[label] = self.counts.get(label, 0) + 1
-
-    def should_skip(self, label: str) -> bool:
-        """True when the threshold is reached and this has not been reported."""
-        return (self.counts.get(label, 0) >= self.threshold
-                and label not in self.reported)
-
-    def mark_reported(self, label: str) -> None:
-        self.reported.add(label)
-
-    def count(self, label: str) -> int:
-        return self.counts.get(label, 0)
-
-
-def reset_blocked_provider_circuit() -> None:
-    """Reset the process-wide blocked-provider circuit breaker.
-
-    Kept as a public no-op-compatible entry point so callers and tests have a
-    single obvious way to clear breaker state. The counters now live on an
-    explicit :class:`BlockedProviderCircuit` instance owned by the run rather
-    than in a module global, so there is no cross-run state to clear; the
-    function remains so existing call sites and tests keep working.
-    """
-    return None
-
-
 def load_cached(cache_dir: Path, title: str) -> Optional[MetadataRecord]:
     path = Path(cache_dir) / f"{cache_key(title)}.json"
     if not path.is_file():
@@ -472,39 +390,6 @@ def _text_get(url: str, *, timeout: float = 20.0,
     guard_url(url, resolve=opener is None)
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml"})
     open_fn = opener or urllib.request.urlopen
-    # Anti-bot interstitial markers. Matching is done against BOTH the raw
-    # body and an HTML-entity-decoded copy of it, because several providers
-    # (Anubis / Within on Hall of Light) emit the apostrophe as the entity
-    # ``&#39;`` and a literal-string check silently misses the challenge.
-    _BOT_CHALLENGE_MARKERS = (
-        "Making sure you're not a bot",   # Anubis / Within
-        "Just a moment...",               # Cloudflare
-        "You have been blocked",
-        "Attention Required! | Cloudflare",
-        "Checking your browser before accessing",
-        "bot_check",
-        "cf-browser-verifier",
-        "cf_chl_opt",
-        "_Incapsula_Resource",
-        "px-captcha",
-        "Please enable JS and disable any ad blocker",
-        "Enable JavaScript and cookies to continue",
-        "DDoS protection by",
-        "a2e4v1",
-        "anubis_challenge",
-        "waf_challenge",
-    )
-
-    def _challenge_hit(body: str) -> Optional[str]:
-        """Return the first anti-bot marker present in ``body``, else None."""
-        if not body:
-            return None
-        decoded = html.unescape(body)
-        for candidate_body in (body, decoded):
-            for marker in _BOT_CHALLENGE_MARKERS:
-                if marker in candidate_body:
-                    return marker
-        return None
     try:
         with open_fn(request, timeout=timeout) as response:
             data = response.read(3_000_001)
@@ -516,93 +401,17 @@ def _text_get(url: str, *, timeout: float = 20.0,
             if headers is not None and hasattr(headers, "get_content_charset"):
                 charset = headers.get_content_charset() or "utf-8"
             text = data.decode(charset, errors="replace")
-            # Detect bot-challenge / anti-bot interstitial responses so that
-            # external blocking is distinguishable from normal no-match or
-            # parser failures downstream.
-            _hit = _challenge_hit(text)
-            if _hit:
-                status = getattr(response, "status", None) or getattr(response, "getcode", lambda: None)()
-                raise _BotChallengeError(
-                    f"bot_challenge: provider anti-bot page detected "
-                    f"for {url} (marker={_hit!r})",
-                    status=status,
-                )
             return text, str(final_url)
     except urllib.error.HTTPError as _http_exc:
         # (GH-192 prod FAILURE 1/3) Read the error body on EVERY HTTP status,
-        # not just 403. Anti-bot interstitials are served as 403, 429, 503 and
-        # even 200; the status is not a reliable signal, the body marker is.
-        # Classifying a challenge as a plain http_error would hide the block
-        # behind a rate-limit diagnosis.
+        # not just 403: the status alone is not a reliable signal.
         try:
-            _body = _http_exc.read(3_000_001).decode("utf-8", errors="replace")
+            _http_exc.read(3_000_001)
         except Exception:
-            _body = ""
-        _hit = _challenge_hit(_body)
-        if _hit:
-            raise _BotChallengeError(
-                f"bot_challenge: provider anti-bot page detected "
-                f"for {url} (HTTP {_http_exc.code}, marker={_hit!r})",
-                status=int(_http_exc.code),
-            ) from _http_exc
+            pass
         raise classify_request_error(_http_exc, url=url) from _http_exc
-    except _BotChallengeError:
-        raise
     except (urllib.error.URLError, socket.gaierror, socket.timeout, TimeoutError) as exc:
         raise classify_request_error(exc, url=url) from exc
-
-
-@dataclass
-class HallOfLightConfig:
-    """Configuration for the Hall of Light metadata provider.
-
-    Enabled by default; opt-out via the ``[hall-of-light]`` TOML table.
-    Backward compatible: Hall of Light was unconditional before this change.
-    """
-
-    enabled: bool = True
-    timeout_seconds: float = 20.0
-    max_response_bytes: int = 3_000_000
-    cache_ttl: float = 86400.0
-
-    @classmethod
-    def from_dict(cls, data: Optional[dict]) -> "HallOfLightConfig":
-        if not data:
-            return cls()
-        return cls(
-            enabled=bool(data.get("enabled", True)),
-            timeout_seconds=float(data.get("timeout_seconds", 20.0)),
-            max_response_bytes=int(data.get("max_response_bytes", 3_000_000)),
-            cache_ttl=float(data.get("cache_ttl", 86400.0)),
-        )
-
-
-@dataclass
-class LemonAmigaConfig:
-    """Configuration for the Lemon Amiga metadata provider.
-
-    Disabled by default; opt-in via the ``[lemonamiga]`` TOML table.
-    Mirrors the pattern used by other optional providers.
-    """
-
-    enabled: bool = False
-    timeout_seconds: float = 20.0
-    max_response_bytes: int = 3_000_000
-    cache_ttl: float = 86400.0  # 24 hours
-
-    @classmethod
-    def from_dict(cls, data: Optional[dict]) -> "LemonAmigaConfig":
-        if not data:
-            return cls()
-        return cls(
-            enabled=bool(data.get("enabled", False)),
-            timeout_seconds=float(data.get("timeout_seconds", 20.0)),
-            max_response_bytes=int(data.get("max_response_bytes", 3_000_000)),
-            cache_ttl=float(data.get("cache_ttl", 86400.0)),
-        )
-
-
-_ARTICLES_SET = frozenset({"the", "a", "an"})
 
 def _strip_subtitle(title: str) -> str:
     """Strip an explicit dash subtitle without discarding title punctuation.
@@ -944,8 +753,7 @@ def discover_artwork_from_page(page_url: str, title: str, *, timeout: float = 20
     if score < 25:
         return None
     provider = {
-        "lemonamiga.com": "lemon-amiga", "www.lemonamiga.com": "lemon-amiga",
-        "amiga.abime.net": "hall-of-light", "openretro.org": "openretro",
+        "openretro.org": "openretro",
         "www.openretro.org": "openretro", "amiga.lychesis.net": "lychesis",
         "en.wikipedia.org": "wikipedia", "wikipedia.org": "wikipedia",
         "en.m.wikipedia.org": "wikipedia",
@@ -1201,8 +1009,6 @@ def wikipedia_lookup(title: str, *, timeout: float = 20.0,
                 "decision": "artwork_found" if art_found else "artwork_none",
                 "gate_decision": gate.last_decision,
             })
-        except _BotChallengeError:
-            raise
         except Exception:
             art_found = None
             trail.append({
@@ -1369,714 +1175,6 @@ def mobygames_lookup(title: str, *, api_key: str, timeout: float = 20.0,
         confidence=min(round(best_ratio, 4), 1.0),
         query=title,
     )
-
-
-def hall_of_light_lookup(title: str, *, timeout: float = 20.0,
-                         opener: Optional[Callable[..., Any]] = None) -> Optional[MetadataRecord]:
-    """Search Hall of Light (amiga.abime.net) for a game and return a MetadataRecord.
-
-    Uses the Hall of Light search page to find the game, then parses the game
-    detail page for metadata. The provider is unkeyed (no API key required) and
-    participates in the standard relevance validation pipeline.
-
-    The search is deterministic: results are ranked by title similarity, and the
-    best match above a confidence floor is returned. If no Amiga platform match
-    is found, returns None.
-
-    Every HTTP call goes through the injected ``opener`` for testability. The
-    real urllib opener is used when ``opener`` is None.
-    """
-    import urllib.parse
-    import re
-
-    # Step 1: Search for the game using the verified live listing endpoint.
-    # The old /games/search?q= URL returns a JS filter form with no result
-    # links; /games/list/?gamename= returns actual result links.
-    search_url = "https://amiga.abime.net/games/list/?" + urllib.parse.urlencode({"gamename": title})
-    try:
-        search_html, final_search_url = _text_get(search_url, timeout=timeout, opener=opener)
-    except _BotChallengeError as exc:
-        # (GH-192 prod FAILURE 1) Make it explicit WHICH stage was blocked
-        # (search vs detail fetch) and carry the URL. A blocked provider must
-        # never look like a genuine miss.
-        raise _BotChallengeError(
-            f"bot_challenge: hall-of-light SEARCH blocked for {search_url}: {exc}",
-            status=exc.status,
-        ) from exc
-    except ProviderRequestError as exc:
-        # (GH-192 prod FAILURE 3) Carry URL/status/category through instead of
-        # degrading to a bare no-match.
-        _logger.warning(
-            "hall-of-light: search fetch failed: %s (%s)",
-            type(exc).__name__, exc.category,
-        )
-        raise
-    except (urllib.error.URLError, urllib.error.HTTPError, socket.gaierror, socket.timeout, TimeoutError) as exc:
-        _logger.warning("hall-of-light: search fetch failed: %s", type(exc).__name__)
-        raise
-    except Exception:
-        return None
-
-    # Parse search results to find game links
-    # Hall of Light search results contain links like /games/view/<game-slug>
-    search_parser = _HallOfLightSearchParser()
-    search_parser.feed(search_html)
-    game_links = search_parser.game_links
-
-    if not game_links:
-        return None
-
-    # Step 2: For each candidate, fetch the detail page and extract metadata
-    # Rank by title similarity
-    target_norm = _norm(title)
-    candidates: list[tuple[float, MetadataRecord]] = []
-
-    for game_url in game_links[:10]:  # Limit to first 10 results
-        try:
-            detail_html, final_url = _text_get(game_url, timeout=timeout, opener=opener)
-        except _BotChallengeError as exc:
-            # (GH-192 prod FAILURE 1) Name the blocked stage AND the detail URL.
-            raise _BotChallengeError(
-                f"bot_challenge: hall-of-light DETAIL fetch blocked for {game_url}: {exc}",
-                status=exc.status,
-            ) from exc
-        except (urllib.error.URLError, urllib.error.HTTPError, socket.gaierror, socket.timeout, TimeoutError) as exc:
-            _logger.warning("hall-of-light: detail fetch failed for %s: %s", game_url, type(exc).__name__)
-            continue
-        except Exception:
-            continue
-
-        detail_parser = _HallOfLightDetailParser()
-        detail_parser.feed(detail_html)
-
-        if not detail_parser.canonical_title:
-            continue
-
-        candidate_norm = _norm(detail_parser.canonical_title)
-        ratio = SequenceMatcher(None, target_norm, candidate_norm).ratio()
-        if ratio < 0.30:  # Below floor
-            continue
-
-        # Build MetadataRecord from parsed data
-        record = MetadataRecord(
-            canonical_title=detail_parser.canonical_title,
-            description=detail_parser.description,
-            year=detail_parser.year,
-            developer=detail_parser.developer,
-            publisher=detail_parser.publisher,
-            genres=detail_parser.genres,
-            platforms=detail_parser.platforms,
-            source_url=final_url,
-            provider="hall-of-light",
-            provider_id=detail_parser.game_id or "",
-            retrieved_at=utc_now(),
-            confidence=ratio,
-            query=title,
-        )
-
-        # Skip games without Amiga platform
-        amiga_present = any("amiga" in (p or "").lower() for p in record.platforms)
-        if not amiga_present:
-            continue
-
-        # Discover artwork from the game page
-        try:
-            art_found = discover_artwork_from_page(final_url, title, timeout=timeout, opener=opener)
-            if art_found:
-                record.artwork_url, record.artwork_provider = art_found
-                record.artwork_source_url = final_url
-        except Exception:
-            pass
-
-        candidates.append((ratio, record))
-
-    if not candidates:
-        return None
-
-    # Best match by similarity, deterministic tie-break
-    candidates.sort(key=lambda x: (-x[0], x[1].canonical_title))
-    return candidates[0][1]
-
-
-class _HallOfLightSearchParser(HTMLParser):
-    """Parse Hall of Light search results for game links."""
-
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self.game_links: list[str] = []
-        self._in_results = False
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
-        a = {k.lower(): (v or "") for k, v in attrs}
-        if tag.lower() == "a" and a.get("href"):
-            href = a["href"]
-            # Match game view URLs: /games/view/<slug> or /games/view/<id>/<slug>
-            if re.match(r"^/games/view/", href):
-                absolute = urllib.parse.urljoin("https://amiga.abime.net", href)
-                if absolute not in self.game_links:
-                    self.game_links.append(absolute)
-
-
-class _HallOfLightDetailParser(HTMLParser):
-    """Parse Hall of Light game detail page for metadata.
-
-    The live site uses plain <h1> and <dt> elements without the
-    previously-expected CSS classes. Field labels are derived from
-    the text content of <dt> elements rather than class attributes.
-    """
-
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self.canonical_title: str = ""
-        self.description: str = ""
-        self.year: str = ""
-        self.developer: str = ""
-        self.publisher: str = ""
-        self.genres: list[str] = []
-        self.platforms: list[str] = []
-        self.game_id: str = ""
-        self._state: str = ""
-        self._current_field: str = ""
-        self._in_description = False
-        self._description_parts: list[str] = []
-        self._skip_until_endtag: str = ""
-        self._in_h1 = False
-        self._in_dt = False
-        self._dt_text_parts: list[str] = []
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
-        if self._skip_until_endtag:
-            return
-
-        a = {k.lower(): (v or "") for k, v in attrs}
-        tag_lower = tag.lower()
-
-        if tag_lower == "h1":
-            self._in_h1 = True
-            self._state = "title"
-        elif tag_lower == "div" and a.get("class") and "description" in a["class"].lower():
-            self._in_description = True
-            self._state = "description"
-        elif tag_lower == "dt":
-            self._in_dt = True
-            self._dt_text_parts = []
-        elif tag_lower == "dd" and self._current_field:
-            self._state = self._current_field.lower()
-        elif tag_lower == "a" and a.get("href"):
-            href = a["href"]
-            # Extract game slug from /games/view/<slug> URLs.
-            # The live site no longer uses /games/view/<id>/<slug>.
-            m = re.match(r"^/games/view/([^/]+)$", href)
-            if m:
-                self.game_id = m.group(1)
-
-    def handle_endtag(self, tag: str) -> None:
-        if self._skip_until_endtag:
-            if tag.lower() == self._skip_until_endtag:
-                self._skip_until_endtag = ""
-            return
-
-        if tag.lower() == "dt":
-            self._in_dt = False
-            self._current_field = "".join(self._dt_text_parts).strip().lower()
-            self._dt_text_parts = []
-        elif tag.lower() == "dd":
-            self._state = ""
-            self._current_field = ""
-        elif tag.lower() == "div" and self._in_description:
-            self._in_description = False
-            if self._description_parts:
-                self.description = " ".join(self._description_parts)
-                self._description_parts = []
-            self._state = ""
-        elif tag.lower() == "h1" and self._state == "title":
-            self._state = ""
-
-    def handle_data(self, data: str) -> None:
-        if self._skip_until_endtag:
-            return
-
-        data = data.strip()
-        if not data:
-            return
-
-        if self._in_dt:
-            self._dt_text_parts.append(data)
-        elif self._state == "title" and not self.canonical_title:
-            self.canonical_title = data
-        elif self._state == "description" or self._in_description:
-            self._description_parts.append(data)
-        elif self._state:
-            # Field mapping from <dt> text labels to our fields
-            field = self._state
-            if "year" in field or "release" in field:
-                self.year = data[:4] if len(data) >= 4 and data[:4].isdigit() else ""
-            elif "developer" in field:
-                self.developer = data
-            elif "publisher" in field:
-                self.publisher = data
-            elif "genre" in field:
-                self.genres = [g.strip() for g in data.split(",") if g.strip()]
-            elif "platform" in field:
-                self.platforms = [p.strip() for p in data.split(",") if p.strip()]
-
-
-def lemonamiga_lookup(title: str, *, timeout: float = 20.0,
-                         opener: Optional[Callable[..., Any]] = None,
-                         config: Optional[LemonAmigaConfig] = None
-                         ) -> Optional[MetadataRecord]:
-    """Search Lemon Amiga (lemonamiga.com) for a game and return a MetadataRecord.
-
-    Uses a slug-based game page fetch, then parses the detail page for
-    metadata. The provider is unkeyed (no API key required), disabled by
-    default, and participates in the standard relevance validation pipeline.
-
-    Every HTTP call goes through the injected ``opener`` for testability.
-    The real urllib opener is used when ``opener`` is None.
-
-    When ``config`` is provided, its ``enabled`` flag is checked first;
-    if ``False``, returns ``None`` immediately.
-    """
-    cfg = config or LemonAmigaConfig()
-    if not cfg.enabled:
-        return None
-
-    # Pre-normalize the title: strip version suffixes and convert
-    # roman numerals to arabic so the slug matches live URLs
-    # (e.g. "Hacker II: The Doomsday Papers v1.0" →
-    #  "hacker-2-the-doomsday-papers" not "hacker-ii-the-doomsday-papers-v1-0").
-    _version_stripped = re.sub(r"\s+v\d[\d.]*\s*$", "", title).strip()
-    # Convert roman numerals to arabic in the title for slug generation.
-    _arabic_title = _roman_numerals_to_arabic(_version_stripped)
-    slug = re.sub(r"[^a-z0-9]+", "-", _arabic_title.lower()).strip("-")
-    game_url = f"https://www.lemonamiga.com/game/{slug}"
-
-    try:
-        game_html, final_url = _text_get(
-            game_url, timeout=timeout, opener=opener
-        )
-    except _BotChallengeError as exc:
-        # (GH-192 prod FAILURE 2) Name the blocked fetch and its URL. A
-        # Cloudflare block must never be indistinguishable from "no game".
-        raise _BotChallengeError(
-            f"bot_challenge: lemon-amiga game page fetch blocked for "
-            f"{game_url}: {exc}",
-            status=exc.status,
-        ) from exc
-    except ProviderRequestError as exc:
-        # (GH-192 prod FAILURE 3) Already carries URL/status/category — let it
-        # propagate. Falling through to the generic handler below would turn
-        # a diagnosable transport failure into a silent ``return None``.
-        _logger.warning(
-            "lemon-amiga: game page fetch failed: %s (%s)",
-            type(exc).__name__, exc.category,
-        )
-        raise
-    except (urllib.error.URLError, urllib.error.HTTPError, socket.gaierror, socket.timeout, TimeoutError) as exc:
-        _logger.warning("lemon-amiga: game page fetch failed: %s", type(exc).__name__)
-        raise
-    except Exception:
-        return None
-
-    # Parse the game detail page
-    parser = _LemonAmigaGameParser()
-    parser.feed(game_html)
-
-    if not parser.canonical_title:
-        return None
-
-    candidate_norm = _norm(parser.canonical_title)
-    target_norm = _norm(title)
-    ratio = SequenceMatcher(None, target_norm, candidate_norm).ratio()
-    if ratio < 0.30:
-        return None
-
-    # Build MetadataRecord from parsed data
-    record = MetadataRecord(
-        canonical_title=parser.canonical_title,
-        description=parser.description,
-        year=parser.year,
-        developer=parser.developer,
-        publisher=parser.publisher,
-        genres=parser.genres,
-        platforms=parser.platforms,
-        source_url=final_url,
-        provider="lemon-amiga",
-        provider_id=str(parser.game_id) if parser.game_id else "",
-        retrieved_at=utc_now(),
-        confidence=ratio,
-        query=title,
-    )
-
-    # Skip games without Amiga platform
-    amiga_present = any("amiga" in (p or "").lower() for p in record.platforms)
-    if not amiga_present:
-        return None
-
-    # Discover artwork from the game page (metadata-only: only if
-    # the operator has opted into artwork via config)
-    try:
-        art_found = discover_artwork_from_page(
-            final_url, title, timeout=timeout, opener=opener
-        )
-        if art_found:
-            record.artwork_url, record.artwork_provider = art_found
-            record.artwork_source_url = final_url
-    except Exception:
-        pass
-
-    return record
-
-
-class _LemonAmigaSearchParser(HTMLParser):
-    """Parse Lemon Amiga search/list results for game links."""
-
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self.game_links: list[str] = []
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
-        a = {k.lower(): (v or "") for k, v in attrs}
-        if tag.lower() == "a" and a.get("href"):
-            href = a["href"]
-            # Match game detail URLs: /games/details.php?id=<n>
-            if "/games/details.php" in href:
-                params = urllib.parse.parse_qs(urllib.parse.urlparse(href).query)
-                game_id = params.get("id", [""])[0]
-                if game_id:
-                    self.game_links.append(href)
-
-
-class _LemonAmigaGameParser(HTMLParser):
-    """Parse Lemon Amiga game detail page for metadata fields.
-
-    Lemon Amiga uses HTML tables with <tr><th>label</th><td>value</td></tr>
-    structure. This parser tracks the current field label from <th> elements
-    and captures the value from the following <td> element.
-    """
-
-    FIELD_MAP = {
-        "released": "year",
-        "year": "year",
-        "publisher": "publisher",
-        "editor": "publisher",
-        "coder": "developer",
-        "programmer": "developer",
-        "graphics": "developer",
-        "artist": "developer",
-        "musician": "developer",
-        "genre": "genres",
-        "category": "genres",
-        "sub-genre": "genres",
-        "sub_genre": "genres",
-        "tags": "genres",
-        "hardware": "platforms",
-        "system": "platforms",
-        "platform": "platforms",
-        "players": "platforms",
-        "player": "platforms",
-        "language": "platforms",
-        "license": "platforms",
-        "disks": "platforms",
-        "disk": "platforms",
-    }
-
-    HARDWARE_TO_PLATFORM = {
-        "ocs": "Amiga OCS",
-        "ecs": "Amiga ECS",
-        "aga": "Amiga AGA",
-        "cd32": "Amiga CD32",
-        "cdtv": "Amiga CDTV",
-    }
-
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self.canonical_title: str = ""
-        self.description: str = ""
-        self.year: str = ""
-        self.developer: str = ""
-        self.publisher: str = ""
-        self.genres: list[str] = []
-        self.platforms: list[str] = []
-        self.game_id: str = ""
-        self._th_text: str = ""
-        self._td_text: str = ""
-        self._in_td: bool = False
-        self._in_th: bool = False
-        self._in_description: bool = False
-        self._description_parts: list[str] = []
-        self._table_section: str = ""
-        self._in_title_tag: bool = False
-        # Typed-document link discovery from the "Docs" section.
-        self.doc_links: list[dict[str, str]] = []  # [{type, url, slug, id}]
-        self._in_docs_section: bool = False
-        self._current_doc_type: str = ""
-        self._in_doc_link: bool = False
-        self._doc_link_text_parts: list[str] = []
-        self._in_h1: bool = False  # track <h1> content for canonical title
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
-        a = {k.lower(): (v or "") for k, v in attrs}
-        tag_lower = tag.lower()
-
-        if tag_lower == "title":
-            self._in_title_tag = True
-        elif tag_lower == "h1" and not self.canonical_title:
-            self._in_td = False
-            self._in_th = False
-            self._in_h1 = True
-        elif tag_lower == "th":
-            self._in_th = True
-            self._th_text = ""
-        elif tag_lower == "td":
-            self._in_th = False
-            self._in_td = True
-            self._td_text = ""
-            # If we just finished a doc link's text cell, fill in the type.
-            if self._in_docs_section and self.doc_links:
-                last = self.doc_links[-1]
-                if not last.get("type"):
-                    doc_type_text = self._td_text.strip().lower()
-                    # Map common doc type names
-                    if doc_type_text in ("hints", "tip", "tips"):
-                        last["type"] = "hints"
-                    elif doc_type_text in ("manual", "instructions"):
-                        last["type"] = "manual"
-                    elif doc_type_text in ("cheat", "cheats"):
-                        last["type"] = "cheat"
-                    elif doc_type_text in ("solution",):
-                        last["type"] = "solution"
-                    elif doc_type_text in ("walkthrough",):
-                        last["type"] = "walkthrough"
-                    elif doc_type_text in ("reference",):
-                        last["type"] = "reference"
-                    else:
-                        last["type"] = doc_type_text or "other"
-        elif tag_lower == "table":
-            tbl_id = a.get("id", "").lower()
-            tbl_class = a.get("class", "").lower()
-            if "credit" in tbl_class or "credit" in tbl_id:
-                self._table_section = "credits"
-            elif "info" in tbl_class or "info" in tbl_id or "detail" in tbl_class or "detail" in tbl_id:
-                self._table_section = "info"
-            elif "categor" in tbl_class or "categor" in tbl_id:
-                self._table_section = "categorization"
-            elif "relation" in tbl_class or "relation" in tbl_id:
-                self._table_section = "relationships"
-            elif "review" in tbl_class or "review" in tbl_id:
-                self._table_section = "reviews"
-        elif tag_lower == "a" and a.get("href"):
-            href = a["href"]
-            if self._in_docs_section and (href.startswith("/doc/") or href.startswith("/cheat/")):
-                self._in_doc_link = True
-                self._doc_link_text_parts = []
-                self._parse_doc_link(href)
-        elif tag_lower == "div":
-            cls = a.get("class", "").lower()
-            if "description" in cls:
-                self._in_description = True
-                self._description_parts = []
-            # Track the "Docs" section for typed-document link discovery.
-            # Support EVERY offered typed-doc link: /doc/... and /cheat/...
-            if "docs" in cls or "doc" in cls:
-                self._in_docs_section = True
-
-    def handle_endtag(self, tag: str) -> None:
-        tag_lower = tag.lower()
-        if tag_lower == "title":
-            self._in_title_tag = False
-        elif tag_lower == "td":
-            self._in_td = False
-            self._process_field(self._th_text.strip().lower(), self._td_text.strip())
-            self._th_text = ""
-            self._td_text = ""
-        elif tag_lower == "th":
-            self._in_th = False
-        elif tag_lower == "h1":
-            self._in_h1 = False
-        elif tag_lower == "div":
-            self._in_description = False
-            self._in_docs_section = False
-        elif tag_lower == "table":
-            self._table_section = ""
-        # Do NOT turn off _in_docs_section on </a> —
-        # the section must survive multiple links/resources.
-        # _in_docs_section is only cleared when leaving the outer div.
-        elif tag_lower == "a" and self._in_doc_link:
-            self._in_doc_link = False
-            if self.doc_links:
-                last = self.doc_links[-1]
-                link_text = "".join(self._doc_link_text_parts).strip().lower()
-                if not last.get("type"):
-                    if link_text in ("hints", "tip", "tips"):
-                        last["type"] = "hints"
-                    elif link_text in ("manual", "instructions"):
-                        last["type"] = "manual"
-                    elif link_text in ("cheat", "cheats"):
-                        last["type"] = "cheat"
-                    elif link_text in ("solution",):
-                        last["type"] = "solution"
-                    elif link_text in ("walkthrough",):
-                        last["type"] = "walkthrough"
-                    elif link_text in ("reference",):
-                        last["type"] = "reference"
-                    elif link_text:
-                        last["type"] = link_text
-                    else:
-                        last["type"] = "other"
-
-    def handle_data(self, data: str) -> None:
-        data = data.strip()
-        if not data:
-            return
-
-        if self._in_title_tag:
-            return
-        if self._in_td:
-            self._td_text += data + " "
-        elif self._in_th:
-            self._th_text += data + " "
-        elif self._in_doc_link:
-            self._doc_link_text_parts.append(data)
-        elif self._in_h1 and not self.canonical_title:
-            self.canonical_title = data
-
-    def _process_field(self, field: str, value: str) -> None:
-        if not value:
-            return
-        if field in ("released", "year"):
-            match = re.search(r"(19|20)\d{2}", value)
-            if match:
-                self.year = match.group(0)
-        elif field in ("publisher", "editor"):
-            self.publisher = value
-        elif field in ("coder", "programmer"):
-            self.developer = value
-        elif field in ("graphics", "artist", "musician"):
-            if not self.developer:
-                self.developer = value
-        elif field in ("genre", "category", "sub-genre", "sub_genre", "tags"):
-            new_genres = [g.strip() for g in value.split(",") if g.strip()]
-            for g in new_genres:
-                if g not in self.genres:
-                    self.genres.append(g)
-        elif field in ("hardware", "system", "platform", "players", "player", "language", "license", "disks", "disk"):
-            new_platforms = []
-            for p in value.split(","):
-                p = p.strip()
-                if not p:
-                    continue
-                # Map common Amiga hardware names to platform identifiers
-                lower_p = p.lower()
-                mapped = False
-                for hw_key, platform_val in self.HARDWARE_TO_PLATFORM.items():
-                    if hw_key in lower_p:
-                        if platform_val not in new_platforms:
-                            new_platforms.append(platform_val)
-                        mapped = True
-                if not mapped:
-                    if p not in new_platforms:
-                        new_platforms.append(p)
-            for p in new_platforms:
-                if p not in self.platforms:
-                    self.platforms.append(p)
-
-    def _parse_doc_link(self, href: str) -> None:
-        """Parse a typed-document URL like /doc/slug/123 or /cheat/slug/456.
-
-        The type is determined from the link text, not the URL path,
-        so the implementation is generic and contains no title-specific hack.
-        """
-        m = re.match(r"^/(doc|cheat)/([^/]+)/(\d+)$", href.strip())
-        if not m:
-            return
-        doc_type, slug, doc_id = m.group(1), m.group(2), m.group(3)
-        # Store with empty type; link text in handle_endtag determines the type.
-        self.doc_links.append({
-            "type": "",
-            "url": href,
-            "slug": slug,
-            "id": doc_id,
-        })
-
-
-class _LemonAmigaDocParser(HTMLParser):
-    """Parse a typed-document page and extract the body content.
-
-    Lemon Amiga doc pages have a <code> block for hints/cheats
-    and tables for cheat codes. This parser extracts the relevant
-    content while stripping navigation, headers, and chrome.
-    """
-
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self.body: str = ""
-        self._in_code: bool = False
-        self._code_parts: list[str] = []
-        self._in_table: bool = False
-        self._table_rows: list[str] = []
-        self._in_td: bool = False
-        self._td_text: str = ""
-        self._in_chrome: bool = False
-        self._skip_depth: int = 0
-        self._in_tr: bool = False
-        self._current_row_parts: list[str] = []
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
-        a = {k.lower(): (v or "") for k, v in attrs}
-        tag_lower = tag.lower()
-
-        if tag_lower == "code":
-            self._in_code = True
-            self._code_parts = []
-        elif tag_lower == "table":
-            self._in_table = True
-            self._table_rows = []
-        elif tag_lower == "td" and self._in_table:
-            self._in_td = True
-            self._td_text = ""
-        elif tag_lower == "tr":
-            self._in_tr = True
-            self._current_row_parts = []
-        elif tag_lower in ("nav", "header", "footer", "aside"):
-            self._skip_depth += 1
-        elif tag_lower == "a" and self._skip_depth > 0:
-            self._skip_depth += 1
-
-    def handle_endtag(self, tag: str) -> None:
-        tag_lower = tag.lower()
-
-        if tag_lower == "code" and self._in_code:
-            self._in_code = False
-            self.body = "\n".join(self._code_parts).strip()
-        elif tag_lower == "table" and self._in_table:
-            self._in_table = False
-            if self._table_rows:
-                self.body = "\n".join(self._table_rows).strip()
-        elif tag_lower == "td" and self._in_td:
-            self._in_td = False
-            # Accumulate cell text into the current row
-            if self._in_tr and self._td_text.strip():
-                self._current_row_parts.append(self._td_text.strip())
-        elif tag_lower == "tr" and self._in_tr:
-            self._in_tr = False
-            if self._current_row_parts:
-                self._table_rows.append(" | ".join(self._current_row_parts))
-            self._current_row_parts = []
-        elif tag_lower in ("nav", "header", "footer", "aside"):
-            self._skip_depth = max(0, self._skip_depth - 1)
-
-    def handle_data(self, data: str) -> None:
-        data = data.strip()
-        if not data:
-            return
-        if self._skip_depth > 0:
-            return
-        if self._in_code:
-            self._code_parts.append(data)
-        elif self._in_td:
-            self._td_text += data + " "
-
 def _discover_curated_artwork(record: MetadataRecord, title: str, *, timeout: float,
                               opener: Optional[Callable[..., Any]]) -> None:
     pages = list(dict.fromkeys(record.artwork_page_urls))
@@ -2097,85 +1195,31 @@ def _discover_curated_artwork(record: MetadataRecord, title: str, *, timeout: fl
             return
 
 
-def lemonamiga_discover_docs(
-    title: str, *, timeout: float = 20.0, opener=None
-) -> list[dict[str, str]]:
-    """Discover typed-document resources that actually exist on Lemon Amiga.
-
-    Fetches the game detail page and parses the "Docs" section for
-    links to typed documents (Hints, Solution, Cheat, Manual, etc.).
-    Returns a list of {type, url, slug, id} dicts for resources that
-    ACTUALLY exist. Empty list when the game is not found or has no docs.
-    """
-    # Generate the slug from the title directly (same logic as lemonamiga_lookup)
-    import re as _re
-    _version_stripped = _re.sub(r"\s+v\d[\d.]*\s*$", "", title).strip()
-    _arabic_title = _roman_numerals_to_arabic(_version_stripped)
-    slug = _re.sub(r"[^a-z0-9]+", "-", _arabic_title.lower()).strip("-")
-    game_url = f"https://www.lemonamiga.com/game/{slug}"
-
-    try:
-        game_html, final_url = _text_get(game_url, timeout=timeout, opener=opener)
-    except Exception:
-        return []
-
-    parser = _LemonAmigaGameParser()
-    parser.feed(game_html)
-    if not parser.canonical_title:
-        return []
-
-    # Keep only entries with a recognized type.
-    # Both /doc/ and /cheat/ links are now populated from
-    # link text or explicit type mapping.
-    docs = [dict(d, url=urllib.parse.urljoin(final_url, d["url"]))
-            for d in parser.doc_links if d.get("type") and d["type"] != "other"]
-    return docs
-
-
-def lemonamiga_fetch_doc(
-    doc_url: str, *, timeout: float = 20.0, opener=None
-) -> str:
-    """Fetch a typed-document page and extract the real body content.
-
-    Returns the extracted text content of the document, or an empty
-    string if the page cannot be fetched or parsed.
-    """
-    try:
-        doc_html, _ = _text_get(doc_url, timeout=timeout, opener=opener)
-    except Exception:
-        return ""
-
-    parser = _LemonAmigaDocParser()
-    parser.feed(doc_html)
-    return parser.body.strip() if parser.body else ""
-
-
 def lookup_metadata(title: str, *, cache_dir: Path, curated_dir: Path,
                     refresh: bool = False, timeout: float = 20.0,
                     group: Any = None,
                     opener: Optional[Callable[..., Any]] = None,
                     mobygames_enabled: bool = False,
                     mobygames_api_key_env: str = "MOBYGAMES_API_KEY",
-                    lemonamiga_enabled: bool = False,
-                    halloflight_enabled: bool = True,
+                    wikipedia_enabled: bool = True,
                     wikipedia_gate: "Optional[WikipediaGate]" = None,
-                    blocked_circuit: "Optional[BlockedProviderCircuit]" = None,
                     activity: Optional[Callable[[str], None]] = None
                     ) -> tuple[Optional[MetadataRecord], str, list[dict]]:
     """Resolve metadata for ``title`` using the shared precedence chain.
 
     Precedence (deterministic, highest first): curated -> cache -> keyed online
-    providers (RAWG, then MobyGames) -> Hall of Light -> Lemon Amiga ->
-    Wikipedia (unkeyed fallback). A keyed provider is only attempted when
-    BOTH its config flag is enabled AND its API key is present in the
-    environment; otherwise it is a no-op and the chain simply proceeds to
-    the next provider. MobyGames is DISABLED BY DEFAULT
+    providers (RAWG, then MobyGames) -> Wikipedia (unkeyed). A keyed provider
+    is only attempted when BOTH its config flag is enabled AND its API key is
+    present in the environment; otherwise it is a no-op and the chain simply
+    proceeds to the next provider. MobyGames is DISABLED BY DEFAULT
     (``mobygames_enabled=False``), so the base app is unchanged unless an
-    operator opts in via the ``[mobygames]`` config table. Lemon Amiga is
-    similarly disabled by default (``lemonamiga_enabled=False``) and
-    opt-in via the ``[lemonamiga]`` config table. Hall of Light is
-    ENABLED BY DEFAULT (``halloflight_enabled=True``) for backward
-    compatibility; disable via the ``[hall-of-light]`` config table.
+    operator opts in via the ``[mobygames]`` config table. Wikipedia is
+    ENABLED BY DEFAULT (``wikipedia_enabled=True``) and is the primary
+    supported online provider.
+
+    Requests are paced by the shared gate, which carries the operator's
+    configured Wikipedia policy (delay, retry count, Retry-After handling) --
+    see :mod:`amiga_adf_library_builder.wikipedia_config`.
     """
     curated = load_curated(curated_dir, title)
     # The gate must exist before the curated branch: a curated record with
@@ -2251,38 +1295,9 @@ def lookup_metadata(title: str, *, cache_dir: Path, curated_dir: Path,
         except Exception:
             pass
 
-    # (GH-192 online-usability pass) Fail-fast circuit breaker for externally
-    # blocked providers. Hall of Light (Within/Anubis) and Lemon Amiga
-    # (Cloudflare) are blocked from every path this application has;
-    # re-requesting them for every release adds one wasted round trip per
-    # title and delays the provider that actually works.
-    #
-    # The breaker is caller-owned via ``blocked_circuit``: a pipeline run
-    # passes ONE instance across every title so the breaker actually opens and
-    # saves requests, while an unconfigured call (and every independent test)
-    # gets a fresh instance and therefore no cross-call leakage.
-    circuit = (blocked_circuit if blocked_circuit is not None
-               else BlockedProviderCircuit())
-
     def _try_provider(label: str,
                       lookup) -> None:
         nonlocal accepted
-        if circuit.should_skip(label):
-            circuit.mark_reported(label)
-            _log(f"{label}: blocked by anti-bot protection, skipping.")
-            relevance_events.append({
-                "provider": label,
-                "canonical_title": "",
-                "category": "not_found",
-                "confidence": 0.0,
-                "reason": "bot_challenge_circuit_open",
-                "evidence": [
-                    "bot_challenge",
-                    f"consecutive_bot_challenges={circuit.count(label)}",
-                    "provider_skipped_for_remainder_of_run=True",
-                ],
-            })
-            return
         _log(f"Querying {label}…")
         candidate = None
         outcome = "no_result"
@@ -2300,12 +1315,7 @@ def lookup_metadata(title: str, *, cache_dir: Path, curated_dir: Path,
         except Exception as exc:
             # Classify the exception type for diagnostics using proper
             # isinstance checks rather than string-containment heuristics.
-            if isinstance(exc, _BotChallengeError):
-                outcome = "bot_challenge"
-                # The breaker only tracks providers known to be externally
-                # blocked; everything else is reported but not counted.
-                circuit.note_challenge(label)
-            elif isinstance(exc, ProviderRequestError):
+            if isinstance(exc, ProviderRequestError):
                 # (GH-192 prod FAILURE 1/3) The wrapper already carries the
                 # deterministic category. Keep the stable outcome name
                 # ``request_error`` so downstream reason taxonomy is
@@ -2398,14 +1408,7 @@ def lookup_metadata(title: str, *, cache_dir: Path, curated_dir: Path,
         if mobygames_key:
             _try_provider("mobygames",
                           lambda: mobygames_lookup(title, api_key=mobygames_key, timeout=timeout, opener=opener))
-    if accepted is None and halloflight_enabled:
-        _try_provider("hall-of-light",
-                      lambda: hall_of_light_lookup(title, timeout=timeout, opener=opener))
-    if accepted is None:
-        _try_provider("lemon-amiga",
-                      lambda: lemonamiga_lookup(title, timeout=timeout, opener=opener,
-                                                config=LemonAmigaConfig(enabled=lemonamiga_enabled)))
-    if accepted is None:
+    if accepted is None and wikipedia_enabled:
         wiki_diagnostics: list[dict] = []
         _try_provider("wikipedia",
                       lambda: wikipedia_lookup(

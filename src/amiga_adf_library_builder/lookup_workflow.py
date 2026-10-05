@@ -132,8 +132,6 @@ def providers_for_mode(mode: str) -> list[str]:
         "cache",
         "rawg",
         "mobygames",
-        "hall-of-light",
-        "lemon-amiga",
         "wikipedia",
     ]
 
@@ -272,17 +270,9 @@ def _online_lookup(mode: str, ctx: LookupContext) -> LookupResult:
     for pid, enabled in ctx.provider_enabled.items():
         if not enabled:
             # Map provider IDs to the keyword arguments used by
-            # lookup_metadata. Only pass disabled providers; defaults
-            # handle the rest (enabled=True for Hall of Light etc.).
-            if pid == "playmatch":
-                provider_kwargs["playmatch_enabled"] = False
-            elif pid == "lemonamiga":
-                provider_kwargs["lemonamiga_enabled"] = False
-            elif pid == "hall-of-light":
-                provider_kwargs["halloflight_enabled"] = False
-            elif pid == "igdb":
-                provider_kwargs["igdb_enabled"] = False
-            elif pid == "mobygames":
+            # lookup_metadata. Only pass disabled providers; the default
+            # handles the rest (enabled=True for Wikipedia).
+            if pid == "mobygames":
                 provider_kwargs["mobygames_enabled"] = False
             elif pid == "wikipedia":
                 provider_kwargs["wikipedia_enabled"] = False

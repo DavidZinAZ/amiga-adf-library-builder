@@ -44,10 +44,7 @@ _atomic_write_json = write_json_atomic
 #: subdomain of one (suffix match, never infix).
 HOST_ALLOWLIST: frozenset[str] = frozenset(
     {
-        "lemonamiga.com",
-        "amiga.abime.net",
         "openretro.org",
-        "halloflight.amiga32.org",
         "wikipedia.org",
         "rawg.io",
         "mobygames.com",
