@@ -3,7 +3,7 @@
 These tests pin the fixes from the Worf security review (t_492cba52):
 
   * F1 (HIGH) — the RedactingFilter must redact secrets emitted from a CHILD
-    logger (e.g. ``amiga_adf_library_builder.playmatch``), not just the two
+    logger (e.g. ``amiga_adf_library_builder.screenscraper``), not just the two
     intermediate loggers. This test FAILS against the pre-fix code at 34a7f15
     and PASSES after ``install_gui_redaction`` attaches the filter to the
     root logger's handler(s).
@@ -28,6 +28,7 @@ from __future__ import annotations
 import logging
 import io
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -74,14 +75,14 @@ def test_f1_child_logger_secret_is_redacted(redaction_installed):
 
     This is the regression that failed before the fix: the old code attached
     the filter only to ``amiga_adf_library_builder`` and ``amiga_adf_gui``,
-    which does NOT cover ``amiga_adf_library_builder.playmatch``.
+    which does NOT cover ``amiga_adf_library_builder.screenscraper``.
     """
     root, handler, buf = _capture_root()
     # Re-run install so the (newly added) handler also gets the redactor, as it
     # would at app startup / when any handler is added.
     install_gui_redaction()
     try:
-        child = logging.getLogger("amiga_adf_library_builder.playmatch")
+        child = logging.getLogger("amiga_adf_library_builder.screenscraper")
         child.setLevel(logging.DEBUG)
         child.info("token=CHILDSECRET")
         emitted = buf.getvalue()
@@ -99,7 +100,7 @@ def test_f1_exact_secret_via_child_logger(redaction_installed):
     assert redactor is not None
     try:
         redactor.add_secret("EXACTCHILDTOKEN")
-        child = logging.getLogger("amiga_adf_library_builder.playmatch")
+        child = logging.getLogger("amiga_adf_library_builder.screenscraper")
         child.setLevel(logging.DEBUG)
         child.info("auth header token EXACTCHILDTOKEN done")
         emitted = buf.getvalue()
@@ -158,7 +159,7 @@ def test_f2_locked_vault_set_credentials_raises_clear_path_not_escape(qt_offscre
     # Create an UNLOCKED vault first, then re-lock it by constructing a fresh
     # locked backend (no master_password) with a known password requirement.
     seeded = SecretStore.with_vault(vault_file, master_password="correct-horse")
-    seeded.set_secret("playmatch_token", "old-value")
+    seeded.set_secret("stub_token", "old-value")
     del seeded  # leave the on-disk vault locked.
 
     app, mw = _build_main_window(vault_file.parent / "app-base")
@@ -182,8 +183,17 @@ def test_f2_locked_vault_set_credentials_raises_clear_path_not_escape(qt_offscre
     orig_critical = mwmod.QMessageBox.critical
     mwmod.QMessageBox.critical = staticmethod(fake_critical)
     try:
-        provider = mw._registry.get("playmatch")
-        assert provider is not None
+        # A minimal token-consuming provider. The GUI credential slot is
+        # generic, so the locked-vault guard must hold for ANY provider that
+        # writes a secret -- this test deliberately does not depend on which
+        # concrete providers happen to be registered.
+        class _TokenProvider:
+            metadata = SimpleNamespace(id="stub", name="Stub")
+
+            def add_credentials(self, store, **secrets):
+                store.set_secret(secrets.get("token", ""), "v")
+
+        provider = _TokenProvider()
         # Drive the slot directly; it must NOT raise.
         mw._edit_credentials(provider)
     finally:
@@ -194,7 +204,7 @@ def test_f2_locked_vault_set_credentials_raises_clear_path_not_escape(qt_offscre
     # The token must never have been written to the (locked) vault. Reading a
     # locked vault raises SecretError, which proves the secret was not stored.
     try:
-        stored = mw._secret_store.get_secret("playmatch_token")
+        stored = mw._secret_store.get_secret("stub_token")
         assert stored != "attempt-token-123"
     except SecretError:
         pass  # locked read is the expected outcome here
@@ -240,10 +250,10 @@ def test_f2_unlock_then_save_succeeds(qt_offscreen):
     assert mw._secret_store.default_backend.is_unlocked is True
 
     # Now a real save must succeed without raising.
-    provider = mw._registry.get("playmatch")
+    provider = mw._registry.get("screenscraper")
     assert provider is not None
-    mw._secret_store.set_secret("playmatch_token", "post-unlock-token")
-    assert mw._secret_store.get_secret("playmatch_token") == "post-unlock-token"
+    mw._secret_store.set_secret("stub_token", "post-unlock-token")
+    assert mw._secret_store.get_secret("stub_token") == "post-unlock-token"
     QApplication.instance().quit() if QApplication.instance() else None
 
 

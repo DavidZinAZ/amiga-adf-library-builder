@@ -1192,6 +1192,10 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
     # returned EnrichResult (acceptance check #10). Per-provider
     # `needs_manual_review` results and any routing-to-review events must
     # surface here too, so callers get one reliable signal.
+    # Initialised here because the provider loops above only ASSIGN it when a
+    # provider actually routed to review; without this the name is unbound on
+    # every run where nothing asked for review.
+    needs_manual_review = False
     needs_manual_review = (
         needs_manual_review
         or (screenscraper_result is not None and screenscraper_result.needs_manual_review)

@@ -223,12 +223,10 @@ selection.py
 Provider-specific modules include:
 
 ```text
-igdb.py
+wikipedia_client.py
+wikipedia_config.py
 screenscraper.py
-retroachievements.py
 retrokit.py
-playmatch.py
-hasheous.py
 local_media.py
 ```
 
@@ -348,7 +346,7 @@ field: title
 
 claim A:
   value: Hacker II
-  source: Hall of Light
+  source: Wikipedia
 
 claim B:
   value: Hacker 2
@@ -593,18 +591,18 @@ Avoid per-provider widget implementations unless there is a compelling architect
 Current generic providers include:
 
 ```text
-Playmatch
-Hasheous
-IGDB
+Wikipedia
 ScreenScraper
-RetroAchievements
-Lemon Amiga
-Hall of Light
 ```
 
-Other lower-level metadata providers may exist in core without appearing in this same registry.
+Other lower-level metadata providers may exist in core without appearing in
+this same registry. Do not assume "exists in metadata.py" means "is exposed in
+Providers tab."
 
-Do not assume "exists in metadata.py" means "is exposed in Providers tab."
+Wikipedia's pacing values in the GUI are applied to the process-wide
+`WikipediaGate` via `wikipedia_config.apply_effective_policy()`. That is the
+only sanctioned path from configuration to runtime policy, so there is exactly
+one place to look when asking which request delay is actually in force.
 
 ---
 

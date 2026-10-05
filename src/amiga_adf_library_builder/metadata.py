@@ -413,6 +413,9 @@ def _text_get(url: str, *, timeout: float = 20.0,
     except (urllib.error.URLError, socket.gaierror, socket.timeout, TimeoutError) as exc:
         raise classify_request_error(exc, url=url) from exc
 
+_ARTICLES_SET = frozenset({"the", "a", "an"})
+
+
 def _strip_subtitle(title: str) -> str:
     """Strip an explicit dash subtitle without discarding title punctuation.
 

@@ -408,81 +408,45 @@ A successful status check does not guarantee that every game will produce a matc
 
 ---
 
-# 9. Providers currently surfaced in v0.2.26
-
-The provider registry currently includes:
-
-```text
-Playmatch
-Hasheous
-IGDB
-ScreenScraper
-RetroAchievements
-Lemon Amiga
-Hall of Light
-```
-
----
-
-## 9.1 Hall of Light
+## 9.1 Wikipedia
 
 Panel name:
 
 ```text
-Hall of Light
+Wikipedia
 ```
 
 Characteristics:
 
-- Amiga-specific metadata
+- primary online metadata and artwork source
 - no credentials required
-- metadata-only in the current provider adapter
-- enabled by default in the registry
+- enabled by default
 
-For Amiga collections, this is one of the most directly relevant sources.
+### 9.1.1 Wikipedia settings
 
----
-
-## 9.2 Lemon Amiga
-
-Panel name:
+The panel exposes the effective request policy:
 
 ```text
-Lemon Amiga
+Enable Wikipedia
+Minimum time between requests (seconds)
+Retry when Wikipedia asks us to slow down
+Maximum retries
+Follow the server's requested wait
+Maximum wait when the server asks (seconds)
+Reuse previously downloaded lookups
 ```
 
-Characteristics:
+These are applied to the shared request gate, so changing the request delay
+here changes how fast real requests are actually sent.
 
-- Amiga-specific metadata
-- no credentials required
-- metadata-only in the current GUI provider adapter
-- disabled by default
-
-Separate typed-document/manual workflows also use Lemon Amiga through Manual Lookup.
+Tooltips explain that raising the request delay reduces HTTP 429 rate
+limiting, and that "follow the server's requested wait" means obeying the pause
+Wikipedia asks for (capped by the maximum wait). Internal matching and
+relevance tuning is deliberately not shown.
 
 ---
 
-## 9.3 IGDB
-
-Panel name:
-
-```text
-IGDB
-```
-
-Capabilities:
-
-- metadata
-- artwork
-- online lookup
-
-Requires Twitch OAuth credentials.
-
-Disabled by default.
-
----
-
-## 9.4 ScreenScraper
+## 9.2 ScreenScraper
 
 Panel name:
 
@@ -500,60 +464,6 @@ Capabilities include:
 Requires ScreenScraper developer credentials.
 
 It also supports member credentials where applicable.
-
----
-
-## 9.5 RetroAchievements
-
-Panel name:
-
-```text
-RetroAchievements
-```
-
-Capabilities:
-
-- metadata
-- artwork
-- hash-first identity support
-
-Requires an API key.
-
-Disabled by default.
-
----
-
-## 9.6 Playmatch
-
-Panel name:
-
-```text
-Playmatch
-```
-
-Purpose:
-
-- ROM-hash identity resolution
-- metadata correlation
-
-It is disabled by default.
-
----
-
-## 9.7 Hasheous
-
-Panel name:
-
-```text
-Hasheous
-```
-
-Purpose:
-
-- ROM-hash identity resolution
-- metadata correlation
-
-It is disabled by default.
 
 ---
 
@@ -1396,7 +1306,7 @@ button.
 The Source / Mode group includes:
 
 ```text
-Online (Hall of Light, curated, cache)
+Online (Wikipedia, curated, cache)
 Offline (local media / LaunchBox)
 Alternate search (custom query)
 ```
@@ -1872,21 +1782,18 @@ Use this when a DAT/source entry is correct and should become the authoritative 
 
 ---
 
-# 66. Typed-document search
+# 66. Document override
 
 Manual Lookup also contains:
 
 ```text
-Typed-document search (Lemon Amiga)
+Document override
 ```
 
 Controls include:
 
 ```text
-search query
-Search Typed Docs
 Apply Selection
-Refresh
 ```
 
 The document table includes fields like:
@@ -1901,29 +1808,9 @@ URL
 selection
 ```
 
-This is particularly relevant to manual/RTFM association.
-
----
-
-# 67. Search Typed Docs
-
-Searches Lemon Amiga typed document records for the selected game/release context.
-
-Use this when a manual or related document exists on Lemon Amiga but automatic association did not occur.
-
----
-
-# 68. Apply Selection
-
-Applies the selected typed document to the current canonical release workflow.
-
-After applying, verify the result in Preview & Curation and the RTFM state.
-
----
-
-# 69. Refresh
-
-Refreshes the typed-document view.
+Documents already present in the library can be associated with a release by
+hand. Online typed-document discovery is not offered; it was provided by Lemon
+Amiga, which is no longer a supported provider.
 
 ---
 

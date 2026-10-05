@@ -54,23 +54,23 @@ def _by_provider(agg):
 def test_diag_success_match_and_asset_counted() -> None:
     agg = _aggregate([
         ("Space Tactics", "st", [
-            _ev("playmatch", "playmatch: match method=exact score=1.0 provider_id=123",
+            _ev("screenscraper", "screenscraper: match method=exact score=1.0 provider_id=123",
                 cache="hit"),
             _ev("artwork_generated", "artwork: generated from match"),
         ]),
     ])
     prov = _by_provider(agg)
-    assert prov["playmatch"]["matched"] == 1
-    assert prov["playmatch"]["error"] == 0
-    assert prov["playmatch"]["no_match"] == 0
-    assert prov["playmatch"]["assets_total"] == 1
+    assert prov["screenscraper"]["matched"] == 1
+    assert prov["screenscraper"]["error"] == 0
+    assert prov["screenscraper"]["no_match"] == 0
+    assert prov["screenscraper"]["assets_total"] == 1
     assert prov["artwork-online"]["matched"] == 1
     assert prov["artwork-online"]["assets_total"] == 1
     assert agg["totals"]["matched"] == 2
     assert agg["totals"]["assets"] == 2
     assert agg["zero_asset_releases"] == {}
     assert diag.classify_zero_result(diag.ProviderAttempt(
-        provider="playmatch", matched=True, assets=1)) == diag.REASON_OK
+        provider="screenscraper", matched=True, assets=1)) == diag.REASON_OK
 
 
 # --- scenario 2: no match (provider answered, nothing found) --------------
@@ -79,15 +79,15 @@ def test_diag_success_match_and_asset_counted() -> None:
 def test_diag_no_match_is_not_an_error() -> None:
     agg = _aggregate([
         ("Unknown Game", "ug", [
-            _ev("hasheous_miss", "hasheous: no identity match"),
+            _ev("screenscraper_miss", "screenscraper: no identity match"),
         ]),
     ])
     prov = _by_provider(agg)
-    assert prov["hasheous"]["error"] == 0
-    assert prov["hasheous"]["no_match"] == 1
-    assert prov["hasheous"]["matched"] == 0
+    assert prov["screenscraper"]["error"] == 0
+    assert prov["screenscraper"]["no_match"] == 1
+    assert prov["screenscraper"]["matched"] == 0
     assert agg["reason_taxonomy"].get("not_found") == 1
-    assert agg["zero_asset_releases"]["ug"] == ["hasheous:not_found"]
+    assert agg["zero_asset_releases"]["ug"] == ["screenscraper:not_found"]
 
 
 # --- scenario 3: provider error (transport failure, sanitized) ------------
@@ -96,18 +96,18 @@ def test_diag_no_match_is_not_an_error() -> None:
 def test_diag_provider_error_tagged_and_redacted() -> None:
     agg = _aggregate([
         ("Space Tactics", "st", [
-            _ev("igdb_miss",
-                "igdb: no identity match (transport: HTTP 503)",
+            _ev("screenscraper_miss",
+                "screenscraper: no identity match (transport: HTTP 503)",
                 ok=False,
-                error="igdb transport: HTTP 503 token=supersecretkey"),
+                error="screenscraper transport: HTTP 503 token=supersecretkey"),
         ]),
     ])
     prov = _by_provider(agg)
-    assert prov["igdb"]["error"] == 1
-    assert prov["igdb"]["no_match"] == 0
+    assert prov["screenscraper"]["error"] == 1
+    assert prov["screenscraper"]["no_match"] == 0
     assert agg["reason_taxonomy"].get("transport_error") == 1
-    assert agg["zero_asset_releases"]["st"] == ["igdb:transport_error"]
-    sample = prov["igdb"]["error_samples"][0]
+    assert agg["zero_asset_releases"]["st"] == ["screenscraper:transport_error"]
+    sample = prov["screenscraper"]["error_samples"][0]
     assert "supersecretkey" not in sample
     assert "REDACTED" in sample
     # Rendered output must also be clean.
@@ -118,12 +118,12 @@ def test_diag_provider_error_tagged_and_redacted() -> None:
 
 def test_diag_transport_error_outranks_not_found() -> None:
     attempt = diag.ProviderAttempt(
-        provider="igdb", outcome="error", matched=False,
+        provider="screenscraper", outcome="error", matched=False,
         error="timeout", detail="no identity match",
     )
     assert diag.classify_zero_result(attempt) == diag.REASON_TRANSPORT_ERROR
     clean = diag.ProviderAttempt(
-        provider="igdb", outcome="no_match", matched=False,
+        provider="screenscraper", outcome="no_match", matched=False,
         detail="no identity match",
     )
     assert diag.classify_zero_result(clean) == diag.REASON_NOT_FOUND
@@ -206,8 +206,8 @@ def test_pipeline_diagnostics_never_breaks_the_run(tmp_path: Path) -> None:
 def test_render_run_summary_includes_diagnostics_and_redacts() -> None:
     agg = _aggregate([
         ("Space Tactics", "st", [
-            _ev("igdb_miss", "igdb: no identity match (transport: HTTP 503)",
-                ok=False, error="igdb transport: HTTP 503 token=supersecretkey"),
+            _ev("screenscraper_miss", "screenscraper: no identity match (transport: HTTP 503)",
+                ok=False, error="screenscraper transport: HTTP 503 token=supersecretkey"),
         ]),
     ])
     result = {
@@ -242,7 +242,7 @@ def test_render_run_summary_ignores_old_result_dicts() -> None:
 def test_run_log_renders_diagnostics_section(tmp_path: Path) -> None:
     agg = _aggregate([
         ("Space Tactics", "st", [
-            _ev("playmatch", "playmatch: match method=exact score=1.0 provider_id=123"),
+            _ev("screenscraper", "screenscraper: match method=exact score=1.0 provider_id=123"),
         ]),
     ])
     result = {
@@ -251,7 +251,7 @@ def test_run_log_renders_diagnostics_section(tmp_path: Path) -> None:
                 "release_key": "st", "title": "Space Tactics",
                 "quarantine_reason": None, "provider": None,
                 "artwork_missing": False, "notes": [],
-                "events": [_ev("playmatch", "playmatch: match")],
+                "events": [_ev("screenscraper", "screenscraper: match")],
             }
         ],
         "provider_diagnostics": agg,
@@ -269,7 +269,7 @@ def test_run_log_renders_diagnostics_section(tmp_path: Path) -> None:
         return_code=0,
     )
     assert "Provider diagnostics (run-level):" in text
-    assert "playmatch: attempts=1 matched=1" in text
+    assert "screenscraper: attempts=1 matched=1" in text
     # And a result without the roll-up omits the section.
     result.pop("provider_diagnostics")
     text2 = logging_utils._render(

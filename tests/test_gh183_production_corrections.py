@@ -172,56 +172,6 @@ def test_collisions_are_case_insensitive_stable_and_preserve_disk_bytes(tmp_path
     assert observed[0] == observed[1]
 
 
-@pytest.mark.parametrize("kind,route", [("hints", "doc"), ("solution", "doc"), ("cheat", "cheat")])
-def test_lemon_html_to_persisted_association_to_physical_rtfm(tmp_path, monkeypatch, kind, route):
-    root, manuals, cfg, run = library(tmp_path, ("Hacker",))
-    game_url = "https://www.lemonamiga.com/game/hacker"
-    doc_url = f"https://www.lemonamiga.com/{route}/hacker/763"
-    marker = f"Fixture {kind}: enter the terminal code BLUEBIRD to unlock the door."
-    pages = {
-        game_url: f'<html><h1>Hacker</h1><div class="docs"><a href="/{route}/hacker/763">{kind.title()}</a></div></html>',
-        doc_url: f'<html><code>{marker}</code></html>',
-    }
-    requests = []
-    def response(url, **kwargs):
-        requests.append(url)
-        assert url in pages, f"unexpected provider request {url}"
-        return pages[url], url
-    monkeypatch.setattr(metadata, "_text_get", response)
-    # Isolate unrelated metadata providers; the document acquisition seam stays real.
-    monkeypatch.setattr(enrich, "lookup_metadata", lambda *a, **k: (None, "fixture", []))
-    result = run_pipeline(cfg, replace(run, online=True))
-    assert requests == [game_url, doc_url]
-    row = trace(result)["Hacker"]
-    assert row["written"] is True, row["no_rtfm_reason"]
-    assert row["doc_types"] == [kind]
-    assert row["sources_count"] == 1
-    assert "provider_id_preserved" not in row
-    assert row["provider_source_preserved"] is True
-    assert row["persistence_status"] == "persisted"
-    assert row["canonical_associations_reloaded"] == 1
-    assert marker in Path(row["rtfm_path"]).read_text()
-    assert marker in Path(row["export_path"]).read_text()
-    with CanonicalLibrary(root / "curation" / "canonical.db") as canon:
-        claims = get_document_associations(canon, "game", "hacker")
-        assert len(claims) == 1
-        prov, content = claims[0]
-        assert marker in content
-        assert (prov.source, prov.record_key, prov.url) == ("lemon-amiga", kind, doc_url)
-        sources = document_to_rtfm_sources("game", "hacker", canon, game_title="Hacker")
-        assert len(sources) == 1
-        assert marker in sources[0].content
-    provenance = json.loads(Path(row["rtfm_path"] + ".provenance.json").read_text())
-    assert provenance["sources"][0]["source_url"] == doc_url
-    # Delete generated assets to prove restart rebuilds from persisted content,
-    # rather than passing because a prior output happened to remain on disk.
-    Path(row["rtfm_path"]).unlink()
-    monkeypatch.setattr(metadata, "_text_get", lambda *a, **k: pytest.fail("offline acquisition"))
-    restarted = trace(run_pipeline(cfg, replace(run, run_id="restart")))["Hacker"]
-    assert restarted["written"] is True
-    assert restarted["persistence_status"] == "persisted"
-    assert marker in Path(restarted["rtfm_path"]).read_text()
-    assert marker in Path(restarted["export_path"]).read_text()
 
 
 def test_pipeline_collision_names_keep_rtfm_preview_and_export_coherent(tmp_path):

@@ -200,7 +200,7 @@ Hacker II The Doomsday Papers v1.0 cr XYZ
 
 ## Symptoms
 
-You can find the game manually on Hall of Light, Lemon Amiga, or another provider, but ADF Builder returns no match.
+You can find the game manually on Wikipedia or another provider, but ADF Builder returns no match.
 
 ## Check
 
@@ -547,30 +547,6 @@ Manual Lookup
 and use:
 
 ```text
-Typed-document search (Lemon Amiga)
-```
-
-if appropriate.
-
----
-
-# 21. Lemon Amiga manual exists but app does not attach it
-
-## Recovery
-
-1. Open Manual Lookup.
-2. Choose Game / Release.
-3. Search Typed Docs.
-4. Select the correct document.
-5. Apply Selection.
-6. Return to Preview & Curation.
-7. Re-check Missing RTFM.
-8. Open RTFM if available.
-
-If the wrong sequel appears, correct canonical identity first.
-
----
-
 # 22. Local PDF/TXT manual is ignored
 
 ## Check
@@ -1357,22 +1333,6 @@ If you still see an RTFM serialization error:
 - capture the exact stack/log;
 - identify the release and manual source;
 - do not assume the old bug is still the cause.
-
----
-
-# 75. Hall of Light parsing looks wrong
-
-v0.2.26 includes Hall of Light parsing and sequel-rejection fixes.
-
-Confirm you are truly running v0.2.26 before filing a regression.
-
-Capture:
-
-- query;
-- result URL;
-- canonical title;
-- provider reason;
-- Diagnostics log.
 
 ---
 

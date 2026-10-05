@@ -132,10 +132,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--export-gate-acknowledged", action="store_true",
         help="Operator confirms the Gotek export safety gate is satisfied.",
     )
-    build_cmd.add_argument(
-    )
-    build_cmd.add_argument(
-    )
     build_cmd.add_argument("--json", action="store_true", help="emit JSON result")
     build_cmd.add_argument(
         "--library-state-path", type=str, default=None,

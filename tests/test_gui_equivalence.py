@@ -122,9 +122,8 @@ def test_pipeline_kwargs_provider_config_path(tmp_path: Path):
     cfg = build_path_config_from_gui_state(state)
     run_config, _extra = build_pipeline_kwargs(state, cfg)
     # The GUI passes the provider config file to every optional provider, exactly
-    # like the CLI passes ``--config`` to playmatch/hasheous/rtfm/local_media.
-    assert run_config.playmatch_config_path == cfg_file
-    assert run_config.hasheous_config_path == cfg_file
+    # like the CLI passes ``--config`` to wikipedia/rtfm/local_media.
+    assert run_config.wikipedia_config_path == cfg_file
     assert run_config.rtfm_config_path == cfg_file
     assert run_config.local_media_config_path == cfg_file
 
@@ -162,8 +161,8 @@ def test_gui_vs_cli_build_invocation_match(tmp_path: Path):
         verify_only=False,
         local_media_config_path=getattr(args, "config", None),
         rtfm_config_path=getattr(args, "config", None),
-        playmatch_config_path=getattr(args, "playmatch_config", None) or getattr(args, "config", None),
-        hasheous_config_path=getattr(args, "hasheous_config", None) or getattr(args, "config", None),
+        wikipedia_config_path=getattr(args, "config", None),
+        screenscraper_config_path=getattr(args, "config", None),
     )
 
     # Equivalent GUI state.
@@ -183,8 +182,7 @@ def test_gui_vs_cli_build_invocation_match(tmp_path: Path):
     assert gui_run_config.refresh_metadata == cli_kwargs["refresh_metadata"]
     assert gui_run_config.upstream_task_closed == cli_kwargs["upstream_task_closed"]
     assert gui_run_config.export == cli_kwargs["export"]
-    assert gui_run_config.playmatch_config_path == cli_kwargs["playmatch_config_path"]
-    assert gui_run_config.hasheous_config_path == cli_kwargs["hasheous_config_path"]
+    assert gui_run_config.wikipedia_config_path == cli_kwargs["wikipedia_config_path"]
     assert gui_extra["cfg"].library_root == cli_kwargs["cfg"].library_root
 
 
@@ -246,10 +244,9 @@ def test_gui_rtfm_config_discovery_fallback(tmp_path: Path, monkeypatch: pytest.
     )
     assert run_config.rtfm_config_path == str(cfg_file.resolve())
     # The provider config paths that use ``provider_cfg`` directly must match
-    # the discovered config (playmatch/hasheous/retrokit use ``provider_cfg``;
+    # the discovered config (wikipedia/screenscraper/retrokit use ``provider_cfg``;
     # local_media uses a separate resolver and is verified elsewhere).
-    assert run_config.playmatch_config_path == run_config.rtfm_config_path
-    assert run_config.hasheous_config_path == run_config.rtfm_config_path
+    assert run_config.wikipedia_config_path == run_config.rtfm_config_path
 
 
 def test_gui_rtfm_config_no_config_stays_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -269,8 +266,7 @@ def test_gui_rtfm_config_no_config_stays_none(tmp_path: Path, monkeypatch: pytes
     run_config, _extra = build_pipeline_kwargs(state, cfg)
 
     assert run_config.rtfm_config_path is None
-    assert run_config.playmatch_config_path is None
-    assert run_config.hasheous_config_path is None
+    assert run_config.wikipedia_config_path is None
 
 
 def test_gui_rtfm_config_explicit_overrides_discovery(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

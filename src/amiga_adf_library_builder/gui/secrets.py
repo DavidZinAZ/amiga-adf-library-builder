@@ -476,7 +476,7 @@ class RedactingFilter(logging.Filter):
     *logger* is only evaluated for records emitted directly by that logger. It is
     NOT applied to records propagated up to a parent/root logger from a child
     logger. To redact records emitted by any submodule logger (e.g.
-    ``amiga_adf_library_builder.playmatch``), this filter must be attached to the
+    ``amiga_adf_library_builder.wikipedia``), this filter must be attached to the
     *handler*(s) on the root logger -- which :func:`install_gui_redaction` does.
     """
 
@@ -570,7 +570,7 @@ def install_gui_redaction() -> RedactingFilter:
     evaluates *handler* filters for every record that reaches a handler -- from
     the emitting logger itself or any child logger propagated up -- attaching the
     filter at the root handler level redacts secrets emitted by the core submodule
-    loggers (e.g. ``amiga_adf_library_builder.playmatch``) as well as the GUI's
+    loggers (e.g. ``amiga_adf_library_builder.wikipedia``) as well as the GUI's
     own loggers.
 
     The filter is attached idempotently: if an equivalent

@@ -39,7 +39,6 @@ from amiga_adf_library_builder import metadata as metadata_module
 from amiga_adf_library_builder.metadata import (
     MetadataRecord,
     ProviderRequestError,
-    _BotChallengeError,
     load_cached,
     lookup_metadata,
     save_cached,
@@ -617,7 +616,7 @@ class TestCacheReuse:
 
         record, provider, _events = lookup_metadata(
             "Rocket Ranger", cache_dir=cache, curated_dir=curated,
-            opener=opener, refresh=True, halloflight_enabled=False)
+            opener=opener, refresh=True,)
         assert provider == "wikipedia"
         assert record is not None
         assert record.canonical_title == "Rocket Ranger"
@@ -634,12 +633,12 @@ class TestCacheReuse:
 
         first, provider_a, _ = lookup_metadata(
             "Rocket Ranger", cache_dir=cache, curated_dir=curated,
-            opener=opener, halloflight_enabled=False)
+            opener=opener,)
         assert provider_a == "wikipedia"
         count_after_first = len(seen)
         second, provider_b, events = lookup_metadata(
             "Rocket Ranger", cache_dir=cache, curated_dir=curated,
-            opener=opener, halloflight_enabled=False)
+            opener=opener,)
         assert provider_b == "cache"
         assert second is not None and first is not None
         assert second.canonical_title == first.canonical_title
@@ -657,7 +656,7 @@ class TestCacheReuse:
                              request.full_url)
 
         lookup_metadata("Rocket Ranger", cache_dir=cache, curated_dir=curated,
-                        opener=opener, halloflight_enabled=False)
+                        opener=opener,)
         cached = load_cached(cache, "Rocket Ranger")
         assert cached is not None
         assert cached.canonical_title == "Rocket Ranger"
@@ -668,133 +667,6 @@ class TestCacheReuse:
 # ---------------------------------------------------------------------------
 # F6 - blocked providers must not stall the run
 # ---------------------------------------------------------------------------
-
-class TestBlockedProvidersDoNotBlockWikipedia:
-    def test_bot_challenge_from_hol_does_not_prevent_wikipedia(self, tmp_path: Path):
-        cache = tmp_path / "cache"
-        curated = tmp_path / "curated"
-        seen: list[str] = []
-
-        def opener(request, timeout=0):
-            url = request.full_url
-            seen.append(url)
-            if "abime.net" in url:
-                raise _BotChallengeError(
-                    "bot_challenge: anti-bot page", status=200)
-            return _Response(_api_response("Rocket Ranger"), url)
-
-        record, provider, events = lookup_metadata(
-            "Rocket Ranger", cache_dir=cache, curated_dir=curated,
-            opener=opener, halloflight_enabled=True)
-        assert provider == "wikipedia"
-        assert record is not None
-        reasons = [ev["reason"] for ev in events]
-        assert "bot_challenge" in reasons
-        assert any("wikipedia" in r for r in reasons)
-
-    def test_bot_challenge_from_lemon_does_not_prevent_wikipedia(self, tmp_path: Path):
-        cache = tmp_path / "cache"
-        curated = tmp_path / "curated"
-
-        def opener(request, timeout=0):
-            url = request.full_url
-            if "lemonamiga" in url or "lemon-amiga" in url:
-                raise _BotChallengeError(
-                    "bot_challenge: Just a moment...", status=403)
-            return _Response(_api_response("Rocket Ranger"), url)
-
-        record, provider, events = lookup_metadata(
-            "Rocket Ranger", cache_dir=cache, curated_dir=curated,
-            opener=opener, halloflight_enabled=False, lemonamiga_enabled=True)
-        assert provider == "wikipedia"
-        assert record is not None
-        assert any(ev["reason"] == "bot_challenge" for ev in events)
-
-    def test_blocked_provider_opens_a_circuit_and_stops_being_requested(
-            self, tmp_path: Path):
-        """Fail fast: after repeated blocks the provider is not retried.
-
-        The breaker is caller-owned, so a pipeline run shares ONE circuit
-        across every title (this is what saves the round trips). Without that
-        shared instance the count would reset per title and the breaker would
-        never open.
-        """
-        cache = tmp_path / "cache"
-        curated = tmp_path / "curated"
-        hol_hits: list[str] = []
-
-        def opener(request, timeout=0):
-            url = request.full_url
-            if "abime.net" in url:
-                hol_hits.append(url)
-                raise _BotChallengeError(
-                    "bot_challenge: anti-bot page", status=200)
-            return _Response(_api_response("Rocket Ranger"), url)
-
-        circuit = metadata_module.BlockedProviderCircuit()
-        # No cache writes, so every lookup re-enters the provider chain.
-        for _ in range(4):
-            record, provider, events = lookup_metadata(
-                "Rocket Ranger", cache_dir=cache, curated_dir=curated,
-                opener=opener, halloflight_enabled=True,
-                lemonamiga_enabled=False, refresh=True,
-                blocked_circuit=circuit)
-            assert record is not None
-            assert provider == "wikipedia"
-
-        # Four lookups, but the blocked provider is only tried three times:
-        # the circuit opens and the run stops wasting round trips on it.
-        assert len(hol_hits) == 3
-        assert circuit.count("hall-of-light") == 3
-
-    def test_circuit_is_not_shared_between_independent_calls(self, tmp_path: Path):
-        """No cross-call leakage: each unconfigured call gets a fresh breaker."""
-        cache = tmp_path / "cache"
-        curated = tmp_path / "curated"
-        hol_hits: list[str] = []
-
-        def opener(request, timeout=0):
-            url = request.full_url
-            if "abime.net" in url:
-                hol_hits.append(url)
-                raise _BotChallengeError(
-                    "bot_challenge: anti-bot page", status=200)
-            return _Response(_api_response("Rocket Ranger"), url)
-
-        for _ in range(5):
-            record, provider, _events = lookup_metadata(
-                "Rocket Ranger", cache_dir=cache, curated_dir=curated,
-                opener=opener, halloflight_enabled=True,
-                lemonamiga_enabled=False, refresh=True)
-            assert record is not None
-            assert provider == "wikipedia"
-
-        # A per-call breaker never accumulates past the threshold, so every
-        # call still contacts the provider exactly once. This is the isolation
-        # guarantee that the earlier module-global counter violated.
-        assert len(hol_hits) == 5
-
-    def test_circuit_open_is_reported_as_a_diagnostic(self, tmp_path: Path):
-        cache = tmp_path / "cache"
-        curated = tmp_path / "curated"
-
-        def opener(request, timeout=0):
-            url = request.full_url
-            if "abime.net" in url:
-                raise _BotChallengeError(
-                    "bot_challenge: anti-bot page", status=200)
-            return _Response(_api_response("Rocket Ranger"), url)
-
-        circuit = metadata_module.BlockedProviderCircuit()
-        events: list[dict] = []
-        for _ in range(4):
-            _record, _provider, events = lookup_metadata(
-                "Rocket Ranger", cache_dir=cache, curated_dir=curated,
-                opener=opener, halloflight_enabled=True,
-                lemonamiga_enabled=False, refresh=True,
-                blocked_circuit=circuit)
-        assert any(ev["reason"] == "bot_challenge_circuit_open" for ev in events)
-
 
 # ---------------------------------------------------------------------------
 # F6 - diagnostics completeness
@@ -877,7 +749,7 @@ class TestDiagnostics:
 
         _record, _provider, events = lookup_metadata(
             "Rocket Ranger", cache_dir=cache, curated_dir=curated,
-            opener=opener, halloflight_enabled=False)
+            opener=opener,)
         request_events = [ev for ev in events
                           if ev["provider"] == "wikipedia-request"]
         assert request_events

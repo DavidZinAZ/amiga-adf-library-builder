@@ -458,15 +458,37 @@ def run_pipeline(
     # title in the run. Values that fail to parse fall back to the documented
     # defaults inside WikipediaConfig rather than aborting the run.
     wikipedia_settings = None
-    if wikipedia_config_path:
+    try:
+        from .wikipedia_config import apply_effective_policy
+        from .paths import load_wikipedia_config
+        # load_wikipedia_config(None) still discovers the default config file,
+        # so an operator's saved settings apply even when no explicit path was
+        # supplied. A missing table yields the documented defaults.
+        wikipedia_settings = apply_effective_policy(
+            load_wikipedia_config(wikipedia_config_path)
+        )
+    except Exception:  # config problems must not break the pipeline
+        wikipedia_settings = None
+    # (SCOPE 5) Report the EFFECTIVE Wikipedia settings at the start of an
+    # online run -- the values the shared gate is actually enforcing, read back
+    # off the gate itself rather than echoed from the GUI text.
+    if online:
         try:
-            from .wikipedia_config import apply_effective_policy
-            from .paths import load_wikipedia_config
-            wikipedia_settings = apply_effective_policy(
-                load_wikipedia_config(wikipedia_config_path)
+            from .wikipedia_client import get_global_gate
+            from .wikipedia_config import effective_settings_report
+            if wikipedia_settings is None:
+                from .wikipedia_config import WikipediaConfig
+                wikipedia_settings = WikipediaConfig.from_dict({})
+            report = effective_settings_report(
+                wikipedia_settings.to_dict(),
+                gate=get_global_gate(),
+                use_gate_policy=True,
             )
-        except Exception:  # config problems must not break the pipeline
-            wikipedia_settings = None
+            for _key, _value in report.items():
+                _act(f"Wikipedia settings — {_key}: {_value}")
+        except Exception:  # diagnostics must never break a run
+            pass
+
     _act(
         f"Filling in missing metadata for {len(groups)} release(s) "
         + ("from online sources (this can take a while)."
