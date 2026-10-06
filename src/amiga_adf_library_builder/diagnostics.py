@@ -584,6 +584,18 @@ def aggregate_provider_attempts(
     taxonomy: dict[str, int] = {}
     tot = {"attempts": 0, "matched": 0, "error": 0, "review": 0, "assets": 0}
 
+    # Releases that matched with at least one asset are NOT zero-asset, even
+    # when another attempt for the same release was a miss/review/error. The
+    # Wikipedia pipeline emits an internal per-request attempt (wikipedia-
+    # request) alongside the final matched attempt for a successful release,
+    # and a provider-level review/reject may be recorded before the final
+    # hit. A release-level "no assets" verdict must reflect the FINAL outcome:
+    # if any attempt attached an asset, the release is not assetless.
+    _matched_release_keys: set[str] = set()
+    for a in norm:
+        if a.outcome == "matched" and a.assets > 0 and a.release_key:
+            _matched_release_keys.add(a.release_key)
+
     for a in norm:
         s = summaries.get(a.provider)
         if s is None:  # unknown provider id; fold into a catch-all.
@@ -610,7 +622,11 @@ def aggregate_provider_attempts(
         if reason != REASON_OK:
             s.reasons[reason] = s.reasons.get(reason, 0) + 1
             taxonomy[reason] = taxonomy.get(reason, 0) + 1
-            if a.release_key and reason:
+            # Only list the release as zero-asset when NO attempt for it
+            # matched. An internal miss/review/error must not make a release
+            # that also attached an asset look assetless.
+            if (a.release_key and reason
+                    and a.release_key not in _matched_release_keys):
                 zero_asset.setdefault(a.release_key, []).append(
                     f"{a.provider}:{reason}"
                 )

@@ -307,6 +307,12 @@ class MetadataRecord:
     relevance_category: str = ""      # accepted | rejected | review (online candidates)
     relevance_confidence: float = 0.0
     relevance_evidence: list[str] = field(default_factory=list)
+    # True when a strict, token-based subject test has already confirmed this
+    # candidate is the requested work (set only by the Wikipedia lookup, which
+    # returns a record only when candidate_is_same_subject accepts). Used by
+    # validate_metadata_relevance so that lower-level acceptance is not
+    # discarded by a contradictory ratio-band review/reject.
+    subject_verified: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -329,6 +335,7 @@ class MetadataRecord:
             relevance_category=str(data.get("relevance_category") or ""),
             relevance_confidence=float(data.get("relevance_confidence") or 0.0),
             relevance_evidence=list(data.get("relevance_evidence") or []),
+            subject_verified=bool(data.get("subject_verified") or False),
         )
 
 
@@ -582,6 +589,29 @@ def validate_metadata_relevance(requested_title: str, record: "MetadataRecord",
         return RelevanceDecision(
             category="rejected", confidence=0.30,
             evidence=evidence, reason="series_disambiguation",
+        )
+
+    # --- Strict lower-level subject verification is authoritative ---
+    # The Wikipedia lookup only returns a record when _rank_wikipedia_pages
+    # accepted the page via the conservative, token-based
+    # candidate_is_same_subject test. That test is deliberately stricter than
+    # the SequenceMatcher ratio band below (it resolves version markers and
+    # release years, so it already rejects genuinely different games and
+    # cannot confirm genuinely ambiguous near-misses). When it has accepted,
+    # the record is marked subject_verified. The ratio band must not then
+    # discard that acceptance with a contradictory review/ambiguous_midband or
+    # reject/different_game verdict — that is the two-disagreeing-paths defect
+    # (lower path "candidate accepted", final metadata "not-found"). The
+    # person-page and disambiguation guards above still run first and can
+    # override, so a biography or a generic franchise page is never accepted
+    # on the strength of a matching title alone. A record that was NOT
+    # subject-verified (every other provider, and a Wikipedia miss) falls
+    # through to the ratio band unchanged.
+    if getattr(record, "subject_verified", False):
+        evidence.append("strict_subject_verified")
+        return RelevanceDecision(
+            category="accepted", confidence=max(0.90, ratio),
+            evidence=evidence, reason="strict_subject_verified",
         )
 
     # --- Platform evidence ---
@@ -1029,6 +1059,13 @@ def wikipedia_lookup(title: str, *, timeout: float = 20.0,
         artwork_provider=art_provider, provider="wikipedia",
         provider_id=str(best_page.get("pageid") or ""), retrieved_at=utc_now(),
         confidence=min(best_score, 1.0), query=query_text,
+        # The page was returned only because _rank_wikipedia_pages accepted it
+        # via the strict candidate_is_same_subject test. Mark that so the outer
+        # relevance gate does not discard the acceptance with a contradictory
+        # ratio-band review/reject (the lower-level decision is authoritative
+        # for same-subject; the outer gate still applies its independent
+        # non-title guards).
+        subject_verified=True,
     )
 
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import mimetypes
 import re
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
@@ -366,6 +368,72 @@ def build_provenance_text(group: ReleaseGroup, scans: dict[str, ScanRecord],
     return "\n".join(lines) + "\n"
 
 
+def _retry_after_seconds(value: Optional[str]) -> Optional[float]:
+    """Parse a ``Retry-After`` header into seconds, or None when unusable.
+
+    Only the delta-seconds form is honoured (the form Wikimedia/Wikipedia use).
+    An HTTP-date form or a non-numeric value returns None so the caller falls
+    back to exponential backoff rather than sleeping an unbounded amount.
+    """
+    if not value:
+        return None
+    try:
+        return max(0.0, float(str(value).strip()))
+    except (TypeError, ValueError):
+        return None
+
+
+def _fetch_artwork_bytes(url: str, *, timeout: float = 30.0,
+                         max_bytes: int = 12_000_000,
+                         max_retries: int = 2,
+                         retry_after_cap: float = 60.0,
+                         backoff_base: float = 2.0,
+                         sleep_fn=time.sleep,
+                         opener=urllib.request.urlopen) -> tuple[bytes, str]:
+    """Fetch an artwork image with bounded 429 retry/backoff.
+
+    Returns ``(body_bytes, content_type)``. Deliberately standalone: it does
+    NOT consult the shared :class:`WikipediaGate` (no
+    ``begin_request``/``note_request``), so a burst of Wikimedia image fetches
+    cannot inflate the metadata provider's ``requests_made`` budget and corrupt
+    the rate-limit accounting that the API gate owns. Pacing here is
+    request-local: on an HTTP 429 (or 503) the server's ``Retry-After`` is
+    honoured when present (capped), otherwise exponential backoff applies, for
+    at most ``max_retries`` retries. Any non-retryable failure re-raises
+    immediately, preserving the existing ``artwork_download_failed``
+    diagnostic path. ``opener`` and ``sleep_fn`` are injectable for offline
+    tests; both default to the real network/sleep primitives.
+    """
+    request = urllib.request.Request(url, headers={
+        "User-Agent": f"AmigaADFLibraryBuilder/{__import__('amiga_adf_library_builder._version', fromlist=['__version__']).__version__}",
+        "Accept": "image/*",
+    })
+    last_error: Optional[urllib.error.HTTPError] = None
+    for attempt in range(max_retries + 1):
+        try:
+            with opener(request, timeout=timeout) as response:
+                content_type = response.headers.get_content_type()
+                return response.read(max_bytes + 1), content_type
+        except urllib.error.HTTPError as exc:
+            last_error = exc
+            retryable = exc.code in (429, 503)
+            if not retryable or attempt >= max_retries:
+                raise
+            retry_after = _retry_after_seconds(
+                exc.headers.get("Retry-After") if exc.headers else None)
+            if retry_after is not None:
+                wait = min(retry_after, retry_after_cap)
+            else:
+                wait = min(backoff_base ** (attempt + 1), retry_after_cap)
+            wait = max(0.0, wait)
+            if wait > 0.0:
+                sleep_fn(wait)
+    # Unreachable: the loop either returns or raises on the final attempt.
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("artwork download failed with no HTTP error")
+
+
 def _download_artwork(record: MetadataRecord, dest_dir: Path, title: str,
                       *, timeout: float = 30.0, max_bytes: int = 12_000_000) -> Optional[Path]:
     if not record.artwork_url:
@@ -373,10 +441,12 @@ def _download_artwork(record: MetadataRecord, dest_dir: Path, title: str,
     # Guard against fetching non-public address space. _download_artwork always
     # performs a real network request, so resolve DNS here.
     guard_url(record.artwork_url, resolve=True)
-    request = urllib.request.Request(record.artwork_url, headers={"User-Agent": f"AmigaADFLibraryBuilder/{__import__('amiga_adf_library_builder._version', fromlist=['__version__']).__version__}", "Accept": "image/*"})
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        content_type = response.headers.get_content_type()
-        data = response.read(max_bytes + 1)
+    # Paced fetch with bounded 429/Retry-After handling (see
+    # _fetch_artwork_bytes). A rate-limited image endpoint no longer abandons
+    # the artwork immediately; it backs off and retries, then still surfaces
+    # the real HTTP status in the download-failed diagnostic when exhausted.
+    data, content_type = _fetch_artwork_bytes(record.artwork_url, timeout=timeout,
+                                              max_bytes=max_bytes)
     if len(data) > max_bytes:
         raise RuntimeError("artwork download exceeds 12 MB safety limit")
     if not data:
