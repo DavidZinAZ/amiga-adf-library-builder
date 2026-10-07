@@ -15,17 +15,24 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import sqlite3
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Optional
+from .title_norm import canonical_title, _to_alnum_key
 from .utils import sha256_file
 
 logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
+
+#: A TOSEC ``[...]`` flag/tag group (hack, crack, translated, fixed, etc.).
+_BRACKET_GROUP_RE = re.compile(r"\[[^\]]*\]")
+#: A run of 3+ ASCII letters, used to pick a distinctive narrow filter token.
+_LETTER_RUN_RE = re.compile(r"[A-Za-z]{3,}")
 
 
 # --- indexing status ----------------------------------------------------------
@@ -90,6 +97,61 @@ def _parse_disk_number(name: str) -> tuple[Optional[int], Optional[int]]:
     if m:
         return int(m.group(1)), int(m.group(2))
     return None, None
+
+
+def clean_tosec_title(description: Optional[str]) -> str:
+    """Extract the true game-title portion of a TOSEC entry name/description.
+
+    A TOSEC name follows ``<Title> <version> <metadata>`` where the metadata
+    suffix carries publisher/year/region/disk/demo info and ``[tag]`` flags.
+    None of that is part of the game's title identity and must never create or
+    break a title match. This strips ``[...]`` tag groups and everything from
+    the first ``(`` onward, preserving the inline version token (``v1.0``,
+    ``v1.5``, ``v1.12``) so distinct versions stay distinct.
+    """
+    if not description:
+        return ""
+    text = description.strip()
+    text = _BRACKET_GROUP_RE.sub("", text)
+    # TOSEC metadata parentheticals begin at the first '('; drop them.
+    text = text.split("(")[0].strip()
+    # Collapse any run of whitespace left over after tag removal.
+    return re.sub(r"\s{2,}", " ", text).strip()
+
+
+def title_match_keys(title: Optional[str]) -> frozenset:
+    """Return normalization keys used to compare release title identity.
+
+    Applies :func:`clean_tosec_title` then two normalization variants of
+    :func:`title_norm.canonical_title`:
+
+    * the plain alnum key (no article movement), so ``A 10 Tank Killer`` and
+      ``A-10 Tank Killer`` match (the leading ``A`` is a proper-noun prefix,
+      not an article);
+    * the article-movement key, so ``The X`` and ``X, The`` match.
+
+    A needle matches a candidate iff their key sets overlap. Hyphen/space,
+    roman-numeral and punctuation differences are ignored, while meaningful
+    version differences (``v1.0`` vs ``v1.5``/``v1.12``) are preserved.
+    """
+    clean = clean_tosec_title(title)
+    keys = {_to_alnum_key(clean)}
+    keys.add(canonical_title(clean))
+    keys.discard("")
+    return frozenset(keys)
+
+
+def _title_narrow_token(title: Optional[str]) -> str:
+    """Pick one distinctive letter token for a coarse SQL pre-filter.
+
+    Returns the longest 3+ letter run, which is guaranteed to appear in the
+    true matching TOSEC title (same title letters survive punctuation/spacing
+    differences). Used only to bound the candidate set; the final gate is
+    exact :func:`title_match_keys` equality. Empty if no usable token exists.
+    """
+    runs = _LETTER_RUN_RE.findall(title or "")
+    return max(runs, key=len) if runs else ""
+
 
 
 def parse_tosec_xml(dat_path: Path, source_id: Optional[str] = None) -> list[SourceEntry]:
@@ -593,22 +655,50 @@ class MetadataSourceManager:
         return [self._row_to_entry(row) for row in cur.fetchall()]
 
     def lookup_by_title(self, title: str, limit: int = 5) -> list[SourceEntry]:
-        """Look up indexed entries by title (case-insensitive partial match).
+        """Look up indexed entries by game title identity.
 
-        Returns matching SourceEntry objects or empty list.
+        Structural title match: ``[...]`` tag fields and ``(year)(publisher)
+        (Disk N of M)`` metadata are never treated as title text. A coarse SQL
+        pre-filter narrows rows to a distinctive title token, then an exact
+        :func:`title_match_keys` equality decides the match. Distinguishes
+        versions (``A-10 Tank Killer v1.0`` != ``v1.5``) and does NOT match on
+        a bare substring inside an unrelated title or a TOSEC tag field.
+        Returns matching SourceEntry objects or an empty list.
         Only searches enabled sources.
         """
         if not title:
             return []
-        pattern = f"%{title.lower()}%"
-        cur = self._conn.execute(
-            "SELECT e.* FROM metadata_source_entries e "
-            "JOIN metadata_sources s ON e.source_id = s.source_id "
-            "WHERE s.enabled = 1 AND lower(e.title) LIKE ? "
-            "LIMIT ?",
-            (pattern, limit),
-        )
-        return [self._row_to_entry(row) for row in cur.fetchall()]
+        needle_keys = title_match_keys(title)
+        if not needle_keys:
+            return []
+        token = _title_narrow_token(clean_tosec_title(title))
+        # LIKE '%token%' cannot use an index, so the scan cost is identical
+        # regardless of this bound; a generous pool ensures the exact-key gate
+        # never drops a true match that shares a common title token.
+        pool = max(limit * 100, 2000)
+        if token:
+            cur = self._conn.execute(
+                "SELECT e.* FROM metadata_source_entries e "
+                "JOIN metadata_sources s ON e.source_id = s.source_id "
+                "WHERE s.enabled = 1 AND lower(e.title) LIKE ? "
+                "LIMIT ?",
+                (f"%{token.lower()}%", pool),
+            )
+        else:
+            cur = self._conn.execute(
+                "SELECT e.* FROM metadata_source_entries e "
+                "JOIN metadata_sources s ON e.source_id = s.source_id "
+                "WHERE s.enabled = 1 "
+                "LIMIT ?",
+                (pool,),
+            )
+        rows = cur.fetchall()
+        matched = [
+            self._row_to_entry(r)
+            for r in rows
+            if title_match_keys(r["title"]) & needle_keys
+        ]
+        return matched[:limit]
 
     @staticmethod
     def _row_to_entry(row: "sqlite3.Row") -> SourceEntry:

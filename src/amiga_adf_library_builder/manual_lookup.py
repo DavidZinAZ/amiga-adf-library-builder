@@ -34,7 +34,12 @@ from .canonical import (
     Provenance,
     SourceAuthority,
 )
-from .metadata_source import MetadataSourceManager
+from .metadata_source import (
+    MetadataSourceManager,
+    clean_tosec_title,
+    title_match_keys,
+    _title_narrow_token,
+)
 from .rtfm import DocType
 
 
@@ -277,24 +282,47 @@ def _entries_by_hash(manager: MetadataSourceManager, col: str,
 
 
 def _entries_by_title(manager: MetadataSourceManager, title: str) -> list:
-    needle = title.strip().lower()
-    if not needle:
+    needle_keys = title_match_keys(title)
+    if not needle_keys:
         return []
-    try:
-        rows = manager._conn.execute(
-            """
-            SELECT e.*, s.name AS source_name
-            FROM metadata_source_entries e
-            JOIN metadata_sources s ON s.source_id = e.source_id
-            WHERE s.enabled = 1 AND LOWER(e.title) LIKE ?
-            ORDER BY s.name, e.title
-            LIMIT 200
-            """,
-            (f"%{needle}%",),
-        ).fetchall()
-    except sqlite3.Error:
-        return []
-    return [_row_to_candidate(r) for r in rows]
+    token = _title_narrow_token(clean_tosec_title(title))
+    # Generous pool: LIKE '%token%' scans the whole (bounded) row set anyway,
+    # so the pre-filter must never drop a true match sharing a common token.
+    pool = 2000
+    if token:
+        try:
+            rows = manager._conn.execute(
+                """
+                SELECT e.*, s.name AS source_name
+                FROM metadata_source_entries e
+                JOIN metadata_sources s ON s.source_id = e.source_id
+                WHERE s.enabled = 1 AND LOWER(e.title) LIKE ?
+                LIMIT ?
+                """,
+                (f"%{token.lower()}%", pool),
+            ).fetchall()
+        except sqlite3.Error:
+            return []
+    else:
+        try:
+            rows = manager._conn.execute(
+                """
+                SELECT e.*, s.name AS source_name
+                FROM metadata_source_entries e
+                JOIN metadata_sources s ON s.source_id = e.source_id
+                WHERE s.enabled = 1
+                LIMIT ?
+                """,
+                (pool,),
+            ).fetchall()
+        except sqlite3.Error:
+            return []
+    matched = [
+        _row_to_candidate(r)
+        for r in rows
+        if title_match_keys(r["title"]) & needle_keys
+    ]
+    return matched
 
 
 def _row_to_candidate(row: sqlite3.Row) -> dict:
