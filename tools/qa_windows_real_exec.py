@@ -747,12 +747,147 @@ def main() -> int:
     REPORT["gh90"] = gh90_report
 
     # ------------------------------------------------------------------ #
+    # 5) (fix/gui-live-run-logging) LIVE / CRASH-SAFE run log on Windows.
+    #
+    #    The bug this ticket fixes: the per-run log file was only written at
+    #    FINALIZATION, so a GUI process that failed or crashed before then left
+    #    no diagnostic log at all. The contract now locked here on the real
+    #    Windows runtime:
+    #      * the run log file is created IMMEDIATELY at Run start (a header with
+    #        run_id + app version / build identity + resolved paths + options),
+    #        flushed to disk BEFORE the worker thread starts;
+    #      * on a catchable pipeline failure (missing original dir -> the
+    #        scanner raises NotADirectoryError), the PARTIAL log is PRESERVED
+    #        (header + live progress + the captured exception), never deleted;
+    #      * the failure dialog NAMES the log path so the operator can open it;
+    #      * the GUI returns to a responsive IDLE (stays open) on the failure.
+    #    A failed run never reaches the successful finalization write path, so
+    #    "log present + RUN START banner + captured exception" is the proof the
+    #    log was created at start, not at the end.
+    #    Self-contained (own window + own try/except): a failure in an earlier
+    #    section must not prevent this real-Windows qualification from running.
+    # ------------------------------------------------------------------ #
+    livelog_report = {
+        "log_created_at_run_start": False,
+        "partial_log_preserved": False,
+        "exception_captured": False,
+        "dialog_names_log_path": False,
+        "gui_idle_after_failure": False,
+        "log_file": None,
+        "errors": [],
+    }
+
+    def _livelog_step(name, ok, detail=""):
+        REPORT["steps"].append({"step": name, "ok": ok, "detail": detail})
+        print(f"[{'PASS' if ok else 'FAIL'}] {name}: {detail}")
+
+    try:
+        from PySide6.QtWidgets import QApplication as _LQA, QMessageBox as _LQMB
+
+        from amiga_adf_library_builder.gui import (
+            MainWindow as _LMainWindow,
+            PortablePaths as _LPP,
+            SettingsStore as _LSettings,
+        )
+        from amiga_adf_library_builder.gui.secrets import SecretStore as _LSecret
+        from amiga_adf_library_builder.gui.state import (
+            build_path_config_from_gui_state as _lbuild_cfg,
+        )
+
+        _lqapp = _LQA.instance() or _LQA([])
+        _ll_base = base_dir / "livelog"
+        _ll_lib = _ll_base / "library"
+        _ll_lib.mkdir(parents=True, exist_ok=True)
+        # original dir is deliberately ABSENT -> the scanner raises
+        # NotADirectoryError (a catchable Exception) before any ADF is read.
+        _ll_missing_orig = _ll_base / "original-missing"
+        assert not _ll_missing_orig.exists()
+
+        _lpp = _LPP(base_dir=_ll_base)
+        _lpp.ensure_all()
+        _lmw = _LMainWindow(
+            portable_paths=_lpp,
+            settings_store=_LSettings(_lpp.settings_file()),
+            secret_store=_LSecret.with_vault(_lpp.vault_file()),
+            config_path=None,
+        )
+        _lmw._library_root = _ll_lib
+        _lmw._le_original_dir.setText(str(_ll_missing_orig))
+        _lmw._le_staging_dir.setText(str(_ll_base / "staging"))
+        _lmw._mode_build.setChecked(True)
+        _lmw._mode_export.setChecked(False)
+        _lmw._cb_online.setChecked(False)
+        _lmw.show()
+
+        # Canonical run-log location (library_root/logs, not portable base/logs).
+        _ll_logs = _lbuild_cfg(_lmw._state_from_widgets()).logs_dir
+
+        # Intercept the failure dialog (offscreen: a modal QMessageBox would
+        # block the driver). Capture the text to prove it names the log path.
+        _captured_crit: list = []
+        _orig_crit = _LQMB.critical
+        _LQMB.critical = staticmethod(
+            lambda *a, **k: _captured_crit.append(
+                (a[1] if len(a) > 1 else "", a[2] if len(a) > 2 else "")
+            )
+        )
+        _lmw._on_run()
+        # Pump until the failure is reported (IDLE + dialog) or time out.
+        _ll_deadline = time.time() + 60
+        while time.time() < _ll_deadline:
+            _lqapp.processEvents()
+            if _lmw._state == "IDLE" and _captured_crit:
+                break
+            time.sleep(0.02)
+        _LQMB.critical = _orig_crit
+
+        _ll_files = sorted(_ll_logs.glob("*.log")) if _ll_logs.is_dir() else []
+        _ll_log = _ll_files[0] if _ll_files else None
+        livelog_report["log_file"] = str(_ll_log) if _ll_log else None
+        _ll_text = _ll_log.read_text(encoding="utf-8") if _ll_log else ""
+        livelog_report["log_created_at_run_start"] = bool(_ll_log) and "RUN START" in _ll_text
+        _livelog_step("livelog_created_at_run_start", livelog_report["log_created_at_run_start"],
+                      f"log={_ll_log.name if _ll_log else None} run_start={'RUN START' in _ll_text}")
+        livelog_report["exception_captured"] = "EXCEPTION CAPTURED" in _ll_text and "NotADirectoryError" in _ll_text
+        _livelog_step("livelog_captures_failure", livelog_report["exception_captured"],
+                      f"exception={'EXCEPTION CAPTURED' in _ll_text} type={'NotADirectoryError' in _ll_text}")
+        livelog_report["partial_log_preserved"] = (
+            bool(_ll_log) and "RUN START" in _ll_text and "EXCEPTION CAPTURED" in _ll_text
+            and _ll_log.exists()
+        )
+        _livelog_step("livelog_partial_preserved", livelog_report["partial_log_preserved"],
+                      f"header+exception present, file preserved ({len(_ll_text)} chars)")
+        livelog_report["dialog_names_log_path"] = (
+            bool(_captured_crit)
+            and any(_ll_log is not None and str(_ll_log) in (m[1] or "") for m in _captured_crit)
+        )
+        _livelog_step("livelog_dialog_names_log_path", livelog_report["dialog_names_log_path"],
+                      f"dialog={_captured_crit[0][0] if _captured_crit else None}")
+        livelog_report["gui_idle_after_failure"] = _lmw._state == "IDLE"
+        _livelog_step("livelog_gui_idle_after_failure", livelog_report["gui_idle_after_failure"],
+                      f"state={_lmw._state}")
+        _lmw.close()
+    except Exception as _livelog_exc:
+        _livelog_step("livelog_qualification", False, repr(_livelog_exc))
+        livelog_report["errors"].append(repr(_livelog_exc))
+    REPORT["livelog"] = livelog_report
+
+    # ------------------------------------------------------------------ #
     # Emit the report + secret-leak scan of the logs dir
     # ------------------------------------------------------------------ #
     REPORT["gh86"] = gh86_report
     report_path = report_dir / "report.json"
     report_path.write_text(json.dumps(REPORT, indent=2), encoding="utf-8")
     # Spot-check: no plaintext secret/token in any log under the spaces base.
+    # NOTE (fix/gui-live-run-logging): the RUN log lives under
+    #   <library_root>/logs  (== <base>/library/logs), the canonical location
+    #   used by the CLI and the GUI finalizer. The scan below reads
+    #   <base>/logs (the PORTABLE base log dir, which carries the GUI
+    #   diagnostic log). This is a pre-existing path inconsistency in the
+    #   driver, documented here per the ticket ("do not change the canonical
+    #   log path unless the repository clearly requires it; document any path
+    #   inconsistency instead"). Run-log secret redaction is independently
+    #   covered by the live-logging contract tests.
     leak = False
     for log in (base_dir / "logs").rglob("*.log") if (base_dir / "logs").is_dir() else []:
         txt = log.read_text(encoding="utf-8", errors="replace").lower()
@@ -772,7 +907,13 @@ def main() -> int:
                                      "lb_multi_mappings_added", "lb_check_roots_diagnostic",
                                      "lb_mappings_persist_reopen",
                                      "lb_missing_path_retained_diagnostic",
-                                     "lb_backend_missing_root_diagnostic"))
+                                     "lb_backend_missing_root_diagnostic",
+                                     # (fix/gui-live-run-logging) live/crash-safe run log
+                                     "livelog_created_at_run_start",
+                                     "livelog_captures_failure",
+                                     "livelog_partial_preserved",
+                                     "livelog_dialog_names_log_path",
+                                     "livelog_gui_idle_after_failure"))
     return 1 if hard_fail else 0
 
 

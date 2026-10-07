@@ -25,6 +25,7 @@ running a pipeline.
 from __future__ import annotations
 
 import threading
+from dataclasses import replace
 from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QObject, QThread, Signal
@@ -51,12 +52,20 @@ class PipelineWorker(QObject):
         *,
         config_path: Optional[str] = None,
         cancel_event: Optional[threading.Event] = None,
+        run_id: Optional[str] = None,
+        live_logger: Optional[Any] = None,
     ) -> None:
         super().__init__()
         self._state = state
         self._config_path = config_path
         self._cancel = cancel_event or threading.Event()
         self._thread: Optional[QThread] = None
+        # (live-run-logging) The GUI pre-assigns the run id (so the live log
+        # file is named identically before the pipeline generates its own)
+        # and hands over the live log object; the worker appends its activity
+        # lines to it and captures its own uncaught exceptions into it.
+        self._assigned_run_id = run_id
+        self._live_logger = live_logger
 
     def start(self) -> None:
         thread = QThread()
@@ -78,11 +87,21 @@ class PipelineWorker(QObject):
         return self._cancel.is_set()
 
     def _act(self, text: str) -> None:
-        """Emit one redacted activity line (never raises)."""
+        """Emit one redacted activity line (never raises).
+
+        (live-run-logging) The same line is appended (and flushed) to the
+        live run log when one was handed over, so progress reaches disk
+        while the run is happening, not only at finalization.
+        """
         try:
             self.activity.emit(redact(str(text)))
         except Exception:  # a logging hiccup must never break the run
             pass
+        if self._live_logger is not None:
+            try:
+                self._live_logger.log(text)
+            except Exception:  # a logging hiccup must never break the run
+                pass
 
     def _cancelled(self) -> bool:
         if self._cancel.is_set():
@@ -142,6 +161,13 @@ class PipelineWorker(QObject):
                 # atomic, never inside the read-only original corpus).
                 cache_dir=cfg.cache_dir,
             )
+            # (live-run-logging) Pre-assign the GUI's run id so the pipeline
+            # uses EXACTLY the id the live log file was named with (the
+            # pipeline honors a non-None RunConfig.run_id). The ADF processing
+            # behavior is unchanged: run_pipeline would otherwise generate an
+            # id with the same generator.
+            if self._assigned_run_id is not None and run_config.run_id is None:
+                run_config = replace(run_config, run_id=self._assigned_run_id)
             # Cooperative cancellation hooks: emit progress and check the event.
             self.progress.emit(
                 "Scanning the original disks", 15, str(cfg.original_dir)
@@ -176,6 +202,15 @@ class PipelineWorker(QObject):
             self.progress.emit("Done", 100, "")
             self.finished.emit(result, "", False, cfg)
         except Exception as exc:  # never let a pipeline error kill the GUI thread
+            # (live-run-logging) Capture the worker-thread failure into the
+            # live run log (type, message, traceback, stage, last progress
+            # line) so an early failure leaves evidence on disk, then report
+            # it through the normal GUI path.
+            if self._live_logger is not None:
+                try:
+                    self._live_logger.log_exception(exc)
+                except Exception:  # logging must never mask the run failure
+                    pass
             self._act(f"Run stopped with an error: {redact(str(exc))}")
             self.finished.emit(None, str(exc), False, None)
         finally:

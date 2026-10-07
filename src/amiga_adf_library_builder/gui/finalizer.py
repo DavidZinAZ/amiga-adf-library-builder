@@ -36,6 +36,7 @@ thread is left to finish on its own and reports back through a signal.
 
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -71,6 +72,7 @@ class FinalizationWorker(QObject):
         run_mode: str,
         identity_store: Any = None,
         started_at: Optional[str] = None,
+        live_log_path: Optional[os.PathLike] = None,
     ) -> None:
         super().__init__()
         self._result = dict(result or {})
@@ -78,6 +80,15 @@ class FinalizationWorker(QObject):
         self._run_mode = run_mode
         self._identity_store = identity_store
         self._started_at = started_at
+        # (live-run-logging) The live log file opened at Run start (when one
+        # was created). Passed EXPLICITLY by the GUI — the finalizer must not
+        # look up a process-wide "current" log: a new run started before this
+        # finalization finished would otherwise make the summary append land
+        # in the NEW run's file. ``None`` => no live log exists; write the
+        # run log at the end as before.
+        self._live_log_path = (
+            Path(live_log_path) if live_log_path is not None else None
+        )
         self._failures: list[tuple[str, str]] = []
 
     # -- helpers ---------------------------------------------------------------
@@ -102,23 +113,56 @@ class FinalizationWorker(QObject):
 
     # -- the heavy steps -------------------------------------------------------
     def _write_run_log(self, timings: dict) -> None:
-        """Serialize + write the per-run diagnostic log (blocking I/O)."""
+        """Serialize + write the per-run diagnostic log (blocking I/O).
+
+        (Live-run-logging) When the run started with a LIVE log (the file
+        was created at Run start and has been appending progress ever
+        since), the detailed summary is APPENDED to that same file -- the
+        live header, live progress lines, and any captured exceptions all
+        remain in place, followed by the final summary block ending in
+        ``return_code: 0``. A live log is never deleted, truncated, or
+        replaced. Only when no live log exists (e.g. the live log could not
+        be opened) does the original whole-file write path run, so a
+        successful run always leaves a complete log.
+        """
         self._mark("run_log")
         t0 = time.perf_counter()
         try:
-            from ..logging_utils import write_run_log
+            from ..logging_utils import _render, write_run_log
 
-            write_run_log(
-                logs_dir=self._cfg.logs_dir,
-                run_id=self._result.get("run_id") or "unknown",
-                config_label="gui",
-                cfg=self._cfg,
-                argv=["gui"],
-                command=self._run_mode,
-                result=self._result,
-                started_at=self._started_at or "",
-                return_code=0,
-            )
+            run_id = self._result.get("run_id") or "unknown"
+            started_at = self._started_at or ""
+            live_path = self._live_log_path
+            if (
+                live_path is not None
+                and live_path.parent == Path(self._cfg.logs_dir)
+            ):
+                text = _render(
+                    log_path=live_path,
+                    run_id=run_id,
+                    config_label="gui",
+                    cfg=self._cfg,
+                    argv=["gui"],
+                    command=self._run_mode,
+                    result=self._result,
+                    started_at=started_at,
+                    return_code=0,
+                )
+                with live_path.open("a", encoding="utf-8") as fh:
+                    fh.write("\n")
+                    fh.write(text)
+            else:
+                write_run_log(
+                    logs_dir=self._cfg.logs_dir,
+                    run_id=run_id,
+                    config_label="gui",
+                    cfg=self._cfg,
+                    argv=["gui"],
+                    command=self._run_mode,
+                    result=self._result,
+                    started_at=started_at,
+                    return_code=0,
+                )
         except Exception as exc:  # best-effort, mirrors the CLI
             self._fail("run_log", exc)
         finally:

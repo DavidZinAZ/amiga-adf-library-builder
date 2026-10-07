@@ -71,7 +71,14 @@ from .layout import PortablePaths
 from .providers import Provider, ProviderRegistry, default_registry
 from .secrets import SecretError, SecretStore, install_gui_redaction
 from .settings import Preset, Settings, SettingsStore
-from .state import GuiState
+from .state import GuiState, build_path_config_from_gui_state
+from .live_run_log import (
+    LiveRunLog,
+    identity_lines,
+    install_crash_hooks,
+    new_run_id,
+    set_current,
+)
 from .themes import apply_theme, available_themes
 from ..models import (
     StagedState,
@@ -379,6 +386,12 @@ class MainWindow(QMainWindow):
         # redacted during propagation. Idempotent: safe to call again.
         self._redactor = install_gui_redaction()
 
+        # (live-run-logging) Route uncaught exceptions — main thread, Qt
+        # worker slots, and background threads — into the ACTIVE live run log
+        # (when a run is live) so a crash mid-run leaves a traceback on disk.
+        # Idempotent: safe to call once per window.
+        install_crash_hooks()
+
         self._build_widgets()
         self._apply_settings_to_widgets()
         self._build_menu()
@@ -389,6 +402,8 @@ class MainWindow(QMainWindow):
         self._run_mode = "build"
         self._worker = None
         self._cancel_event = None
+        # (live-run-logging) The live run log opened at Run start, if any.
+        self._live_log: Optional[LiveRunLog] = None
         self._finalize_worker = None
         self._finalize_thread = None
         self._state = "IDLE"  # IDLE, RUNNING, CANCELLING, JOINING, FINISHING
@@ -2265,9 +2280,20 @@ class MainWindow(QMainWindow):
 
             from .worker import PipelineWorker
 
+            # (live-run-logging) Open the run log IMMEDIATELY — before the
+            # worker thread starts — and flush the run-start header (run id,
+            # app version / build identity, resolved paths, options,
+            # online/offline state) to disk. If the live log cannot be opened
+            # (unwritable dir), the run still proceeds: the finalizer writes
+            # the log at the end as before. Logging must never break a run.
+            run_id, live_log = self._start_live_log(state)
             self._cancel_event = __import__("threading").Event()
             self._worker = PipelineWorker(
-                state, config_path=self._config_path, cancel_event=self._cancel_event
+                state,
+                config_path=self._config_path,
+                cancel_event=self._cancel_event,
+                run_id=run_id,
+                live_logger=live_log,
             )
             self._worker.progress.connect(self._on_progress)
             self._worker.finished.connect(self._on_finished)
@@ -2283,10 +2309,111 @@ class MainWindow(QMainWindow):
             self._state = "RUNNING"
             self._worker.start()
         except Exception as exc:  # configuration errors surface as clear UI text
+            # (live-run-logging) If the live log was already opened (header on
+            # disk), record the start failure in it before closing — the
+            # partial log is preserved, never deleted.
+            self._live_log_mark(f"Run could not be started: {redact(str(exc))}")
+            self._clear_live_log()
             self._run_in_progress = False
             self._run_marker(f"Run could not be started: {exc}")
             QMessageBox.critical(self, "Cannot start", f"Could not start: {exc}")
             self._status_label.setText(f"Error: {exc}")
+
+    def _start_live_log(self, state: "GuiState") -> tuple[str, Optional[LiveRunLog]]:
+        """Open the live run log for this run and flush the run-start header.
+
+        The file is created and its header flushed to disk BEFORE the worker
+        thread starts, so a process that dies at any later point (operator
+        close, uncaught exception, crash) leaves the header plus every
+        activity line written so far.
+
+        The log is written to the SAME canonical ``logs_dir`` the CLI and
+        the finalizer use (``<library-root>/logs`` by default). If the
+        PathConfig cannot even be resolved (bad paths), a best-effort log is
+        still opened under ``<library-root>/logs`` so the header + the
+        worker's path error remain on disk.
+
+        Returns ``(run_id, live_log)``. ``live_log`` is ``None`` when the
+        file could not be created (unwritable ``logs_dir``): the run proceeds
+        without live logging and the finalizer writes the log at the end as
+        before. A header failure must never block a run.
+        """
+        run_id = new_run_id()
+        header: list[str] = [
+            *identity_lines(),
+            f"command        : gui ({state.run_mode})",
+            f"online_state   : {'online' if state.online else 'offline'}",
+            f"refresh_metadata   : {state.refresh_metadata}",
+            f"require_artwork    : {state.require_artwork}"
+            f"  include_artwork={state.include_artwork}"
+            f"  include_manuals_rtfm={state.include_manuals_rtfm}",
+            f"verify_only        : {state.verify_only}",
+            f"one_per_game       : {state.one_per_game}",
+            f"convert_progressive_jpeg : {state.convert_progressive_jpeg}",
+        ]
+        logs_dir: Optional[Path] = None
+        # Resolve the SAME PathConfig the worker will resolve (pure path
+        # resolution — no I/O side effects) so the header names the exact
+        # canonical directories, and the live file lands in the canonical
+        # logs_dir the CLI and finalizer use.
+        try:
+            cfg = build_path_config_from_gui_state(
+                state, config_path=self._config_path
+            )
+            logs_dir = Path(cfg.logs_dir)
+            for name in (
+                "library_root",
+                "original_dir",
+                "staging_dir",
+                "output_dir",
+                "quarantine_dir",
+                "cache_dir",
+                "logs_dir",
+            ):
+                header.append(f"{name:18}: {redact(str(getattr(cfg, name, '')))}")
+        except Exception as exc:  # bad paths: header stays partial; worker reports
+            header.append(f"path_resolution  : FAILED ({redact(str(exc))})")
+            if state.library_root and state.library_root.strip():
+                logs_dir = Path(state.library_root.strip()) / "logs"
+        live_log: Optional[LiveRunLog] = None
+        if logs_dir is not None:
+            try:
+                live_log = LiveRunLog.start(
+                    logs_dir=logs_dir, run_id=run_id, header_lines=header
+                )
+            except Exception as exc:
+                # (live-run-logging) Logging must never break a run: fall back
+                # to end-of-run logging (finalizer) when the live file cannot
+                # open.
+                self._append_diag(
+                    f"Live run log could not be created: {redact(str(exc))}"
+                )
+        set_current(live_log)
+        self._live_log = live_log
+        if live_log is not None:
+            self._append_diag(f"Live run log started: {live_log.path}")
+        return run_id, live_log
+
+    def _live_log_mark(self, text: str) -> None:
+        """Append a plain run-boundary line to the live log (never raises)."""
+        log = self._live_log
+        if log is None:
+            return
+        try:
+            log.log(text)
+        except Exception:  # logging must never break the run
+            pass
+
+    def _clear_live_log(self) -> None:
+        """End this run's live log: close the file, clear the process ref."""
+        log = self._live_log
+        if log is not None:
+            try:
+                log.close()
+            except Exception:  # never break the run over a close
+                pass
+        self._live_log = None
+        set_current(None)
 
     def _collect_progressive_answers(self, state: "GuiState") -> dict[str, bool]:
         """Pre-scan original artwork for progressive JPEGs and prompt per-image.
@@ -2355,6 +2482,8 @@ class MainWindow(QMainWindow):
         self._run_in_progress = False
         if cancelled:
             self._cancel_button.setEnabled(False)
+            self._live_log_mark("=== RUN END (cancelled) ===")
+            self._clear_live_log()
             self._finish_run_to_idle()
             self._status_label.setText("Cancelled.")
             self._run_marker("Run cancelled by the operator.")
@@ -2362,12 +2491,25 @@ class MainWindow(QMainWindow):
             return
         if error:
             self._cancel_button.setEnabled(False)
+            self._live_log_mark("=== RUN END (failed) ===")
+            log_path = (
+                self._live_log.path if self._live_log is not None else None
+            )
+            self._clear_live_log()
             self._finish_run_to_idle()
             # Errors never contain secret values; they are core/CLI messages.
             self._status_label.setText("Failed.")
             self._append_diag(f"ERROR: {error}")
             self._run_marker("=== RUN END (failed) ===")
-            QMessageBox.critical(self, "Run failed", error)
+            # (live-run-logging) The GUI stays open on a catchable failure and
+            # names the log file so the operator can open the partial log
+            # (header + live progress + the captured exception) immediately.
+            msg = error
+            if log_path is not None:
+                msg = (
+                    f"{error}\n\nRun log (partial, preserved):\n{log_path}"
+                )
+            QMessageBox.critical(self, "Run failed", msg)
             return
         # (GH-192) Progress transition running -> finishing. The pipeline is
         # done and the export is already written; Run is re-enabled NOW so the
@@ -2384,6 +2526,10 @@ class MainWindow(QMainWindow):
         ):
             self._append_diag(line)
         self._run_marker("=== RUN END (done) ===")
+        # (live-run-logging) The detailed summary is APPENDED by the
+        # finalizer below; mark the pipeline end in the live log now so a
+        # crash between pipeline completion and finalization is visible.
+        self._live_log_mark("=== RUN END (done) ===")
 
         if cfg is not None:
             # (GH-192) The CHEAP post-run state stays on the GUI thread: the
@@ -2436,6 +2582,7 @@ class MainWindow(QMainWindow):
         # (GH-192) Only the two heavy blocking steps run here, on a worker
         # thread: run-log serialization and the curation-state rebuild.
         if cfg is None:
+            self._clear_live_log()
             self._finish_run_to_idle()
             return
 
@@ -2447,6 +2594,12 @@ class MainWindow(QMainWindow):
             run_mode=getattr(self, "_run_mode", "build"),
             identity_store=self._identity_store,
             started_at=datetime.now(timezone.utc).isoformat(),
+            # (live-run-logging) APPEND the final summary to the live log
+            # file opened at Run start (never replace it). Passed explicitly
+            # so a fast-follow-up run cannot steal the append.
+            live_log_path=(
+                self._live_log.path if self._live_log is not None else None
+            ),
         )
         thread = QThread(self)
         worker.moveToThread(thread)
@@ -2506,6 +2659,12 @@ class MainWindow(QMainWindow):
         for line in format_timing_report(payload.get("timings") or {},
                                          failures):
             self._append_diag(line)
+        # (live-run-logging) The finalizer has now APPENDED the detailed
+        # summary to the live log (or written it at the end when no live log
+        # existed). The run is complete: close the live file and clear the
+        # process-wide reference. The file is NEVER deleted — the partial log
+        # stays for the operator.
+        self._clear_live_log()
         self._finish_run_to_idle()
 
     def _finish_run_to_idle(self) -> None:
