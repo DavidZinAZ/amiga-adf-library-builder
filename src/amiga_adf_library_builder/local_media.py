@@ -158,6 +158,47 @@ _TRAILING_DISK_RE = re.compile(
     r"\b(?:dis[ck]|disk|disc|side|part)\s*[0-9]+[ab]?\b", re.IGNORECASE
 )
 
+#: Trailing release-version suffix on a manual-file / release title, e.g.
+#: ``"A 10 Tank Killer v1.0"`` or ``"Ultima VI The False Prophet v1.12"``.
+#: A versioned release may match a versionless manual when the underlying
+#: game identity is otherwise exact; the version suffix itself carries no
+#: game identity, so it is stripped before canonical comparison. Only a
+#: trailing ``v`` + digits/dots token is removed (whole word), so titles
+#: that merely CONTAIN such a token mid-string are untouched.
+_RELEASE_VERSION_RE = re.compile(r"\s+v\d[\d.]*\s*$", re.IGNORECASE)
+
+
+def _manual_identity_key(name: str) -> str:
+    """Canonical manual-game identity key for one filename stem or title.
+
+    Deterministic, structural (never substring-based). Applied IDENTICALLY
+    to the release title and to a manual file stem so two names produce the
+    same key exactly when they carry the same game identity:
+
+      1. hyphens -> spaces (``A-10`` == ``A 10``);
+      2. release-tag stripping (cracks/trainers/alt/lang/chipset/disk);
+      3. trailing release-version suffix stripped (``v1.0`` / ``v1.12``);
+      4. canonical normalization (article movement ``The X`` == ``X, The``,
+         roman<->arabic numerals, punctuation/underscore collapse).
+
+    The underscore variant ``"UFO_ Enemy Unknown"`` is handled by the final
+    punctuation collapse (``_`` is non-alnum, so it vanishes like any other
+    separator).
+
+    This key is ONLY used for the ``Manual`` category path (manual documents
+    from ``manual_roots``); image-candidate matching is unchanged.
+    """
+    if not name:
+        return ""
+    # 1) Hyphens are separators, not identity characters (``A-10`` vs ``A 10``).
+    t = name.replace("-", " ")
+    # 2) Conservative release-tag stripping (whole-word audited list only).
+    t = _strip_release_tags(t)
+    # 3) Trailing version suffix (``v1.0``, ``v1.06``, ``v1.12``).
+    t = _RELEASE_VERSION_RE.sub(" ", t)
+    # 4) Canonical normalization incl. article movement + roman<->arabic.
+    return _canonical_norm(t)
+
 
 class MatchMethod(str, Enum):
     """How a candidate was matched to a release group."""
@@ -1283,6 +1324,26 @@ class LocalMediaProvider:
             except OSError:
                 # A single unreadable root must not abort the whole run.
                 continue
+        # (local-manual matching) Index PDF/TXT manuals from the configured
+        # manual_roots into the SAME candidate index so they participate in the
+        # per-release local-media matching path. Each manual is attributed to
+        # the distinct "Manual" category (never a preferred image type), so
+        # image selection/priority is completely unchanged. Discovery is
+        # read-only and confinement-safe (reuses discover_manuals).
+        for manual_root in self.config.manual_roots:
+            try:
+                for msrc in discover_manuals((manual_root,), recursive=self.config.recursive):
+                    cand = LocalMediaCandidate(
+                        path=msrc.path,
+                        category="Manual",
+                        root=msrc.root,
+                        game_folder=None,
+                    )
+                    self._index.append(cand)
+                    self._add_to_index(cand)
+            except OSError:
+                # A single unreadable root must not abort the whole run.
+                continue
         self._discovered = True
         return len(self._index)
 
@@ -1556,6 +1617,74 @@ class LocalMediaProvider:
                         return pick
             # Finished current category with no confident match; advance.
 
+        # Manual pass (lowest priority): PDF/TXT manuals indexed from
+        # ``manual_roots`` carry category ``Manual``, which is deliberately
+        # NOT in ``preferred_image_types`` (image priority is unchanged).
+        # They are considered here, after every image category had its
+        # chance: reaching this point means NO image category produced a
+        # confident hit. Same three-outcome logic and near-tie guards.
+        manual_cands = [c for c in self._index if c.category == "Manual"]
+        if manual_cands:
+            manual_cands.sort(
+                key=lambda c: (
+                    self._root_order.get(str(c.root), len(self._root_order)),
+                    str(c.path),
+                )
+            )
+            best_manual = None
+            best_manual_method = MatchMethod.NONE
+            best_manual_score = 0.0
+            second_manual_score = 0.0
+            for cand in manual_cands:
+                method, score = self._score(cand, identities)
+                if method != MatchMethod.NONE:
+                    if score > best_manual_score:
+                        second_manual_score = best_manual_score
+                        best_manual = cand
+                        best_manual_method = method
+                        best_manual_score = score
+                    elif score > second_manual_score and cand != best_manual:
+                        second_manual_score = score
+                if method != MatchMethod.NONE and score >= auto_match_threshold:
+                    near_tie = (
+                        best_manual_score - second_manual_score < near_tie_diff
+                        if second_manual_score > 0 else False
+                    )
+                    if score >= auto_match_threshold and not near_tie:
+                        pick.candidate = cand
+                        pick.method = method
+                        pick.confidence = score
+                        pick.outcome = "auto_match"
+                        pick.top_candidates = [{
+                            "path": str(cand.path),
+                            "category": cand.category,
+                            "method": method.value,
+                            "score": round(score, 4),
+                            "norm_stem": cand.norm_stem,
+                        }]
+                        pick.evaluated = evaluated
+                        return pick
+                    # Near-tie or review-band manual match.
+                    pick.candidate = cand
+                    pick.method = method
+                    pick.confidence = score
+                    pick.outcome = "needs_review"
+                    pick.reason = (
+                        f"near-tie with next manual candidate (diff < {near_tie_diff:.0%})"
+                        if near_tie
+                        else f"confidence {score:.3f} below auto-match threshold {auto_match_threshold:.3f}"
+                    )
+                    pick.top_candidates = [{
+                        "path": str(cand.path),
+                        "category": cand.category,
+                        "method": method.value,
+                        "score": round(score, 4),
+                        "norm_stem": cand.norm_stem,
+                    }]
+                    pick.evaluated = evaluated
+                    return pick
+            # No confident manual hit; fall through to the review/no-match tail.
+
         # No confident hit in any category. Check if we have any candidates for review.
         if best_overall is not None:
             # We have some match, but below confidence_threshold
@@ -1704,6 +1833,18 @@ class LocalMediaProvider:
             or identities["norm_base_title"] in base_chain
         ):
             return MatchMethod.CANONICAL_REUSE, 0.97
+        # 4b) Manual identity (PDF/TXT manuals from manual_roots only).
+        # Structural canonical comparison — NEVER substring containment:
+        # ``Defender`` does not match ``Defender II.txt`` or ``Centurion_
+        # Defender of Rome.txt`` because the keys are not EQUAL. The version
+        # suffix and article position differences are normalized on BOTH
+        # sides (a versioned release matches a versionless manual when the
+        # game identity is otherwise exact).
+        if cand.category == "Manual" and identities.get("norm_title"):
+            mkey = _manual_identity_key(ci["raw_stem"])
+            rkey = _manual_identity_key(title)
+            if mkey and rkey and mkey == rkey:
+                return MatchMethod.NORMALIZED_TITLE, 0.99
         # 5) carefully scored fuzzy match (guarded against false merges).
         if identities["norm_title"]:
             score = self._fuzzy_score(cand, identities)

@@ -576,13 +576,32 @@ def _resolve_local_media_master(group: ReleaseGroup, provider) -> tuple[Optional
             _detail["norm_stem"] = norm_stem
             _detail_candidates.append(_detail)
 
-    # Group-level summary event (replaces ~9,600 per-candidate events)
+    # Group-level summary event (replaces ~9,600 per-candidate events).
+    # Manual participation is called out explicitly so "0 candidates evaluated"
+    # can no longer mask a configured-but-unindexed manual library: the counts
+    # are split image vs Manual so an operator can see manuals participate.
+    _manual_eval = sum(1 for c in candidates_evaluated if c.get("category") == "Manual")
+    _manual_detail = ""
+    if provider_manual_candidates := sum(
+        1 for c in getattr(provider, "_index", []) if c.category == "Manual"
+    ):
+        _manual_detail = (
+            f"; manual candidates available: {provider_manual_candidates}, "
+            f"evaluated: {_manual_eval}"
+        )
+    if _manual_eval:
+        _manual_outcome = (
+            "manual matched" if result.outcome == "auto_match" and result.category == "Manual"
+            else "manual no-match"
+        )
+        _manual_detail += f"; {_manual_outcome}"
     events.append(EnrichEvent(
         category=EnrichCategory.LOCAL_MEDIA,
         detail=(
             f"local-media scan: {len(candidates_evaluated)} candidates evaluated; "
             f"{matched_count} matched; {rejected_count} rejected; "
             f"{needs_review_count} needs review; {unmatched_count} unmatched"
+            f"{_manual_detail}"
         ),
         cache="hit" if result.outcome == "auto_match" else "miss", ok=True,
     ))
