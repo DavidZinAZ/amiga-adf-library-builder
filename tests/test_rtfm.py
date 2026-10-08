@@ -236,8 +236,95 @@ def test_build_rtfm_all_skips_duplicate_group_key(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Variant behavior (crack/trainer/alt reuses same .rtfm)
+# Explicitly selected local manuals are authoritative, per release
 # ---------------------------------------------------------------------------
+
+
+def test_explicit_manual_bypasses_fallback_and_release_review(tmp_path, monkeypatch):
+    manual = tmp_path / "A-10 Tank Killer.txt"
+    manual.write_text("Controls: fire with the space bar.\n", encoding="utf-8")
+    group = _manual_group("A 10 Tank Killer v1.0", version="1.0")
+    group.quarantine_reason = "near-duplicate release requires curation"
+    explicit = rc.RtfmSource(
+        path=manual, root=tmp_path, category=rc.CATEGORY_MANUALS,
+        stem="A 10 Tank Killer v1.0",
+    )
+    fallback = rc.RtfmSource(
+        path=tmp_path / "fallback.txt", root=tmp_path,
+        category=rc.CATEGORY_MANUALS, stem="A 10 Tank Killer v1.1",
+    )
+    fallback.path.write_text("wrong candidate\n", encoding="utf-8")
+
+    original_score = rc.score_source_match
+    scored_sources = []
+
+    def reject_fallback(source, candidate_group):
+        scored_sources.append(source.path)
+        if source.path == fallback.path:
+            return rc.MatchScore(True, 1.0, "exact", ["forced fallback tie"])
+        return original_score(source, candidate_group)
+
+    monkeypatch.setattr(rc, "score_source_match", reject_fallback)
+    result = rc.build_rtfm_for_group(
+        group, cfg=_cfg({}), rtfm_dir=tmp_path / "rtfm",
+        sources=[fallback], explicit_sources=[explicit],
+    )
+
+    assert result.written is True
+    assert result.routed_for_review is False
+    assert scored_sources == [], "explicit source must bypass all fallback scoring"
+    assert (tmp_path / "rtfm" / "A 10 Tank Killer v1.0.rtfm").is_file()
+    assert "Controls: fire with the space bar." in result.rtfm_path.read_text()
+    assert [source.filename for source in result.sources] == [manual.name]
+
+
+def test_shared_explicit_source_builds_and_exports_one_payload_per_release(tmp_path):
+    manual = tmp_path / "A-10 Tank Killer.txt"
+    manual.write_text("Controls: fire with the space bar.\n", encoding="utf-8")
+    explicit = rc.RtfmSource(
+        path=manual, root=tmp_path, category=rc.CATEGORY_MANUALS,
+        stem="A 10 Tank Killer",
+    )
+    groups = [
+        _manual_group("A 10 Tank Killer v1.0", source_filename="A 10 Tank Killer v1.0", version="1.0"),
+        _manual_group("A 10 Tank Killer v1.5", source_filename="A 10 Tank Killer v1.5", version="1.5"),
+    ]
+    originals = tmp_path / "original"
+    originals.mkdir()
+    for group in groups:
+        (originals / group.records[0].source_filename).write_bytes(b"synthetic disk")
+
+    out = tmp_path / "rtfm"
+    results = rc.build_rtfm_all(
+        groups, cfg=_cfg({}), rtfm_dir=out,
+        explicit_sources={group.release_key: [explicit] for group in groups},
+    )
+
+    assert len(results) == 2
+    assert all(result.written for result in results)
+    assert {result.basename for result in results} == {
+        "A 10 Tank Killer v1.0", "A 10 Tank Killer v1.5",
+    }
+    assert len(list(out.glob("*.rtfm"))) == 2
+    for group, result in zip(groups, results):
+        payload = out / f"{group.title}.rtfm"
+        provenance = json.loads(result.provenance_path.read_text(encoding="utf-8"))
+        assert payload.is_file()
+        assert provenance["release_key"] == group.release_key
+        assert provenance["basename"] == group.title
+        assert provenance["sources"][0]["filename"] == manual.name
+        assert result.rtfm_path == payload
+
+        from amiga_adf_library_builder.exporter import export_release
+        written, unchanged, conflicts = export_release(
+            group, tmp_path / "staging", basename=group.title,
+            source_basename=group.title, original_dir=originals,
+            rtfm_paths={group.release_key: payload},
+        )
+        assert not conflicts
+        folder = tmp_path / "staging" / "ADF" / group.title
+        assert (folder / f"{group.title}.rtfm").is_file()
+        assert (folder / f"{group.title}.rtfm").read_text() == payload.read_text()
 
 
 def test_variant_distinct_release_key_gets_distinct_basename(tmp_path):

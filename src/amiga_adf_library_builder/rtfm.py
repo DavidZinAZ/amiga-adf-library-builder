@@ -977,6 +977,7 @@ def _section_for_category(category: str) -> str:
 
 def _compose_sections(
     sources: list[RtfmSource], group, cfg: "RtfmConfig | None" = None,
+    *, explicit: bool = False,
 ) -> tuple[dict, list[RtfmProvenanceSource], Optional[list[str]], list[str]]:
     """Compose section bodies from matched sources (verbatim, deterministic).
 
@@ -989,7 +990,9 @@ def _compose_sections(
     A source that cannot be decoded (binary / NUL) is SKIPPED: it is not added
     to ``sections`` or ``provenance_sources``, and a corresponding note is
     recorded in ``skipped_notes`` so the caller can route it for review. This
-    keeps one bad source from aborting the whole group.
+    keeps one bad source from aborting the whole group. ``explicit=True`` marks
+    sources previously selected by the upstream local-media matcher so their
+    provenance does not invoke the title matcher a second time.
     """
     sections: dict[str, list[str]] = {}
     prov_sources: list[RtfmProvenanceSource] = []
@@ -1009,7 +1012,10 @@ def _compose_sections(
         marker = _section_for_category(src.category)
         sections.setdefault(marker, []).append(content_text.strip())
         root_index = getattr(src, "root_index", 0)
-        sc = score_source_match(src, group)
+        sc = (
+            MatchScore(True, 1.0, "explicit", ["upstream_explicit_manual_source"])
+            if explicit else score_source_match(src, group)
+        )
         prov_sources.append(
             RtfmProvenanceSource(
                 category=src.category,
@@ -1057,7 +1063,10 @@ def _compose_sections(
             if contributed:
                 passthrough_order = contributed
         root_index = getattr(src, "root_index", 0)
-        sc = score_source_match(src, group)
+        sc = (
+            MatchScore(True, 1.0, "explicit", ["upstream_explicit_manual_source"])
+            if explicit else score_source_match(src, group)
+        )
         prov_sources.append(
             RtfmProvenanceSource(
                 category=src.category,
@@ -1099,7 +1108,10 @@ def _compose_sections(
         marker = _section_for_category(src.category)
         sections.setdefault(marker, []).append(body)
         root_index = getattr(src, "root_index", 0)
-        sc = score_source_match(src, group)
+        sc = (
+            MatchScore(True, 1.0, "explicit", ["upstream_explicit_manual_source"])
+            if explicit else score_source_match(src, group)
+        )
         prov_sources.append(
             RtfmProvenanceSource(
                 category=src.category,
@@ -1141,7 +1153,10 @@ def _compose_sections(
     for src in [s for s in sources if s.path.suffix.lower() in DOC_SUFFIXES]:
         suf = src.path.suffix.lower()
         root_index = getattr(src, "root_index", 0)
-        sc = score_source_match(src, group)
+        sc = (
+            MatchScore(True, 1.0, "explicit", ["upstream_explicit_manual_source"])
+            if explicit else score_source_match(src, group)
+        )
 
         # Suppress duplicate manual content in favor of a higher-fidelity source.
         if _canonical_game_key(src) in _hf_keys:
@@ -1193,9 +1208,10 @@ def _compose_sections(
                 res = extract_image_text(src.path, _docs_cfg)
                 kind_prefix = "image"
         except Exception as exc:
+            detail = str(exc).replace(str(src.path), src.path.name)
             skipped_notes.append(
                 f"source skipped (extraction failed, routed for review): "
-                f"{src.path.name} ({type(exc).__name__})"
+                f"{src.path.name} ({type(exc).__name__}: {detail})"
             )
             continue
 
@@ -1222,9 +1238,10 @@ def _compose_sections(
                     source_url=src.source_url or "",
                 )
             )
+            detail = f"; reason: {res.reason}" if res.reason else ""
             skipped_notes.append(
                 f"source skipped (extraction unavailable"
-                f"{'; needs OCR' if res.needs_ocr else ''}): {src.path.name}"
+                f"{'; needs OCR' if res.needs_ocr else ''}): {src.path.name}{detail}"
             )
             continue
 
@@ -1639,6 +1656,7 @@ def build_rtfm_for_group(
     cfg: RtfmConfig,
     rtfm_dir: Path,
     sources: Optional[list[RtfmSource]] = None,
+    explicit_sources: Optional[list[RtfmSource]] = None,
     library_root: Optional[Path] = None,
     basename: Optional[str] = None,
 ) -> RtfmResult:
@@ -1675,24 +1693,28 @@ def build_rtfm_for_group(
     rtfm_path = rtfm_dir / f"{basename}.rtfm"
     prov_path = rtfm_dir / f"{basename}.rtfm.provenance.json"
 
-    # Ambiguous / quarantined match => route for review, do not emit.
-    qr = getattr(group, "quarantine_reason", None)
-    if qr:
-        reason = "ambiguous match (routed for review): " + (qr or "")
-        result.routed_for_review = True
-        result.review_reason = reason
-        assert result.review_reason is not None
-        result.notes.append(result.review_reason)
-        result.sources = []
-        write_json_atomic(
-            prov_path, _build_provenance(group, result, max_bytes=cfg.max_bytes, mode="deterministic")
-        )
-        result.provenance_path = prov_path
-        return result
+    # An upstream explicit manual selection is authoritative for this release.
+    # Release-level quarantine/review remains independent of manual trust.
+    explicit = list(explicit_sources or [])
+    if explicit:
+        all_sources = explicit
+    else:
+        # No explicit match: preserve the existing fallback discovery/scoring.
+        qr = getattr(group, "quarantine_reason", None)
+        if qr:
+            reason = "ambiguous match (routed for review): " + (qr or "")
+            result.routed_for_review = True
+            result.review_reason = reason
+            result.notes.append(result.review_reason)
+            result.sources = []
+            write_json_atomic(
+                prov_path, _build_provenance(group, result, max_bytes=cfg.max_bytes, mode="deterministic")
+            )
+            result.provenance_path = prov_path
+            return result
 
-    # Discover + SCORE sources (Issue #6: deterministic confidence scoring).
-    all_sources = list(sources if sources is not None else discover_sources(cfg))
-    if library_root is not None:
+        all_sources = list(sources if sources is not None else discover_sources(cfg))
+    if not explicit and library_root is not None:
         from .canonical_naming import _load_canonical_library, identity_for_release_group
         from .manual_lookup import document_to_rtfm_sources
         canon = _load_canonical_library(library_root)
@@ -1706,14 +1728,27 @@ def build_rtfm_for_group(
                     known = {(x.provider, x.source_url, x.doc_type, x.content) for x in all_sources}
                     all_sources.extend(x for x in persisted
                                        if (x.provider, x.source_url, x.doc_type, x.content) not in known)
-    scored = [(s, score_source_match(s, group)) for s in all_sources]
-    matched = [s for s, sc in scored if sc.matched]
-    # Deterministic sort by (descending confidence, ascending canonical key) so
-    # the "best" and "near-tie" candidates are stable and reproducible.
-    ranked = sorted(
-        ((sc, s) for s, sc in scored if sc.matched),
-        key=lambda scs: (-round(scs[0].confidence, 6), _canonical_game_key(scs[1])),
-    )
+    if explicit:
+        # Mark upstream-selected sources as trusted without re-running the matcher.
+        explicit_scores = [
+            (source, MatchScore(True, 1.0, "explicit", ["upstream_explicit_manual_source"]))
+            for source in explicit
+        ]
+        matched = list(explicit)
+        ranked = sorted(
+            ((score, source) for source, score in explicit_scores),
+            key=lambda pair: _canonical_game_key(pair[1]),
+        )
+        scored = [(source, score) for source, score in explicit_scores]
+    else:
+        scored = [(s, score_source_match(s, group)) for s in all_sources]
+        matched = [s for s, sc in scored if sc.matched]
+        # Deterministic sort by (descending confidence, ascending canonical key) so
+        # the "best" and "near-tie" candidates are stable and reproducible.
+        ranked = sorted(
+            ((sc, s) for s, sc in scored if sc.matched),
+            key=lambda scs: (-round(scs[0].confidence, 6), _canonical_game_key(scs[1])),
+        )
     if not matched:
         # Nothing found. Route for review (operator may add a manual) rather
         # than emitting an empty file. Record the best non-matching candidate
@@ -1836,7 +1871,9 @@ def build_rtfm_for_group(
         safe_matched.append(s)
     matched = safe_matched
 
-    sections, prov_sources, passthrough_order, skipped_notes = _compose_sections(matched, group, cfg=cfg)
+    sections, prov_sources, passthrough_order, skipped_notes = _compose_sections(
+        matched, group, cfg=cfg, explicit=bool(explicit)
+    )
     result.sources = prov_sources
     result.notes.extend(skipped_notes)
 
@@ -1898,6 +1935,7 @@ def build_rtfm_all(
     cfg: RtfmConfig,
     rtfm_dir: Path,
     extra_sources: Optional[list[RtfmSource]] = None,
+    explicit_sources: Optional[dict[str, list[RtfmSource]]] = None,
     library_root: Optional[Path] = None,
 ) -> list[RtfmResult]:
     """Build ``.rtfm`` sidecars for every release group (deterministic, offline).
@@ -1931,7 +1969,11 @@ def build_rtfm_all(
             continue
         seen_keys.add(key)
         try:
-            results.append(build_rtfm_for_group(g, cfg=cfg, rtfm_dir=rtfm_dir, sources=sources, library_root=library_root, basename=names[g.release_key]))
+            results.append(build_rtfm_for_group(
+                g, cfg=cfg, rtfm_dir=rtfm_dir, sources=sources,
+                explicit_sources=(explicit_sources or {}).get(key),
+                library_root=library_root, basename=names[g.release_key],
+            ))
         except RtfmDisabled:
             continue
         except Exception as exc:  # a single group failure must not abort the run

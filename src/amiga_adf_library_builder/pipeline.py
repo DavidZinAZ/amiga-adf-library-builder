@@ -637,30 +637,23 @@ def run_pipeline(
                         manual_trace["provider_statuses"].append("retrokit:error")
 
 
-                # Combine all extra sources (RetroKit typed docs).
-                _all_extra_sources = []
-                if retrokit_sources:
-                    _all_extra_sources.extend(retrokit_sources)
-
-                # Manual-vs-artwork routing: matched local-media manual
-                # sources (enrich phase) are handed to the EXISTING RTFM
-                # build as extra sources — never treated as artwork. The
-                # RTFM core's own scoring/dedupe/condensation rules apply
-                # unchanged (same contract as RetroKit's PDF sources).
+                # RetroKit sources remain fallback candidates. Local-media
+                # manuals are keyed separately: upstream already selected each
+                # source for a specific release, so the RTFM matcher must trust it.
+                _fallback_sources = list(retrokit_sources or [])
+                _explicit_manual_sources = {}
                 for _g, _r in zip(groups, enrich_results):
                     for _ms in getattr(_r, "manual_sources", None) or []:
                         try:
                             from .rtfm import CATEGORY_MANUALS, RtfmSource
-                            _all_extra_sources.append(RtfmSource(
-                                path=Path(_ms["path"]),
-                                root=Path(_ms["root"]),
-                                category=CATEGORY_MANUALS,
-                                # stem carries the group title so the RTFM
-                                # scorer auto-accepts the match that the
-                                # local-media provider already made;
-                                # provenance keeps the REAL filename.
-                                stem=(getattr(_g, "title", "") or _ms["filename"]).strip(),
-                            ))
+                            _explicit_manual_sources.setdefault(_g.release_key, []).append(
+                                RtfmSource(
+                                    path=Path(_ms["path"]),
+                                    root=Path(_ms["root"]),
+                                    category=CATEGORY_MANUALS,
+                                    stem=(getattr(_g, "title", "") or _ms["filename"]).strip(),
+                                )
+                            )
                         except Exception:
                             # A single unusable manual source must not abort
                             # the RTFM phase (existing degradation contract).
@@ -670,7 +663,8 @@ def run_pipeline(
                     groups,
                     cfg=rtfm_cfg,
                     rtfm_dir=rtfm_dir,
-                    extra_sources=_all_extra_sources if _all_extra_sources else None,
+                    extra_sources=_fallback_sources or None,
+                    explicit_sources=_explicit_manual_sources,
                     library_root=library_root,
                 )
                 _rtfm_built = [

@@ -49,6 +49,24 @@ def test_large_pdf_above_text_source_cap_can_build_rtfm(tmp_path: Path):
     assert "Fire the cannon" in result.rtfm_path.read_text(encoding="utf-8")
 
 
+def test_malformed_pdf_failure_reason_is_reported_and_never_counted_as_written(tmp_path: Path):
+    manuals = tmp_path / "manuals"
+    manuals.mkdir()
+    pdf = manuals / "Neuromancer.pdf"
+    pdf.write_bytes(b"not a valid PDF document")
+    source = RtfmSource(path=pdf, root=manuals, category="manuals", stem="Neuromancer")
+    result = build_rtfm_for_group(
+        _group("Neuromancer"), cfg=RtfmConfig(enabled=True),
+        rtfm_dir=tmp_path / "rtfm", sources=[source], basename="Neuromancer",
+    )
+
+    assert result.written is False
+    assert result.routed_for_review is True
+    assert result.rtfm_path is None
+    assert any("PDF open/parse failed" in note for note in result.notes)
+    assert result.provenance_path and result.provenance_path.is_file()
+
+
 def test_pdf_over_extraction_cap_is_explicit_no_output(tmp_path: Path):
     manuals = tmp_path / "manuals"
     manuals.mkdir()
