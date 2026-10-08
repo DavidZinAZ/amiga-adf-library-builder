@@ -620,6 +620,13 @@ class LocalMediaResult:
     found: bool = False
     cached_path: Optional[Path] = None
     category: Optional[str] = None
+    # Manual-vs-artwork routing: when the selected candidate is a PDF/TXT
+    # manual (category == "Manual"), the source is NEVER copied into the
+    # artwork cache and never undergoes image validation. Instead the
+    # original, read-only source path is surfaced here so the caller can
+    # hand it to the RTFM/manual-sidecar pipeline. ``cached_path`` stays
+    # None for manuals.
+    manual_source: Optional[Path] = None
     match_method: MatchMethod = MatchMethod.NONE
     confidence: float = 0.0
     needs_manual_review: bool = False
@@ -638,6 +645,7 @@ class LocalMediaResult:
             "found": self.found,
             "cached_path": str(self.cached_path) if self.cached_path else None,
             "category": self.category,
+            "manual_source": str(self.manual_source) if self.manual_source else None,
             "match_method": self.match_method.value,
             "confidence": self.confidence,
             "needs_manual_review": self.needs_manual_review,
@@ -1401,15 +1409,30 @@ class LocalMediaProvider:
 
         # GH-49: Apply outcome-based logic
         if best.outcome == "auto_match":
-            # Auto Match: cache the candidate
-            cached = self._cache_candidate(best.candidate, method, conf)
-            result.found = True
-            result.cached_path = cached.path
-            result.category = best.candidate.category
-            result.match_method = method
-            result.confidence = conf
-            result.provenance = cached.provenance
-            result.outcome = "auto_match"
+            if best.candidate.category == "Manual":
+                # Manual-vs-artwork routing: a PDF/TXT manual is a manual
+                # SOURCE, never an artwork master. Do NOT copy it into the
+                # cache dir (which for pipeline runs IS assets/artwork-original),
+                # do NOT run the image size safety cap, and do NOT write an
+                # artwork provenance sidecar. The source stays read-only in
+                # its manual root; the RTFM/manual-sidecar pipeline consumes
+                # it via ``result.manual_source``.
+                result.found = True
+                result.manual_source = best.candidate.path
+                result.category = best.candidate.category
+                result.match_method = method
+                result.confidence = conf
+                result.outcome = "auto_match"
+            else:
+                # Auto Match: cache the image candidate
+                cached = self._cache_candidate(best.candidate, method, conf)
+                result.found = True
+                result.cached_path = cached.path
+                result.category = best.candidate.category
+                result.match_method = method
+                result.confidence = conf
+                result.provenance = cached.provenance
+                result.outcome = "auto_match"
         elif best.outcome == "needs_review":
             # Needs Review: flag for manual review, do NOT cache
             result.needs_manual_review = True

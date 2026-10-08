@@ -92,6 +92,10 @@ class EnrichResult:
     # event generates exactly one ReviewItem that persists through
     # to the review/ directory and appears in review_routed.
     review_items: list[ReviewItem] = field(default_factory=list)
+    # Manual-vs-artwork routing: matched PDF/TXT manual sources from the
+    # local-media provider. Each entry: {path, root, filename, category}.
+    # Empty for image-only matches; these are consumed by the RTFM build.
+    manual_sources: list = field(default_factory=list)
 
 
 class EnrichCategory(str, Enum):
@@ -481,7 +485,7 @@ def _find_existing_master(group: ReleaseGroup, artwork_original_dir: Path) -> Op
     return artwork_mod.find_artwork_master(group, artwork_original_dir)
 
 
-def _resolve_local_media_master(group: ReleaseGroup, provider) -> tuple[Optional[Path], list]:
+def _resolve_local_media_master(group: ReleaseGroup, provider) -> tuple[Optional[Path], list, Optional[Path]]:
     """Resolve a master from the configured local-media provider (provider order #2).
 
     The provider copies the selected source into the application's OWN cache and
@@ -490,6 +494,11 @@ def _resolve_local_media_master(group: ReleaseGroup, provider) -> tuple[Optional
     is surfaced as a manual-review event (nothing is silently accepted); a miss
     emits a quiet miss event. Never mutates the source library (the provider
     guarantees read-only access).
+
+    Manual-vs-artwork routing: when the selected candidate is a PDF/TXT manual
+    (category ``"Manual"``), the third return value carries the manual's
+    read-only source path and the FIRST return value is None — a manual is
+    never an artwork master.
 
     Emits detailed per-candidate diagnostics for QA and security review:
     each candidate is logged with its matching key/strategy, score, and
@@ -503,19 +512,19 @@ def _resolve_local_media_master(group: ReleaseGroup, provider) -> tuple[Optional
     from . import local_media as lm
 
     if provider is None:
-        return None, []
+        return None, [], None
     events: list = []
     try:
         result = provider.resolve(group)
     except lm.LocalMediaDisabled:
-        return None, []
+        return None, [], None
     except Exception as exc:  # defensive: local-media failure must not break enrich
         events.append(EnrichEvent(
             category=EnrichCategory.LOCAL_MEDIA,
             detail="local-media provider raised an error",
             ok=False, error=str(exc),
         ))
-        return None, events
+        return None, events, None
 
     # GH-164 RC6: Replace per-candidate EnrichEvent emission with
     # group-level summaries. Per-candidate audit is retained behind
@@ -620,9 +629,14 @@ def _resolve_local_media_master(group: ReleaseGroup, provider) -> tuple[Optional
                 cache="miss", ok=True,
             ))
 
-    # GH-49: Handle three outcomes
+    # GH-49: Handle three outcomes.
+    # Manual-vs-artwork routing: a confident Manual-category match surfaces the
+    # manual's read-only source path (third return value); it is never an
+    # artwork master.
     if result.outcome == "auto_match" and result.found and result.cached_path is not None:
-        return Path(result.cached_path), events
+        return Path(result.cached_path), events, None
+    if result.outcome == "auto_match" and result.found and result.manual_source is not None:
+        return None, events, Path(result.manual_source)
     if result.outcome == "needs_review":
         events.append(EnrichEvent(
             category=EnrichCategory.LOCAL_MEDIA_REVIEW,
@@ -632,13 +646,13 @@ def _resolve_local_media_master(group: ReleaseGroup, provider) -> tuple[Optional
             ),
             cache="miss", ok=False,
         ))
-        return None, events
+        return None, events, None
     events.append(EnrichEvent(
         category=EnrichCategory.LOCAL_MEDIA_MISS,
         detail="no local-media match for this release",
         cache="miss", ok=True,
     ))
-    return None, events
+    return None, events, None
 
 
 def resize_artwork(master: Path, artwork_processed_dir: Path,
@@ -1128,6 +1142,10 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
 
     master = None
     processed: Optional[Path] = None
+    # Manual-vs-artwork routing: matched PDF/TXT manuals (never artwork) are
+    # collected here and returned on EnrichResult.manual_sources so the
+    # pipeline can feed them to the existing RTFM/manual-sidecar build.
+    manual_sources: list[dict] = []
     if include_artwork:
         master = _find_existing_master(group, artwork_original_dir)
         # Provider order #2: configured local-media libraries. Only consulted when no
@@ -1135,11 +1153,24 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
         # selected source into the app cache and returns the cached master; it never
         # writes into the source library.
         if master is None and local_media_provider is not None:
-            lm_master, lm_events = _resolve_local_media_master(group, local_media_provider)
+            lm_master, lm_events, lm_manual_source = _resolve_local_media_master(group, local_media_provider)
             events.extend(lm_events)
             if lm_master is not None:
                 master = lm_master
                 _act("Found artwork in a local library.")
+            elif lm_manual_source is not None:
+                # Manual-vs-artwork routing: the local library matched a
+                # PDF/TXT manual, not artwork. Keep it as a manual source for
+                # the RTFM/manual-sidecar pipeline; never an artwork master.
+                # The image path above is untouched for image candidates.
+                manual_sources.append({
+                    "path": str(lm_manual_source),
+                    "root": str(lm_manual_source.parent),
+                    "filename": lm_manual_source.name,
+                    "category": "manuals",
+                })
+                _act("Found manual in a local library.")
+                notes.append(f"matched manual source: {lm_manual_source.name}")
         if online and metadata and metadata.artwork_url and master is None:
             _act("Fetching artwork online…")
             events.append(EnrichEvent(
@@ -1300,7 +1331,8 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
     events.extend(_dat_events)
     return EnrichResult(nfo_path, master, processed, processed is None, notes, metadata_path, provider, processed is None, events, needs_manual_review=needs_manual_review,
                         metadata_confidence=(metadata.confidence if metadata is not None else None),
-                        review_items=_review_items, dat_results=_dat_results)
+                        review_items=_review_items, dat_results=_dat_results,
+                        manual_sources=manual_sources)
 
 
 def enrich_all(groups: list[ReleaseGroup], *, nfo_dir: Path, scans: list[ScanRecord],

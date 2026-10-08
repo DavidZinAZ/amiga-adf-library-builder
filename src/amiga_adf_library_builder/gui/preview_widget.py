@@ -2665,13 +2665,22 @@ class PreviewWidget(QWidget):
             # (LocalMediaProvider guarantee); needs_review only flags it.
             entry.metadata_source = "local_media"
             entry.match_confidence = candidate.get("confidence") or entry.match_confidence
-            if candidate.get("local_cached_path"):
+            # Manual-vs-artwork routing: a matched PDF/TXT manual (category
+            # "Manual") is NOT artwork and must never be assigned to
+            # artwork_front — it feeds the RTFM/manual-sidecar pipeline.
+            if candidate.get("local_cached_path") and (
+                    candidate.get("local_category") != "Manual"):
                 entry.artwork_front = candidate["local_cached_path"]
             reason = candidate.get("local_review_reason") or ""
+            manual_note = (
+                "; manual source routed to RTFM (not artwork)"
+                if candidate.get("local_category") == "Manual" else ""
+            )
             detail = (
                 f"Offline lookup applied: local media "
                 f"{candidate.get('local_outcome') or 'match'} "
                 f"(conf {entry.match_confidence:.2f})"
+                + manual_note
                 + (f"; review: {reason}" if reason else "")
             )
         entry.confidence = entry.match_confidence or entry.confidence

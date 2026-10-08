@@ -630,6 +630,30 @@ def run_pipeline(
                 if retrokit_sources:
                     _all_extra_sources.extend(retrokit_sources)
 
+                # Manual-vs-artwork routing: matched local-media manual
+                # sources (enrich phase) are handed to the EXISTING RTFM
+                # build as extra sources — never treated as artwork. The
+                # RTFM core's own scoring/dedupe/condensation rules apply
+                # unchanged (same contract as RetroKit's PDF sources).
+                for _g, _r in zip(groups, enrich_results):
+                    for _ms in getattr(_r, "manual_sources", None) or []:
+                        try:
+                            from .rtfm import CATEGORY_MANUALS, RtfmSource
+                            _all_extra_sources.append(RtfmSource(
+                                path=Path(_ms["path"]),
+                                root=Path(_ms["root"]),
+                                category=CATEGORY_MANUALS,
+                                # stem carries the group title so the RTFM
+                                # scorer auto-accepts the match that the
+                                # local-media provider already made;
+                                # provenance keeps the REAL filename.
+                                stem=(getattr(_g, "title", "") or _ms["filename"]).strip(),
+                            ))
+                        except Exception:
+                            # A single unusable manual source must not abort
+                            # the RTFM phase (existing degradation contract).
+                            continue
+
                 rtfm_results = rtfm_mod.build_rtfm_all(
                     groups,
                     cfg=rtfm_cfg,

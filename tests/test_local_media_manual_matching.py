@@ -131,8 +131,11 @@ def test_manual_should_match(tmp_path: Path, title: str, stem: str) -> None:
     assert result.outcome == "auto_match", f"{title!r} -> {result.outcome} ({result.match_method})"
     assert result.found is True
     assert result.category == "Manual"
-    assert result.cached_path is not None
-    assert Path(result.cached_path).name == stem
+    # Manual-vs-artwork routing: a manual is NEVER copied into the artwork
+    # cache; it is surfaced as a read-only manual source instead.
+    assert result.cached_path is None
+    assert result.manual_source is not None
+    assert result.manual_source.name == stem
 
 
 # --- must-NOT-match safeguards -----------------------------------------------
