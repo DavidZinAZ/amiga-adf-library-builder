@@ -63,8 +63,17 @@ def test_manual_root_file_reaches_rtfm_sidecar(tmp_path: Path) -> None:
     result = _run_build(config_toml)
     assert result["rtfm"]["configured"] is True
     assert len(result["rtfm"]["built"]) >= 1, "RTFM sidecar must be built"
+    built_paths = [Path(path) for path in result["rtfm"]["built"]]
+    provenance_paths = [
+        Path(path) for path in result["rtfm"]["provenance_written"]
+    ]
+    actual_paths = sorted((library_root / "assets" / "rtfm").glob("*.rtfm"))
+    assert len(built_paths) == len(actual_paths)
+    assert all(path.is_file() for path in built_paths)
+    assert len(provenance_paths) == 1
+    assert actual_paths
 
-    rtfm_path = Path(result["rtfm"]["built"][0])
+    rtfm_path = built_paths[0]
     assert rtfm_path.is_file(), f"rtfm artifact missing: {rtfm_path}"
     text = rtfm_path.read_text(encoding="utf-8")
     assert "Insert the Ogre disk and boot the machine." in text, (

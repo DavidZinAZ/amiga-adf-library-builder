@@ -2299,6 +2299,11 @@ class MainWindow(QMainWindow):
             self._worker.finished.connect(self._on_finished)
             # (Issue #21) live activity lines from the worker thread.
             self._worker.activity.connect(self._on_activity)
+            worker_thread = QThread(self)
+            self._worker._thread = worker_thread
+            worker_thread.finished.connect(self._forget_pipeline_worker)
+            worker_thread.finished.connect(self._worker.deleteLater)
+            self._worker_thread = worker_thread
             self._run_in_progress = True
             self._run_mode = state.run_mode
             # (Issue #21) run boundary: the log shows every run start/end.
@@ -2471,6 +2476,14 @@ class MainWindow(QMainWindow):
             self._append_diag("Cancelling the run…")
             self._cancel_button.setEnabled(False)
 
+    def _forget_pipeline_worker(self) -> None:
+        """Release a completed pipeline worker after its thread stops."""
+        worker_thread = getattr(self, "_worker_thread", None)
+        self._worker = None
+        self._worker_thread = None
+        if worker_thread is not None:
+            worker_thread.deleteLater()
+
     def _on_progress(self, phase: str, percent: int, detail: str) -> None:
         # (Issue #21) The Diagnostics log no longer repeats stage names here;
         # the worker's activity lines carry the real progress. The progress
@@ -2532,6 +2545,10 @@ class MainWindow(QMainWindow):
         self._live_log_mark("=== RUN END (done) ===")
 
         if cfg is not None:
+            # Narrow post-run timings identify any remaining Windows GUI-thread
+            # stall without flooding Diagnostics with per-release/per-file logs.
+            import time
+            _ui_timing_start = time.perf_counter()
             # (GH-192) The CHEAP post-run state stays on the GUI thread: the
             # GH-66 review-button count and the local-media provider anchoring
             # are small JSON reads, NOT the blocking operations, and
@@ -2554,7 +2571,16 @@ class MainWindow(QMainWindow):
             # A new run's queue supersedes the previous one: drop the cached
             # provider so _refresh_review_button() reads the fresh queue.
             self._local_media_provider = None
+            _review_refresh_start = time.perf_counter()
             self._refresh_review_button()
+            self._append_diag(
+                "Post-run timing: review-button refresh "
+                f"{(time.perf_counter() - _review_refresh_start) * 1000.0:.0f} ms"
+            )
+            self._append_diag(
+                "Post-run timing: synchronous completion total "
+                f"{(time.perf_counter() - _ui_timing_start) * 1000.0:.0f} ms"
+            )
 
         # (GH-192) Hand the two HEAVY blocking steps to FinalizationWorker on
         # its own thread: run-log serialization and the curation-state rebuild
@@ -2639,22 +2665,34 @@ class MainWindow(QMainWindow):
         guarded so a failure here can never leave the GUI out of idle.
         """
         from .finalizer import format_timing_report
+        import time
 
         failures = payload.get("failures") or []
         state_path = payload.get("state_path")
 
         # (GH-86) Load the curation state into the Preview & Curation tab.
+        _ui_refresh_start = time.perf_counter()
         try:
             if state_path and Path(state_path).exists():
                 self._preview_widget.load_state_file(state_path)
                 self._append_diag(f"Loaded curation state: {Path(state_path).name}")
                 # (GH-107 Slice 4) The run may have created/updated the
                 # canonical DB -- reload the Manual Lookup panel.
+                _manual_refresh_start = time.perf_counter()
                 self._refresh_manual_lookup_panel()
+                self._append_diag(
+                    "Post-run timing: manual lookup refresh "
+                    f"{(time.perf_counter() - _manual_refresh_start) * 1000.0:.0f} ms"
+                )
         except Exception as exc:
             # Preview population is best-effort; never break a completed run.
             logger.debug("Preview curation state load failed: %s", exc)
             self._append_diag(f"Preview state load skipped: {exc}")
+        finally:
+            self._append_diag(
+                "Post-run timing: curation preview load "
+                f"{(time.perf_counter() - _ui_refresh_start) * 1000.0:.0f} ms"
+            )
 
         for line in format_timing_report(payload.get("timings") or {},
                                          failures):
@@ -2800,7 +2838,7 @@ class MainWindow(QMainWindow):
         # (GH-192) self._thread is not a window attribute (pre-existing bug: the
         # check raised AttributeError and aborted close mid-run); resolve it
         # defensively instead.
-        worker_thread = getattr(self, "_thread", None)
+        worker_thread = getattr(self, "_worker_thread", None)
         if self._worker is not None and worker_thread is not None and worker_thread.isRunning():
             if self._cancel_event is not None:
                 self._cancel_event.set()

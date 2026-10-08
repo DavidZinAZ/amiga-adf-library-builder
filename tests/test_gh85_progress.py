@@ -12,6 +12,7 @@ These tests verify the GH-85 fix for progress reporting:
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -263,14 +264,14 @@ def test_cancel_stops_progress(tmp_path: Path):
     worker.progress.connect(collector.on_progress)
     worker.activity.connect(collector.on_activity)
     worker.finished.connect(collector.on_finished)
+    # Cancel deterministically at a live enrichment boundary. A fixed sleep
+    # races with fast runs and can accidentally cancel after a successful export.
+    worker.activity.connect(
+        lambda text: cancel_event.set() if text.startswith("Preparing release ") else None
+    )
     
     app = QCoreApplication.instance() or QCoreApplication([])
     worker.start()
-    
-    # Let it run a bit then cancel
-    import time
-    time.sleep(0.1)  # Let some progress happen
-    cancel_event.set()
     
     # Wait for finished
     start = time.time()

@@ -68,7 +68,8 @@ class PipelineWorker(QObject):
         self._live_logger = live_logger
 
     def start(self) -> None:
-        thread = QThread()
+        """Start the worker on its owned thread."""
+        thread = self._thread or QThread()
         self._thread = thread
         self.moveToThread(thread)
         thread.started.connect(self._run)
@@ -161,6 +162,8 @@ class PipelineWorker(QObject):
                 # atomic, never inside the read-only original corpus).
                 cache_dir=cfg.cache_dir,
             )
+            # Pipeline checkpoints must observe the same GUI cancellation token.
+            extra.setdefault("cancel_event", self._cancel)
             # (live-run-logging) Pre-assign the GUI's run id so the pipeline
             # uses EXACTLY the id the live log file was named with (the
             # pipeline honors a non-None RunConfig.run_id). The ADF processing
@@ -194,7 +197,12 @@ class PipelineWorker(QObject):
             extra_kwargs = {k: v for k, v in extra.items() if k != "cfg"}
             result: dict[str, Any] = pipeline.run_pipeline(extra["cfg"], run_config, **extra_kwargs)
 
-            if self._cancelled():
+            # Cancellation is a pipeline outcome, not a late read of the UI's
+            # event. A click racing with successful export must not rewrite a
+            # completed result as cancelled; run_pipeline marks cancellation
+            # only when it stops at a cancellation checkpoint.
+            if result.get("cancelled") is True:
+                self.finished.emit(None, "", True, None)
                 return
 
             self.progress.emit("Finishing up", 95, "")

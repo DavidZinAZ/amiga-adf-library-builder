@@ -514,6 +514,18 @@ def run_pipeline(
         library_root=library_root,
     )
     _act("Metadata and artwork preparation complete.")
+    if cancel_event is not None and cancel_event.is_set():
+        # enrich_all stops at its next release boundary when cancellation is
+        # requested. Do not continue into RTFM, curation, or export with a
+        # partial enrichment result; the GUI worker uses this explicit outcome
+        # rather than reading a possibly stale cancel flag after export.
+        _act("Run cancelled by operator after enrichment.")
+        return {
+            "run_id": run_id,
+            "cancelled": True,
+            "files_scanned": len(scans),
+            "groups": len(groups),
+        }
 
     # (GH-192 REM-1) Keyed group -> EnrichResult association.
     # ``enrich_all`` preserves input order, so at this point ``groups`` and
@@ -661,9 +673,40 @@ def run_pipeline(
                     extra_sources=_all_extra_sources if _all_extra_sources else None,
                     library_root=library_root,
                 )
-                _act(f"RTFM phase: built {len(rtfm_results)} sidecar(s)")
-                manual_trace["category"] = "built"
-                manual_trace["files_indexed"] = len(rtfm_results)
+                _rtfm_built = [
+                    r for r in rtfm_results
+                    if r.written and r.rtfm_path and r.rtfm_path.is_file()
+                ]
+                _rtfm_no_output = [r for r in rtfm_results if r not in _rtfm_built]
+
+                def _no_output_reason(r) -> str:
+                    note = next((item for item in reversed(r.notes) if item), "")
+                    reason = r.review_reason or ""
+                    if note and note not in reason:
+                        return f"{reason}; {note}" if reason else note
+                    return reason or "no usable RTFM output"
+
+                _act(f"RTFM phase: built {len(_rtfm_built)} sidecar(s)")
+                if _rtfm_no_output:
+                    _act(f"RTFM phase: {len(_rtfm_no_output)} failed/no-output")
+                    _title_by_key = {g.release_key: g.title for g in groups}
+                    for _r in _rtfm_no_output:
+                        _reason = _no_output_reason(_r)
+                        _act(
+                            f"RTFM no-output: {_title_by_key.get(_r.release_key, _r.basename)}: {_reason}"
+                        )
+                manual_trace["category"] = "built" if _rtfm_built else "no-output"
+                manual_trace["files_indexed"] = len(_rtfm_built)
+                manual_trace["built_count"] = len(_rtfm_built)
+                manual_trace["no_output_count"] = len(_rtfm_no_output)
+                manual_trace["no_output"] = [
+                    {
+                        "release_key": r.release_key,
+                        "title": next((g.title for g in groups if g.release_key == r.release_key), r.basename),
+                        "reason": _no_output_reason(r),
+                    }
+                    for r in _rtfm_no_output
+                ]
                 # Build a release_key -> title map for diagnostics
                 _group_title_map: dict[str, str] = {
                     g.release_key: getattr(g, "title", "") for g in groups
@@ -1252,7 +1295,10 @@ def run_pipeline(
         # manuals/RTFM selection is on. A config that is present but deselected
         # reports selected=False and builds nothing.
         "selected": bool(rtfm_config_path and include_manuals_rtfm),
-        "built": [str(r.rtfm_path) for r in rtfm_results if r.written],
+        "built": [
+            str(r.rtfm_path) for r in rtfm_results
+            if r.written and r.rtfm_path and r.rtfm_path.is_file()
+        ],
         "routed_for_review": [
             {"release_key": r.release_key, "reason": r.review_reason}
             for r in rtfm_results

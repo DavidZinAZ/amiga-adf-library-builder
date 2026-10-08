@@ -1819,9 +1819,18 @@ def build_rtfm_for_group(
             continue
         if not stat.S_ISREG(st.st_mode):
             continue
-        if st.st_size > MAX_SOURCE_BYTES:
+        # PDF/image extraction has its own documented cap (default 32 MiB);
+        # the smaller 8 MiB text-source cap only protects verbatim TXT/RTFM
+        # reads. Applying it to PDFs silently discarded otherwise accepted
+        # large manuals before the bounded PDF extractor could process them.
+        source_cap = (
+            cfg.docs.max_bytes
+            if s.path.suffix.lower() in DOC_SUFFIXES
+            else MAX_SOURCE_BYTES
+        )
+        if st.st_size > source_cap:
             result.notes.append(
-                f"source skipped (exceeds {MAX_SOURCE_BYTES} byte cap): {s.path.name}"
+                f"source skipped (exceeds {source_cap} byte cap): {s.path.name}"
             )
             continue
         safe_matched.append(s)

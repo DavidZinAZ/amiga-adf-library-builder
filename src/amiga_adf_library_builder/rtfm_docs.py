@@ -57,7 +57,7 @@ class RtfmDocsConfig:
 
     # Reject source files larger than this (bytes) before attempting to open.
     # Defense against decompression-bomb / oversized inputs.
-    max_bytes: int = 32 * 1024 * 1024
+    max_bytes: int = 64 * 1024 * 1024
     # Bound the number of pages we inspect/rasterize (DoS guard).
     page_cap: int = 500
     # Minimum non-whitespace characters for a page to count as "has native
