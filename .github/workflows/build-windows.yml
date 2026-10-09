@@ -114,6 +114,25 @@ jobs:
           )
           PY
 
+      - name: Verify bundled offline OCR engine
+        # Image-only/scanned PDF manuals (A-10 Tank Killer and friends) cannot
+        # be decoded by the PDF backends at all -- they carry no text layer.
+        # RTFM therefore falls back to the bundled offline OCR engine. This gate
+        # proves the engine AND its ONNX model weights are genuinely usable in
+        # the build environment BEFORE packaging, so a frozen bundle that ships
+        # the modules but drops the model data fails here instead of in the
+        # shipped app.
+        run: |
+          python - <<'PY'
+          from amiga_adf_library_builder.rtfm_ocr import ocr_backend
+          backend = ocr_backend()
+          print("OCR backend:", backend)
+          assert backend == "rapidocr", (
+              f"bundled offline OCR engine not usable in the build "
+              f"environment: {backend}"
+          )
+          PY
+
       - name: Build onedir portable app
         run: |
           python tools/build_windows.py --target onedir --clean

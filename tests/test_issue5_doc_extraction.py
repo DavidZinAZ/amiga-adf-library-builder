@@ -550,6 +550,8 @@ def test_ocr_max_pixels_configurable_tightens_bound(monkeypatch, tmp_path):
     monkeypatch.setattr(rtfm_docs, "_have_pymupdf", lambda: True)
 
     # Sanity: under the default cap the page WOULD be rasterized (spy fires).
+    # Disable the document-level OCR fallback so this test isolates the
+    # legacy per-page cap only.
     spy_default = {"calls": 0}
     real_get_pixmap = fitz.Page.get_pixmap
 
@@ -558,7 +560,10 @@ def test_ocr_max_pixels_configurable_tightens_bound(monkeypatch, tmp_path):
         return real_get_pixmap(self, *args, **kwargs)
 
     monkeypatch.setattr(fitz.Page, "get_pixmap", _spy_default)
-    res_default = extract_pdf_text(pdf, cfg=RtfmDocsConfig(ocr_max_pixels=4_000_000))
+    res_default = extract_pdf_text(
+        pdf, cfg=RtfmDocsConfig(ocr_max_pixels=4_000_000,
+                                ocr_fallback_max_pages=0)
+    )
     assert spy_default["calls"] >= 1, "default cap should permit rasterization"
     assert res_default.needs_ocr is True
 
@@ -570,7 +575,10 @@ def test_ocr_max_pixels_configurable_tightens_bound(monkeypatch, tmp_path):
         return real_get_pixmap(self, *args, **kwargs)
 
     monkeypatch.setattr(fitz.Page, "get_pixmap", _spy_tight)
-    res_tight = extract_pdf_text(pdf, cfg=RtfmDocsConfig(ocr_max_pixels=1_000_000))
+    res_tight = extract_pdf_text(
+        pdf, cfg=RtfmDocsConfig(ocr_max_pixels=1_000_000,
+                                ocr_fallback_max_pages=0)
+    )
     assert spy_tight["calls"] == 0, "tight cap must skip rasterization"
     assert res_tight.needs_ocr is True
     assert any(p.note == "page exceeds OCR pixel cap" for p in res_tight.pages)

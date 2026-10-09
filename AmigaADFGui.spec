@@ -18,14 +18,15 @@ import sys
 SPECDIR = SPECPATH
 TARGET = "onedir"                 # "onedir" | "onefile"
 APP_NAME = "AmigaADFLibraryBuilder"                 # shipped exe base name (no .exe suffix)
-APPLICATION_VERSION = "0.3.7"
+APPLICATION_VERSION = "0.3.8"
 SCRIPT = os.path.join(SPECDIR, 'app_launcher.py')   # bootstrap -> gui.app:run
 PATHEX = [os.path.join(SPECDIR, p) for p in ['src']]
-HIDDEN_IMPORTS = ['amiga_adf_library_builder', 'amiga_adf_library_builder._frozen_version', 'amiga_adf_library_builder._version', 'amiga_adf_library_builder.activity_log', 'amiga_adf_library_builder.artwork', 'amiga_adf_library_builder.canonical', 'amiga_adf_library_builder.canonical_naming', 'amiga_adf_library_builder.catalog', 'amiga_adf_library_builder.cli', 'amiga_adf_library_builder.diagnostics', 'amiga_adf_library_builder.enrich', 'amiga_adf_library_builder.exporter', 'amiga_adf_library_builder.exporter_guard', 'amiga_adf_library_builder.file_identity', 'amiga_adf_library_builder.grouper', 'amiga_adf_library_builder.gui', 'amiga_adf_library_builder.gui.app', 'amiga_adf_library_builder.gui.finalizer', 'amiga_adf_library_builder.gui.layout', 'amiga_adf_library_builder.gui.live_run_log', 'amiga_adf_library_builder.gui.main_window', 'amiga_adf_library_builder.gui.manual_lookup_panel', 'amiga_adf_library_builder.gui.preview_widget', 'amiga_adf_library_builder.gui.providers', 'amiga_adf_library_builder.gui.secrets', 'amiga_adf_library_builder.gui.settings', 'amiga_adf_library_builder.gui.state', 'amiga_adf_library_builder.gui.themes', 'amiga_adf_library_builder.gui.worker', 'amiga_adf_library_builder.initializer', 'amiga_adf_library_builder.library_state', 'amiga_adf_library_builder.local_media', 'amiga_adf_library_builder.logging_utils', 'amiga_adf_library_builder.lookup_workflow', 'amiga_adf_library_builder.manual_approvals', 'amiga_adf_library_builder.manual_lookup', 'amiga_adf_library_builder.metadata', 'amiga_adf_library_builder.metadata_source', 'amiga_adf_library_builder.models', 'amiga_adf_library_builder.naming', 'amiga_adf_library_builder.nfo_render', 'amiga_adf_library_builder.parser', 'amiga_adf_library_builder.paths', 'amiga_adf_library_builder.pipeline', 'amiga_adf_library_builder.quarantine', 'amiga_adf_library_builder.retrokit', 'amiga_adf_library_builder.rtfm', 'amiga_adf_library_builder.rtfm_docs', 'amiga_adf_library_builder.run_config', 'amiga_adf_library_builder.scanner', 'amiga_adf_library_builder.screenscraper', 'amiga_adf_library_builder.selection', 'amiga_adf_library_builder.title_norm', 'amiga_adf_library_builder.utils', 'amiga_adf_library_builder.wikipedia_client', 'amiga_adf_library_builder.wikipedia_config', 'amiga_adf_library_builder.wikipedia_query', 'PIL', 'PIL.Image', 'PySide6.QtCore', 'PySide6.QtGui', 'PySide6.QtWidgets', 'fitz', 'pymupdf', 'pymupdf.mupdf', 'pymupdf.extra', 'pymupdf.utils', 'pymupdf.table', 'fitz.table', 'fitz.utils', 'pypdf', 'pypdf._reader', 'pypdf._writer', 'pypdf._page', 'pypdf._doc_common', 'pypdf._encryption', 'pypdf._utils', 'pypdf._cmap', 'pypdf._font', 'pypdf.filters', 'pypdf.errors']
+HIDDEN_IMPORTS = ['amiga_adf_library_builder', 'amiga_adf_library_builder._frozen_version', 'amiga_adf_library_builder._version', 'amiga_adf_library_builder.activity_log', 'amiga_adf_library_builder.artwork', 'amiga_adf_library_builder.canonical', 'amiga_adf_library_builder.canonical_naming', 'amiga_adf_library_builder.catalog', 'amiga_adf_library_builder.cli', 'amiga_adf_library_builder.diagnostics', 'amiga_adf_library_builder.enrich', 'amiga_adf_library_builder.exporter', 'amiga_adf_library_builder.exporter_guard', 'amiga_adf_library_builder.file_identity', 'amiga_adf_library_builder.grouper', 'amiga_adf_library_builder.gui', 'amiga_adf_library_builder.gui.app', 'amiga_adf_library_builder.gui.finalizer', 'amiga_adf_library_builder.gui.layout', 'amiga_adf_library_builder.gui.live_run_log', 'amiga_adf_library_builder.gui.main_window', 'amiga_adf_library_builder.gui.manual_lookup_panel', 'amiga_adf_library_builder.gui.preview_widget', 'amiga_adf_library_builder.gui.providers', 'amiga_adf_library_builder.gui.secrets', 'amiga_adf_library_builder.gui.settings', 'amiga_adf_library_builder.gui.state', 'amiga_adf_library_builder.gui.themes', 'amiga_adf_library_builder.gui.worker', 'amiga_adf_library_builder.initializer', 'amiga_adf_library_builder.library_state', 'amiga_adf_library_builder.local_media', 'amiga_adf_library_builder.logging_utils', 'amiga_adf_library_builder.lookup_workflow', 'amiga_adf_library_builder.manual_approvals', 'amiga_adf_library_builder.manual_lookup', 'amiga_adf_library_builder.metadata', 'amiga_adf_library_builder.metadata_source', 'amiga_adf_library_builder.models', 'amiga_adf_library_builder.naming', 'amiga_adf_library_builder.nfo_render', 'amiga_adf_library_builder.parser', 'amiga_adf_library_builder.paths', 'amiga_adf_library_builder.pipeline', 'amiga_adf_library_builder.quarantine', 'amiga_adf_library_builder.retrokit', 'amiga_adf_library_builder.rtfm', 'amiga_adf_library_builder.rtfm_docs', 'amiga_adf_library_builder.rtfm_ocr', 'amiga_adf_library_builder.run_config', 'amiga_adf_library_builder.scanner', 'amiga_adf_library_builder.screenscraper', 'amiga_adf_library_builder.selection', 'amiga_adf_library_builder.title_norm', 'amiga_adf_library_builder.utils', 'amiga_adf_library_builder.wikipedia_client', 'amiga_adf_library_builder.wikipedia_config', 'amiga_adf_library_builder.wikipedia_query', 'PIL', 'PIL.Image', 'PySide6.QtCore', 'PySide6.QtGui', 'PySide6.QtWidgets', 'fitz', 'pymupdf', 'pymupdf.mupdf', 'pymupdf.extra', 'pymupdf.utils', 'pymupdf.table', 'fitz.table', 'fitz.utils', 'pypdf', 'pypdf._reader', 'pypdf._writer', 'pypdf._page', 'pypdf._doc_common', 'pypdf._encryption', 'pypdf._utils', 'pypdf._cmap', 'pypdf._font', 'pypdf.filters', 'pypdf.errors', 'rapidocr_onnxruntime', 'rapidocr_onnxruntime.main', 'rapidocr_onnxruntime.ch_ppocr_rec', 'rapidocr_onnxruntime.ch_ppocr_det', 'rapidocr_onnxruntime.cls', 'onnxruntime', 'onnxruntime.capi', 'onnxruntime.capi.onnxruntime_pybind11_state', 'cv2', 'cv2.data', 'numpy', 'numpy.core', 'numpy.core._multiarray_umath', 'shapely', 'pyclipper', 'skimage', 'skimage.filters', 'PIL.Image']
 CONSOLE = False                 # False for shipped GUI; True for debug
 # ---------------------------------------------------------------------------
 
 from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import collect_data_files as _collect_ocr_data
 
 # Native libraries the PDF backend loads at runtime (MuPDF's
 # libmupdf / libmupdfcpp shared objects). PyInstaller's default
@@ -38,6 +39,17 @@ for _pkg in ['pymupdf', 'fitz']:
         PDF_NATIVE_DATAS += collect_data_files(_pkg, include_py_files=False)
     except Exception as _exc:  # package absent on this host
         print(f'WARNING: PDF native libs not collected from {_pkg}: {_exc}')
+
+# Bundled offline OCR engine payload (RapidOCR's .onnx model
+# weights, OpenCV data). Without these the frozen GUI cannot run
+# OCR on scanned manuals at all -- the modules import but inference
+# fails on the missing model file.
+OCR_MODEL_DATAS = []
+for _pkg in ['rapidocr_onnxruntime', 'cv2']:
+    try:
+        OCR_MODEL_DATAS += _collect_ocr_data(_pkg, include_py_files=False)
+    except Exception as _exc:  # package absent on this host
+        print(f'WARNING: OCR model data not collected from {_pkg}: {_exc}')
 
 block_cipher = None
 
@@ -52,7 +64,7 @@ a = Analysis(
     [SCRIPT],
     pathex=PATHEX,
     binaries=[],
-    datas=_collect_datas() + PDF_NATIVE_DATAS,
+    datas=_collect_datas() + PDF_NATIVE_DATAS + OCR_MODEL_DATAS,
     hiddenimports=HIDDEN_IMPORTS,
     hookspath=[],
     hooksconfig={},

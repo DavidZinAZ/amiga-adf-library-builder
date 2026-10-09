@@ -170,6 +170,40 @@ PDF_PACKAGES_WITH_NATIVE_LIBS = [
     "fitz",
 ]
 
+# Bundled offline OCR engine for image-only/scanned PDF manuals. The packaged
+# Windows GUI has no Tesseract binary, so RTFM OCR runs through RapidOCR: OpenCV
+# + ONNX Runtime plus the .onnx model weights SHIPPED INSIDE the wheel. All of
+# it is pure-Python-importable package data, so PyInstaller's normal collection
+# handles it -- but the modules are imported lazily inside functions, so they
+# must be declared as hidden imports or static analysis drops them.
+OCR_HIDDEN_IMPORTS = [
+    "rapidocr_onnxruntime",
+    "rapidocr_onnxruntime.main",
+    "rapidocr_onnxruntime.ch_ppocr_rec",
+    "rapidocr_onnxruntime.ch_ppocr_det",
+    "rapidocr_onnxruntime.cls",
+    "onnxruntime",
+    "onnxruntime.capi",
+    "onnxruntime.capi.onnxruntime_pybind11_state",
+    "cv2",
+    "cv2.data",
+    "numpy",
+    "numpy.core",
+    "numpy.core._multiarray_umath",
+    "shapely",
+    "pyclipper",
+    "skimage",
+    "skimage.filters",
+    "PIL.Image",
+]
+
+# Packages whose non-Python payload (ONNX model weights, OpenCV data) must be
+# collected explicitly as data files.
+OCR_PACKAGES_WITH_DATA = [
+    "rapidocr_onnxruntime",
+    "cv2",
+]
+
 # Bootstrap that invokes the documented hook target. Written to build/ at build
 # time (gitignored) so the committed spec stays coherent without committing a
 # bootstrap file.
@@ -221,6 +255,7 @@ def render_spec(
     application_version: str,
     version_info_path: str = "",
     native_lib_packages: list[str] | None = None,
+    data_packages: list[str] | None = None,
 ) -> str:
     """Render the deterministic PyInstaller spec referenced by this driver.
 
@@ -233,6 +268,10 @@ def render_spec(
     collected explicitly (PyMuPDF's MuPDF binaries). The generated spec performs
     the collection at spec-eval time so the result reflects the build host's
     actual installed packages.
+
+    ``data_packages`` names packages whose non-Python payload must also be
+    frozen (RapidOCR's ONNX model weights, OpenCV's data dir). Same mechanism,
+    separate variable so the two failure modes stay individually diagnosable.
     """
     version_kw = f"\n        version=os.path.join(SPECDIR, {version_info_path!r}),\n    " if version_info_path else ""
     if native_lib_packages:
@@ -257,6 +296,26 @@ def render_spec(
         native_lib_block = ""
         import_helpers = ""
         datas_kw = "    datas=_collect_datas(),"
+    if data_packages:
+        import_helpers += (
+            "from PyInstaller.utils.hooks import collect_data_files as "
+            "_collect_ocr_data\n"
+        )
+        data_lib_block = (
+            "# Bundled offline OCR engine payload (RapidOCR's .onnx model\n"
+            "# weights, OpenCV data). Without these the frozen GUI cannot run\n"
+            "# OCR on scanned manuals at all -- the modules import but inference\n"
+            "# fails on the missing model file.\n"
+            "OCR_MODEL_DATAS = []\n"
+            "for _pkg in " + repr(data_packages) + ":\n"
+            "    try:\n"
+            "        OCR_MODEL_DATAS += _collect_ocr_data(_pkg, include_py_files=False)\n"
+            "    except Exception as _exc:  # package absent on this host\n"
+            "        print(f'WARNING: OCR model data not collected from {_pkg}: {_exc}')\n"
+        )
+        datas_kw = datas_kw.rstrip(",") + " + OCR_MODEL_DATAS,"
+    else:
+        data_lib_block = ""
     return f'''# -*- mode: python ; coding: utf-8 -*-
 #
 # AmigaADFGui.spec -- PyInstaller build spec for the Issue #15 Windows GUI.
@@ -286,6 +345,7 @@ CONSOLE = {console}                 # False for shipped GUI; True for debug
 
 {import_helpers}
 {native_lib_block}
+{data_lib_block}
 block_cipher = None
 
 
@@ -433,6 +493,7 @@ def main() -> int:
         + PILLOW_HIDDEN_IMPORTS
         + QT_HIDDEN_IMPORTS
         + PDF_HIDDEN_IMPORTS
+        + OCR_HIDDEN_IMPORTS
     )
     spec_text = render_spec(
         target=args.target,
@@ -444,6 +505,7 @@ def main() -> int:
         application_version=_APPLICATION_VERSION,
         version_info_path="tools/_version_info.txt",
         native_lib_packages=PDF_PACKAGES_WITH_NATIVE_LIBS,
+        data_packages=OCR_PACKAGES_WITH_DATA,
     )
 
     spec_path = Path(args.spec_out)

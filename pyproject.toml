@@ -21,7 +21,12 @@ artwork = ["pillow>=10"]
 # library stays dependency-free; these are only needed to extract text from
 # PDF/image manuals. Behavior degrades gracefully (clear "unavailable", no
 # fabricated output) when any of these are missing or Tesseract is absent.
-rtfm-docs = ["pypdf>=4", "pymupdf>=1.23", "pillow>=10", "pytesseract>=0.3"]
+rtfm-docs = ["pypdf>=4", "pymupdf>=1.23", "pillow>=10", "pytesseract>=0.3",
+             # Bundled OFFLINE OCR engine (OpenCV + ONNX Runtime, model weights
+             # shipped in the wheel). Used by the image-only/scanned-PDF OCR
+             # fallback when Tesseract is absent; degrades truthfully to
+             # "unavailable" when it is missing. No cloud/network OCR.
+             "rapidocr-onnxruntime>=1.2"]
 
 # Issue #15: optional PySide6 GUI (Windows presentation layer over the shared
 # core). Core deps stay empty; the GUI is an additive optional extra so the
@@ -47,7 +52,17 @@ rtfm-docs = ["pypdf>=4", "pymupdf>=1.23", "pillow>=10", "pytesseract>=0.3"]
 # tools/build_windows.py), and the build lane verifies the backend before
 # packaging.
 gui = ["PySide6>=6.7", "cryptography>=42.0", "pillow>=10", "tomli-w>=1.0",
-       "pypdf>=4", "pymupdf>=1.23"]
+       "pypdf>=4", "pymupdf>=1.23",
+       # Bundled OFFLINE OCR engine for image-only/scanned PDF manuals. The
+       # packaged Windows GUI ships no Tesseract binary, so OCR runs through
+       # RapidOCR: OpenCV + ONNX Runtime with the .onnx weights shipped inside
+       # the wheel. Fully offline, no cloud/network, no external executable.
+       # Declared in `gui` (installed by .github/workflows/build-windows.yml)
+       # so the frozen bundle carries the modules, native libs and model data
+       # (hidden imports + collected datas are declared in
+       # tools/build_windows.py), and the build lane verifies the engine runs
+       # before packaging.
+       "rapidocr-onnxruntime>=1.2"]
 
 [project.scripts]
 amiga-adf-library-builder = "amiga_adf_library_builder.cli:main"

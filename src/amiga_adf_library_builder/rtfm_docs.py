@@ -64,6 +64,20 @@ class RtfmDocsConfig:
     # Minimum non-whitespace characters for a page to count as "has native
     # text". Below this we treat the page as scanned/empty and try OCR.
     native_text_min_chars: int = 32
+    # Document-level OCR fallback for image-only/scanned PDFs when normal
+    # extraction yields no usable text. 0 disables it (legacy behavior).
+    ocr_fallback_max_pages: int = 500
+    # Document-level OCR rasterization zoom.
+    ocr_fallback_zoom: float = 2.0
+    # Hard cap on rasterized pixels per page during the fallback OCR. Scanned
+    # manuals are legitimately large, so this is far above the per-page cap
+    # used elsewhere: it only refuses genuinely explosive MediaBoxes.
+    ocr_fallback_max_pixels: int = 40_000_000
+    # Per-page and whole-document OCR time budgets (seconds).
+    ocr_fallback_page_timeout: float = 30.0
+    ocr_fallback_total_timeout: float = 900.0
+    # Enable the content-addressed OCR text cache.
+    ocr_cache_enabled: bool = True
     # If True, missing Tesseract is treated as a hard failure (unavailable with
     # reason) rather than a silent route-to-review. Default False = graceful.
     ocr_required: bool = False
@@ -108,6 +122,20 @@ class RtfmDocsConfig:
             ocr_timeout=_float("ocr_timeout", cls.ocr_timeout),
             ocr_zoom=_float("ocr_zoom", cls.ocr_zoom),
             ocr_max_pixels=_int("ocr_max_pixels", cls.ocr_max_pixels),
+            ocr_fallback_max_pages=_int(
+                "ocr_fallback_max_pages", cls.ocr_fallback_max_pages
+            ),
+            ocr_fallback_zoom=_float("ocr_fallback_zoom", cls.ocr_fallback_zoom),
+            ocr_fallback_max_pixels=_int(
+                "ocr_fallback_max_pixels", cls.ocr_fallback_max_pixels
+            ),
+            ocr_fallback_page_timeout=_float(
+                "ocr_fallback_page_timeout", cls.ocr_fallback_page_timeout
+            ),
+            ocr_fallback_total_timeout=_float(
+                "ocr_fallback_total_timeout", cls.ocr_fallback_total_timeout
+            ),
+            ocr_cache_enabled=bool(raw.get("ocr_cache_enabled", True)),
         )
 
 
@@ -279,6 +307,11 @@ def _count_non_ws(text: str) -> int:
 
 # --- OCR (Tesseract) with timeout --------------------------------------------
 
+#: Extraction-method tag recorded when the bundled document OCR fallback
+#: supplied the text (``pdf:document_ocr``). Keeps provenance explicit so a
+#: scanned manual is never reported as native text.
+OCR_METHOD_TAG = "document_ocr"
+
 
 def _ocr_pil_image(img, timeout: float) -> Optional[str]:
     """Run Tesseract OCR on a PIL image, bounded by ``timeout`` seconds.
@@ -321,6 +354,11 @@ def extract_pdf_text(path, cfg: Optional[RtfmDocsConfig] = None) -> ExtractionRe
         ``unavailable`` and set ``needs_ocr`` (no fabrication).
 
     Mixed PDFs (native + scanned pages) are supported at page granularity.
+
+    When the whole document yields no usable text (a scanned manual), the
+    bundled offline OCR fallback in :mod:`rtfm_ocr` runs EXACTLY ONCE for the
+    document, caches its result by source SHA-256, and that text is returned.
+    A PDF with a usable native text layer NEVER pays OCR cost.
     """
     cfg = cfg or RtfmDocsConfig()
     path = Path(path)
@@ -358,11 +396,13 @@ def extract_pdf_text(path, cfg: Optional[RtfmDocsConfig] = None) -> ExtractionRe
 
     # --- Primary path: pymupdf (text + rasterization). ---
     if _pymupdf_backend() == "pymupdf":
-        return _extract_pdf_with_fitz(path, cfg, tesseract, backend)
+        res = _extract_pdf_with_fitz(path, cfg, tesseract, backend)
+        return _maybe_ocr_fallback(path, cfg, res)
 
     # --- Fallback path: pypdf (text only, no raster/OCR). ---
     if _pypdf_backend() == "pypdf":
-        return _extract_pdf_with_pypdf(path, cfg, tesseract, backend)
+        res = _extract_pdf_with_pypdf(path, cfg, tesseract, backend)
+        return _maybe_ocr_fallback(path, cfg, res)
 
     # --- No usable PDF backend. Name the concrete reason. ---
     return ExtractionResult(
@@ -370,6 +410,85 @@ def extract_pdf_text(path, cfg: Optional[RtfmDocsConfig] = None) -> ExtractionRe
         source_kind="pdf", backend=backend,
         reason=f"PDF extraction unavailable: {backend}",
     )
+
+
+def _maybe_ocr_fallback(
+    path: Path, cfg: RtfmDocsConfig, res: ExtractionResult,
+) -> ExtractionResult:
+    """Run the bundled document OCR fallback ONLY when nothing was extracted.
+
+    ``res`` is the normal-extraction result. If it already carries usable text
+    it is returned untouched (normal PDFs never pay OCR cost). Otherwise the
+    image-only path in :mod:`rtfm_ocr` runs, and only a successful OCR replaces
+    the result — a failed OCR keeps the truthful "no extractable text layer"
+    reason, extended with the OCR backend's own reason. Never fabricates.
+    """
+    if res.text.strip():
+        return res
+    if cfg.ocr_fallback_max_pages <= 0:
+        return res
+
+    from .rtfm_ocr import ocr_pdf_document
+
+    cache_dir: Optional[Path] = None
+    if cfg.ocr_cache_enabled:
+        cache_dir = ocr_cache_dir()
+
+    native_chars = 0
+    for p in res.pages:
+        if p.method == "native_text":
+            native_chars += 1
+
+    ocr = ocr_pdf_document(
+        path,
+        page_cap=cfg.ocr_fallback_max_pages,
+        max_pixels=cfg.ocr_fallback_max_pixels,
+        zoom=cfg.ocr_fallback_zoom,
+        page_timeout=cfg.ocr_fallback_page_timeout,
+        total_timeout=cfg.ocr_fallback_total_timeout,
+        cache_dir=cache_dir,
+        name=path.name,
+        native_chars=native_chars,
+    )
+    if not ocr.ok:
+        # Truthful no-output: keep the original exact diagnostic and append the
+        # OCR reason (concise, no traceback).
+        detail = f"{res.reason}; OCR fallback: {ocr.reason or 'no text'}"
+        return ExtractionResult(
+            text="",
+            pages=res.pages,
+            confidence="unavailable",
+            needs_ocr=True,
+            source_kind="pdf",
+            backend=res.backend,
+            reason=detail,
+        )
+
+    text = _normalize_text(ocr.text)
+    return ExtractionResult(
+        text=text,
+        pages=res.pages,
+        confidence="low",
+        needs_ocr=False,
+        source_kind="pdf",
+        backend=res.backend,
+        reason=f"pdf:{OCR_METHOD_TAG}",
+    )
+
+
+def ocr_cache_dir() -> Optional[Path]:
+    """Directory for the content-addressed OCR text cache.
+
+    Never inside a manual/source tree: the application cache dir when it can be
+    resolved, otherwise ``None`` (cache disabled, extraction still works).
+    """
+    try:
+        from .paths import _xdg_cache_path
+
+        base = Path(_xdg_cache_path()) / "amiga-adf-library-builder"
+        return base / "rtfm-ocr"
+    except Exception:
+        return None
 
 
 def _extract_pdf_with_fitz(
@@ -595,7 +714,6 @@ def extract_image_text(path, cfg: Optional[RtfmDocsConfig] = None) -> Extraction
             source_kind="image",
             reason="OCR required by config but Tesseract is unavailable",
         )
-
     try:
         from PIL import Image  # type: ignore
 
@@ -610,14 +728,31 @@ def extract_image_text(path, cfg: Optional[RtfmDocsConfig] = None) -> Extraction
         )
 
     if not tesseract:
+        # No Tesseract binary: try the bundled offline OCR engine before
+        # giving up (packaged Windows builds have no Tesseract at all).
+        from .rtfm_ocr import ocr_pil_image
+
+        bundled = ocr_pil_image(img, cfg.ocr_timeout)
+        if bundled is not None and bundled.strip():
+            norm = _normalize_text(bundled)
+            return ExtractionResult(
+                text=norm,
+                pages=(PageProvenance(
+                    page_index=0, method="ocr", confidence="low",
+                ),),
+                confidence="low", needs_ocr=False, source_kind="image",
+                backend=f"pillow (OCR engine: {OCR_METHOD_TAG})",
+                reason=f"image:{OCR_METHOD_TAG}",
+            )
         return ExtractionResult(
             text="", pages=(PageProvenance(
                 page_index=0, method="unavailable", confidence="unavailable",
-                note="Tesseract unavailable",
+                note="Tesseract unavailable; bundled OCR produced no text"
+                if bundled is not None else "Tesseract unavailable",
             ),),
             confidence="unavailable", needs_ocr=True, source_kind="image",
             backend="pillow (OCR engine: tesseract unavailable)",
-            reason="image is not OCR'd: Tesseract unavailable",
+            reason="image is not OCR'd: no OCR engine available",
         )
 
     text = _ocr_pil_image(img, cfg.ocr_timeout)
