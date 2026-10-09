@@ -37,7 +37,17 @@ rtfm-docs = ["pypdf>=4", "pymupdf>=1.23", "pillow>=10", "pytesseract>=0.3"]
 # Declaring it in `gui` (installed by .github/workflows/build-windows.yml)
 # puts Pillow into the build environment so PyInstaller bundles it, and the
 # build lane verifies the import before packaging.
-gui = ["PySide6>=6.7", "cryptography>=42.0", "pillow>=10", "tomli-w>=1.0"]
+# RTFM PDF extraction (issue: PDF manuals cannot decode in the frozen build).
+# `rtfm_docs` imports PyMuPDF/pypdf LAZILY inside functions, so the packaged
+# GUI could not extract any PDF manual text -- every PDF routed for review with
+# a generic "failed to decode". These are therefore hard runtime dependencies
+# of the packaged GUI, exactly like Pillow (GH-65). The Windows build lane
+# installs `.[gui]`; declaring them here puts them in the build environment so
+# PyInstaller bundles them (hidden imports + native MuPDF libs are declared in
+# tools/build_windows.py), and the build lane verifies the backend before
+# packaging.
+gui = ["PySide6>=6.7", "cryptography>=42.0", "pillow>=10", "tomli-w>=1.0",
+       "pypdf>=4", "pymupdf>=1.23"]
 
 [project.scripts]
 amiga-adf-library-builder = "amiga_adf_library_builder.cli:main"

@@ -304,7 +304,10 @@ def test_scanned_pdf_skipped_routes_for_review(tmp_path):
     sections, prov, order, skipped = rc._compose_sections(srcs, g, cfg=cfg)
     # No fabricated content composed; source recorded as skipped.
     assert rc.MARKER_CONTROLS not in sections
-    assert any("extraction unavailable" in s for s in skipped)
+    assert any("RTFM decode failed" in s for s in skipped)
+    assert any(
+        "no extractable text layer" in s for s in skipped
+    ), "a scanned, text-less PDF must name the exact reason"
     assert any(p.kind == "pdf" and p.extraction_method == "pdf:unavailable" for p in prov)
 
 
@@ -384,10 +387,18 @@ def test_extract_pdf_missing_libs_returns_unavailable(monkeypatch, tmp_path):
     pdf.write_bytes(_make_native_pdf_bytes("hello"))
     # Force both PDF backends "absent".
     monkeypatch.setattr(rtfm_docs, "_have_pymupdf", lambda: False)
+    monkeypatch.setattr(rtfm_docs, "_pymupdf_backend", lambda: "unavailable")
     monkeypatch.setattr(rtfm_docs, "_have_pypdf", lambda: False)
+    monkeypatch.setattr(rtfm_docs, "_pypdf_backend", lambda: "unavailable")
     res = extract_pdf_text(pdf)
     assert res.confidence == "unavailable"
-    assert "pypdf/pymupdf" in res.reason
+    assert res.empty
+    assert res.text == ""
+    # The exact reason must name BOTH missing backends (not a vague "failed").
+    assert "PDF extraction unavailable" in res.reason
+    assert "pymupdf: unavailable" in res.reason
+    assert "pypdf: unavailable" in res.reason
+    assert res.backend.startswith("unavailable")
 
 
 def test_docs_config_from_dict_defaults():

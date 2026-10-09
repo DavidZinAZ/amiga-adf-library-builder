@@ -36,6 +36,7 @@ an overall verdict (``high`` | ``low`` | ``unavailable``).
 
 from __future__ import annotations
 
+import io
 import os
 import threading
 from dataclasses import dataclass, field
@@ -137,6 +138,10 @@ class ExtractionResult:
     confidence: str                    # high | low | unavailable
     needs_ocr: bool                    # True when OCR was required but absent
     source_kind: str                   # "pdf" | "image"
+    # PDF backend that served (or refused) this extraction: "pymupdf" |
+    # "pypdf" | "unavailable (...)". Always populated for PDFs so a failure
+    # log can name the backend instead of a generic "failed to decode".
+    backend: str = ""
     reason: str = ""                   # why unavailable / what happened
     # Convenience flag: True when no usable text was extracted.
     empty: bool = field(init=False)
@@ -158,6 +163,33 @@ def _have_pymupdf() -> bool:
         return False
 
 
+def _pymupdf_backend() -> str:
+    """Name of the PDF backend that would actually serve PDF extraction.
+
+    An import alone does not prove the backend can serve a frozen build:
+    PyMuPDF loads its MuPDF C library through a compiled extension plus a
+    shared library at runtime, so a PyInstaller bundle can carry the Python
+    modules while missing the native pieces. We therefore verify a real
+    backend call before reporting the backend as usable.
+
+    Deterministic, side-effect free (in-memory document, no host files).
+    """
+    if not _have_pymupdf():
+        return "unavailable"
+    try:
+        import fitz  # type: ignore
+
+        doc = fitz.open()
+        doc.insert_page(0)
+        pages = doc.page_count
+        doc.close()
+    except Exception as exc:  # native library missing / unpackaged
+        return f"unavailable ({type(exc).__name__})"
+    if pages == 1:
+        return "pymupdf"
+    return f"unavailable (unexpected page count {pages})"
+
+
 def _have_pypdf() -> bool:
     try:
         import pypdf  # type: ignore  # noqa: F401
@@ -165,6 +197,37 @@ def _have_pypdf() -> bool:
         return True
     except Exception:
         return False
+
+
+def _pypdf_backend() -> str:
+    """Name of the pypdf fallback backend, or why it cannot serve PDFs."""
+    if not _have_pypdf():
+        return "unavailable"
+    try:
+        import pypdf  # type: ignore
+
+        reader = pypdf.PdfReader(io.BytesIO(b"%PDF-1.4\n"))
+        len(reader.pages)
+    except Exception as exc:
+        return f"unavailable ({type(exc).__name__})"
+    return "pypdf"
+
+
+def pdf_backend() -> str:
+    """Name of the backend ``extract_pdf_text`` would actually use.
+
+    Returns ``"pymupdf"`` / ``"pypdf"`` when that backend can genuinely serve
+    a PDF, or ``"unavailable (...)"`` naming the concrete reason. Used for
+    diagnostics so a failure log can state which backend was in play instead
+    of a generic "failed to decode".
+    """
+    pymupdf = _pymupdf_backend()
+    if pymupdf == "pymupdf":
+        return "pymupdf"
+    pypdf = _pypdf_backend()
+    if pypdf == "pypdf":
+        return "pypdf"
+    return f"unavailable (pymupdf: {pymupdf}; pypdf: {pypdf})"
 
 
 def _have_pillow() -> bool:
@@ -261,6 +324,7 @@ def extract_pdf_text(path, cfg: Optional[RtfmDocsConfig] = None) -> ExtractionRe
     """
     cfg = cfg or RtfmDocsConfig()
     path = Path(path)
+    backend = pdf_backend()
 
     # --- Size guard (before opening). ---
     try:
@@ -268,17 +332,19 @@ def extract_pdf_text(path, cfg: Optional[RtfmDocsConfig] = None) -> ExtractionRe
     except OSError as exc:
         return ExtractionResult(
             text="", pages=(), confidence="unavailable", needs_ocr=False,
-            source_kind="pdf", reason=f"cannot stat source: {path.name} ({exc})",
+            source_kind="pdf", backend=backend,
+            reason=f"cannot stat source: {path.name} ({exc})",
         )
     if size == 0:
         return ExtractionResult(
             text="", pages=(), confidence="unavailable", needs_ocr=False,
-            source_kind="pdf", reason="source is empty (0 bytes)",
+            source_kind="pdf", backend=backend,
+            reason="source is empty (0 bytes)",
         )
     if size > cfg.max_bytes:
         return ExtractionResult(
             text="", pages=(), confidence="unavailable", needs_ocr=False,
-            source_kind="pdf",
+            source_kind="pdf", backend=backend,
             reason=f"source exceeds size cap ({size} > {cfg.max_bytes} bytes)",
         )
 
@@ -286,27 +352,29 @@ def extract_pdf_text(path, cfg: Optional[RtfmDocsConfig] = None) -> ExtractionRe
     if cfg.ocr_required and not tesseract:
         return ExtractionResult(
             text="", pages=(), confidence="unavailable", needs_ocr=True,
-            source_kind="pdf",
+            source_kind="pdf", backend=backend,
             reason="OCR required by config but Tesseract is unavailable",
         )
 
     # --- Primary path: pymupdf (text + rasterization). ---
-    if _have_pymupdf():
-        return _extract_pdf_with_fitz(path, cfg, tesseract)
+    if _pymupdf_backend() == "pymupdf":
+        return _extract_pdf_with_fitz(path, cfg, tesseract, backend)
 
     # --- Fallback path: pypdf (text only, no raster/OCR). ---
-    if _have_pypdf():
-        return _extract_pdf_with_pypdf(path, cfg, tesseract)
+    if _pypdf_backend() == "pypdf":
+        return _extract_pdf_with_pypdf(path, cfg, tesseract, backend)
 
-    # --- No PDF library at all. ---
+    # --- No usable PDF backend. Name the concrete reason. ---
     return ExtractionResult(
         text="", pages=(), confidence="unavailable", needs_ocr=False,
-        source_kind="pdf",
-        reason="PDF extraction unavailable (pypdf/pymupdf not installed)",
+        source_kind="pdf", backend=backend,
+        reason=f"PDF extraction unavailable: {backend}",
     )
 
 
-def _extract_pdf_with_fitz(path: Path, cfg: RtfmDocsConfig, tesseract: bool) -> ExtractionResult:
+def _extract_pdf_with_fitz(
+    path: Path, cfg: RtfmDocsConfig, tesseract: bool, backend: str,
+) -> ExtractionResult:
     import fitz  # type: ignore
 
     page_texts: list[str] = []
@@ -320,8 +388,8 @@ def _extract_pdf_with_fitz(path: Path, cfg: RtfmDocsConfig, tesseract: bool) -> 
     except Exception as exc:
         return ExtractionResult(
             text="", pages=(), confidence="unavailable", needs_ocr=needs_ocr,
-            source_kind="pdf",
-            reason=f"PDF open/parse failed: {type(exc).__name__}",
+            source_kind="pdf", backend=backend,
+            reason=f"PDF open/parse failed ({backend}): {type(exc).__name__}",
         )
 
     try:
@@ -391,10 +459,12 @@ def _extract_pdf_with_fitz(path: Path, cfg: RtfmDocsConfig, tesseract: bool) -> 
         doc.close()
 
     joined = _normalize_text("\n\n".join(page_texts))
-    return _finalize_pdf_result(joined, pages, needs_ocr, any_native, any_ocr)
+    return _finalize_pdf_result(joined, pages, needs_ocr, any_native, any_ocr, backend)
 
 
-def _extract_pdf_with_pypdf(path: Path, cfg: RtfmDocsConfig, tesseract: bool) -> ExtractionResult:
+def _extract_pdf_with_pypdf(
+    path: Path, cfg: RtfmDocsConfig, tesseract: bool, backend: str,
+) -> ExtractionResult:
     import pypdf  # type: ignore
 
     page_texts: list[str] = []
@@ -433,37 +503,49 @@ def _extract_pdf_with_pypdf(path: Path, cfg: RtfmDocsConfig, tesseract: bool) ->
     except Exception as exc:
         return ExtractionResult(
             text="", pages=(), confidence="unavailable", needs_ocr=needs_ocr,
-            source_kind="pdf",
-            reason=f"PDF open/parse failed: {type(exc).__name__}",
+            source_kind="pdf", backend=backend,
+            reason=f"PDF open/parse failed ({backend}): {type(exc).__name__}",
         )
 
     joined = _normalize_text("\n\n".join(page_texts))
-    return _finalize_pdf_result(joined, pages, needs_ocr, any_native, any_ocr=False)
+    return _finalize_pdf_result(
+        joined, pages, needs_ocr, any_native, any_ocr=False, backend=backend,
+    )
 
 
 def _finalize_pdf_result(
     joined: str, pages: list[PageProvenance], needs_ocr: bool,
-    any_native: bool, any_ocr: bool,
+    any_native: bool, any_ocr: bool, backend: str,
 ) -> ExtractionResult:
     if not joined.strip():
         kind = "unavailable"
         confidence = "unavailable"
+        # No text at all: state exactly why. An all-scanned PDF with no OCR
+        # engine must read as "no extractable text layer", not "decode failed".
+        if not any_native:
+            reason = "PDF contains no extractable text layer"
+        else:
+            reason = "PDF text layer present but yielded no usable characters"
     elif any_ocr and any_native:
         kind = "mixed"
         confidence = "low"
+        reason = f"pdf:{kind}"
     elif any_ocr:
         kind = "page_ocr"
         confidence = "low"
+        reason = f"pdf:{kind}"
     else:
         kind = "native_text"
         confidence = "high"
+        reason = f"pdf:{kind}"
     return ExtractionResult(
         text=joined,
         pages=tuple(pages),
         confidence=confidence,
         needs_ocr=needs_ocr,
         source_kind="pdf",
-        reason=f"pdf:{kind}",
+        backend=backend,
+        reason=reason,
     )
 
 
@@ -502,6 +584,7 @@ def extract_image_text(path, cfg: Optional[RtfmDocsConfig] = None) -> Extraction
         return ExtractionResult(
             text="", pages=(), confidence="unavailable", needs_ocr=False,
             source_kind="image",
+            backend="unavailable (pillow: unavailable)",
             reason="image extraction unavailable (pillow not installed)",
         )
 
@@ -522,6 +605,7 @@ def extract_image_text(path, cfg: Optional[RtfmDocsConfig] = None) -> Extraction
         return ExtractionResult(
             text="", pages=(), confidence="unavailable", needs_ocr=False,
             source_kind="image",
+            backend="pillow",
             reason=f"image open failed: {type(exc).__name__}",
         )
 
@@ -532,7 +616,8 @@ def extract_image_text(path, cfg: Optional[RtfmDocsConfig] = None) -> Extraction
                 note="Tesseract unavailable",
             ),),
             confidence="unavailable", needs_ocr=True, source_kind="image",
-            reason="image:unavailable",
+            backend="pillow (OCR engine: tesseract unavailable)",
+            reason="image is not OCR'd: Tesseract unavailable",
         )
 
     text = _ocr_pil_image(img, cfg.ocr_timeout)
@@ -543,7 +628,8 @@ def extract_image_text(path, cfg: Optional[RtfmDocsConfig] = None) -> Extraction
                 note="ocr failed or timed out",
             ),),
             confidence="unavailable", needs_ocr=False, source_kind="image",
-            reason="image:unavailable",
+            backend="pillow (OCR engine: tesseract)",
+            reason="image OCR produced no text",
         )
 
     norm = _normalize_text(text)
@@ -554,13 +640,15 @@ def extract_image_text(path, cfg: Optional[RtfmDocsConfig] = None) -> Extraction
                 note="ocr produced no text",
             ),),
             confidence="unavailable", needs_ocr=False, source_kind="image",
-            reason="image:unavailable",
+            backend="pillow (OCR engine: tesseract)",
+            reason="image OCR produced no text",
         )
 
     return ExtractionResult(
         text=norm,
         pages=(PageProvenance(page_index=0, method="ocr", confidence="low"),),
         confidence="low", needs_ocr=False, source_kind="image",
+        backend="pillow (OCR engine: tesseract)",
         reason="image:ocr",
     )
 

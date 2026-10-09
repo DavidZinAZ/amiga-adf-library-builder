@@ -97,6 +97,23 @@ jobs:
           print("Pillow import OK:", PIL.__version__)
           PY
 
+      - name: Verify PDF manual extraction backend
+        # The packaged GUI must be able to decode PDF manuals (RTFM sidecars).
+        # `rtfm_docs` imports PyMuPDF/pypdf lazily, so this gate verifies the
+        # backend is genuinely usable -- including the native MuPDF libraries --
+        # BEFORE packaging, using the same probe the runtime uses. A frozen
+        # bundle missing the native libs fails here instead of silently routing
+        # every PDF manual for review.
+        run: |
+          python - <<'PY'
+          from amiga_adf_library_builder.rtfm_docs import pdf_backend
+          backend = pdf_backend()
+          print("PDF backend:", backend)
+          assert backend in ("pymupdf", "pypdf"), (
+              f"no usable PDF backend in the build environment: {backend}"
+          )
+          PY
+
       - name: Build onedir portable app
         run: |
           python tools/build_windows.py --target onedir --clean

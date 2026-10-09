@@ -131,6 +131,45 @@ PILLOW_HIDDEN_IMPORTS = [
     "PIL.Image",
 ]
 
+# RTFM PDF extraction (issue: PDF manuals cannot decode in the frozen build).
+# `rtfm_docs` imports PyMuPDF and pypdf LAZILY inside functions, so PyInstaller
+# static analysis never sees them and they were omitted from the frozen bundle
+# -- leaving the packaged app with no PDF backend at all. Hidden imports alone
+# do NOT suffice for PyMuPDF: it also ships native MuPDF shared libraries
+# (libmupdf / libmupdfcpp) that PyInstaller's default collectors can miss, so a
+# bundle carrying the Python modules can still fail to load the C backend at
+# runtime. We therefore (a) declare every Python module in the import graph and
+# (b) collect the native libraries explicitly.
+PDF_HIDDEN_IMPORTS = [
+    "fitz",
+    "pymupdf",
+    "pymupdf.mupdf",
+    "pymupdf.extra",
+    "pymupdf.utils",
+    "pymupdf.table",
+    "fitz.table",
+    "fitz.utils",
+    "pypdf",
+    "pypdf._reader",
+    "pypdf._writer",
+    "pypdf._page",
+    "pypdf._doc_common",
+    "pypdf._encryption",
+    "pypdf._utils",
+    "pypdf._cmap",
+    "pypdf._font",
+    "pypdf.filters",
+    "pypdf.errors",
+]
+
+# Native (non-Python) libraries PyMuPDF needs at runtime. Collected explicitly
+# because the default PyInstaller analysis may not follow the ctypes/SWIG load
+# path used by pymupdf's compiled extension modules.
+PDF_PACKAGES_WITH_NATIVE_LIBS = [
+    "pymupdf",
+    "fitz",
+]
+
 # Bootstrap that invokes the documented hook target. Written to build/ at build
 # time (gitignored) so the committed spec stays coherent without committing a
 # bootstrap file.
@@ -181,6 +220,7 @@ def render_spec(
     console: bool,
     application_version: str,
     version_info_path: str = "",
+    native_lib_packages: list[str] | None = None,
 ) -> str:
     """Render the deterministic PyInstaller spec referenced by this driver.
 
@@ -188,8 +228,35 @@ def render_spec(
     (the directory containing this spec). They are resolved at spec-eval time
     via PyInstaller's injected ``SPECPATH`` so the committed spec is portable
     across machines / OSes (no baked-in absolute paths).
+
+    ``native_lib_packages`` names packages whose native shared libraries must be
+    collected explicitly (PyMuPDF's MuPDF binaries). The generated spec performs
+    the collection at spec-eval time so the result reflects the build host's
+    actual installed packages.
     """
     version_kw = f"\n        version=os.path.join(SPECDIR, {version_info_path!r}),\n    " if version_info_path else ""
+    if native_lib_packages:
+        native_lib_block = (
+            "# Native libraries the PDF backend loads at runtime (MuPDF's\n"
+            "# libmupdf / libmupdfcpp shared objects). PyInstaller's default\n"
+            "# binary analysis does not follow the extension modules' dependency\n"
+            "# path for these, and they are shipped as package data, so we\n"
+            "# collect them explicitly.\n"
+            "PDF_NATIVE_DATAS = []\n"
+            "for _pkg in " + repr(native_lib_packages) + ":\n"
+            "    try:\n"
+            "        PDF_NATIVE_DATAS += collect_data_files(_pkg, include_py_files=False)\n"
+            "    except Exception as _exc:  # package absent on this host\n"
+            "        print(f'WARNING: PDF native libs not collected from {_pkg}: {_exc}')\n"
+        )
+        import_helpers = (
+            "from PyInstaller.utils.hooks import collect_data_files\n"
+        )
+        datas_kw = "    datas=_collect_datas() + PDF_NATIVE_DATAS,"
+    else:
+        native_lib_block = ""
+        import_helpers = ""
+        datas_kw = "    datas=_collect_datas(),"
     return f'''# -*- mode: python ; coding: utf-8 -*-
 #
 # AmigaADFGui.spec -- PyInstaller build spec for the Issue #15 Windows GUI.
@@ -217,6 +284,8 @@ HIDDEN_IMPORTS = {hidden_imports!r}
 CONSOLE = {console}                 # False for shipped GUI; True for debug
 # ---------------------------------------------------------------------------
 
+{import_helpers}
+{native_lib_block}
 block_cipher = None
 
 
@@ -230,7 +299,7 @@ a = Analysis(
     [SCRIPT],
     pathex=PATHEX,
     binaries=[],
-    datas=_collect_datas(),
+{datas_kw}
     hiddenimports=HIDDEN_IMPORTS,
     hookspath=[],
     hooksconfig={{}},
@@ -363,6 +432,7 @@ def main() -> int:
         discover_hidden_imports(PKG_SRC)
         + PILLOW_HIDDEN_IMPORTS
         + QT_HIDDEN_IMPORTS
+        + PDF_HIDDEN_IMPORTS
     )
     spec_text = render_spec(
         target=args.target,
@@ -373,6 +443,7 @@ def main() -> int:
         console=bool(args.console),
         application_version=_APPLICATION_VERSION,
         version_info_path="tools/_version_info.txt",
+        native_lib_packages=PDF_PACKAGES_WITH_NATIVE_LIBS,
     )
 
     spec_path = Path(args.spec_out)

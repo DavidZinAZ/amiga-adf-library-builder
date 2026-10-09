@@ -1240,8 +1240,8 @@ def _compose_sections(
             )
             detail = f"; reason: {res.reason}" if res.reason else ""
             skipped_notes.append(
-                f"source skipped (extraction unavailable"
-                f"{'; needs OCR' if res.needs_ocr else ''}): {src.path.name}{detail}"
+                f"RTFM decode failed: {src.path.name}: "
+                f"backend={res.backend or 'unknown'}{detail}"
             )
             continue
 
@@ -1883,6 +1883,12 @@ def build_rtfm_for_group(
         result.routed_for_review = True
         result.review_reason = "all matched sources failed to decode; routed for review"
         result.notes.append(result.review_reason)
+        # Concise per-source decode reasons (filename: backend: reason). Keeps
+        # the aggregate reason stable for existing consumers while making the
+        # exact cause visible in normal logs without a giant traceback.
+        for _note in skipped_notes:
+            if _note.startswith("RTFM decode failed:"):
+                result.notes.append(_note)
         result.provenance_path = prov_path
         write_json_atomic(
             prov_path, _build_provenance(group, result, max_bytes=cfg.max_bytes, mode="deterministic")
