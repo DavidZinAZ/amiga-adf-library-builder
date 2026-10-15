@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.10 — 2026-10-15
+
+- Fix DAT byte matching using comparable hashes and only the current release's disks.
+- Fix normalized DAT title lookup and prevent weaker manual candidates from entering an accepted RTFM.
+- Add image/manual review with previews, PDF page navigation, side-by-side comparison, saved choices, and undo/redo.
+- Convert selected PDF manuals to RTFM text before export and withhold undecided alternatives.
+- Preserve numbered part identities and distinguish inline release versions from spelling errors.
+- Repair canonical-library persistence and reuse generic artwork for versioned releases.
+- Validate against the supplied 45-disk collection and 396 passing regression tests; exclude three Windows permission-dependent checks.
+- Publish portable ZIP and standalone EXE builds with bundled PDF extraction and offline OCR.
+
 ## 0.2.37 — 2026-09-27
 
 ### Windows User Test Release (operator production qualification)
