@@ -96,6 +96,7 @@ class EnrichResult:
     # local-media provider. Each entry: {path, root, filename, category}.
     # Empty for image-only matches; these are consumed by the RTFM build.
     manual_sources: list = field(default_factory=list)
+    media_candidates: list = field(default_factory=list)
 
 
 class EnrichCategory(str, Enum):
@@ -904,12 +905,15 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                     detail=f"dat_loaded sources={len(_enabled_sources)} entries={sum(s.entry_count for s in _enabled_sources)}",
                     cache="hit", ok=True,
                 ))
-                # Query by sha256 for each disk (exact-hash precedence)
+                # Compare DAT-compatible hashes for this release's disks only.
                 _sha_matches = []
-                for _rec in scans.values():
+                for _parsed in group.records:
+                    _rec = scans.get(_parsed.source_filename)
                     _sha = getattr(_rec, "sha256", None)
                     if _sha:
-                        _disk_matches = metadata_source_manager.lookup_by_sha256(_sha)
+                        _disk_matches = metadata_source_manager.lookup_file(
+                            _rec.path, expected_sha256=_sha
+                        )
                         if _disk_matches:
                             for _entry in _disk_matches:
                                 _sha_matches.append({
@@ -917,13 +921,14 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                                     "sha256": _sha,
                                     "source_id": _entry.source_id,
                                     "source_name": _entry.source_id,
-                                    "match_type": "sha256",
+                                    "match_type": "dat_hash",
                                 })
                 if _sha_matches:
-                    # Use the first sha256 match; track all for diagnostics
+                    # Use the first byte-identity match; track all for diagnostics.
                     _dat_entry = _sha_matches[0]["entry"]
+                    from .metadata_source import clean_tosec_title
                     metadata = MetadataRecord(
-                        canonical_title=_dat_entry.title or lookup_title or group.title or "Unknown",
+                        canonical_title=clean_tosec_title(_dat_entry.title) or lookup_title or group.title or "Unknown",
                         description=_dat_entry.title,
                         year=_dat_entry.year,
                         publisher=_dat_entry.publisher,
@@ -940,7 +945,7 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                         _dat_results.append({
                             "source_id": _m["source_id"],
                             "source_name": _m["source_name"],
-                            "match_type": "sha256",
+                            "match_type": "dat_hash",
                             "title": _m["entry"].title,
                             "matched": True,
                         })
@@ -1141,6 +1146,12 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
     # and not leaked by pipeline-modified display text (GH-192 Problem 4).
 
     master = None
+    from .media_review import saved_entry
+    _saved_media = saved_entry(library_root, group.release_key)
+    _media_choices = _saved_media.media_choices if _saved_media is not None else {}
+    _image_choices = {k: v for k, v in _media_choices.items() if k != "manual"}
+    _image_candidates = (local_media_provider.candidates_for_review(group)
+                         if local_media_provider is not None and include_artwork else [])
     processed: Optional[Path] = None
     # Manual-vs-artwork routing: matched PDF/TXT manuals (never artwork) are
     # collected here and returned on EnrichResult.manual_sources so the
@@ -1148,11 +1159,15 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
     manual_sources: list[dict] = []
     if include_artwork:
         master = _find_existing_master(group, artwork_original_dir)
+        if _image_choices:
+            from .media_review import selected_image
+            _selected_image = selected_image(_image_choices)
+            master = Path(_selected_image["path"]) if _selected_image else None
         # Provider order #2: configured local-media libraries. Only consulted when no
         # approved local-artwork master already exists. The provider copies a
         # selected source into the app cache and returns the cached master; it never
         # writes into the source library.
-        if master is None and local_media_provider is not None:
+        if master is None and local_media_provider is not None and not _image_choices:
             lm_master, lm_events, lm_manual_source = _resolve_local_media_master(group, local_media_provider)
             events.extend(lm_events)
             if lm_master is not None:
@@ -1171,7 +1186,7 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                 })
                 _act("Found manual in a local library.")
                 notes.append(f"matched manual source: {lm_manual_source.name}")
-        if online and metadata and metadata.artwork_url and master is None:
+        if online and metadata and metadata.artwork_url and master is None and not _image_choices:
             _act("Fetching artwork online…")
             events.append(EnrichEvent(
                 category=EnrichCategory.ARTWORK_LOOKUP,
@@ -1332,7 +1347,7 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
     return EnrichResult(nfo_path, master, processed, processed is None, notes, metadata_path, provider, processed is None, events, needs_manual_review=needs_manual_review,
                         metadata_confidence=(metadata.confidence if metadata is not None else None),
                         review_items=_review_items, dat_results=_dat_results,
-                        manual_sources=manual_sources)
+                        manual_sources=manual_sources, media_candidates=_image_candidates)
 
 
 def enrich_all(groups: list[ReleaseGroup], *, nfo_dir: Path, scans: list[ScanRecord],

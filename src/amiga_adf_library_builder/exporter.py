@@ -285,12 +285,34 @@ def export_release(
     staged_rtfm_files = _find_staged_rtfm(staged_library, release_key)
     rtfm_bytes: Optional[bytes] = None
     rtfm_src: Optional[Path] = None
-    if staged_rtfm_files:
+    _media_entry = staged_library.releases.get(release_key) if staged_library is not None else None
+    from .media_review import pending_purposes
+    _pending_media = pending_purposes(_media_entry) if _media_entry is not None else set()
+    _manual_choice = _media_entry.media_choices.get("manual") if _media_entry is not None else None
+    if "manual" in _pending_media:
+        conflicts.append("Multiple matching manuals await an operator choice.")
+    elif _manual_choice is not None:
+        if _manual_choice:
+            from .media_review import render_manual_choices
+            try:
+                rtfm_bytes = render_manual_choices(group, _manual_choice,
+                    Path(rtfm_dir) if rtfm_dir else folder.parent / "manual-previews")
+            except (OSError, ValueError) as exc:
+                conflicts.append(str(exc))
+    elif staged_rtfm_files:
         # Use the first operator-selected file that exists.
         for _rtfm_path in staged_rtfm_files:
             _p = Path(_rtfm_path)
             if _p.is_file():
-                rtfm_bytes = _p.read_bytes()
+                if _p.suffix.lower() == ".rtfm":
+                    rtfm_bytes = _p.read_bytes()
+                else:
+                    from .media_review import render_manual_choices
+                    try:
+                        rtfm_bytes = render_manual_choices(group, [{"path": str(_p)}],
+                            Path(rtfm_dir) if rtfm_dir else folder.parent / "manual-previews")
+                    except (OSError, ValueError) as exc:
+                        conflicts.append(str(exc))
                 rtfm_src = _p
                 break
     elif rtfm_paths is not None:
@@ -329,7 +351,16 @@ def export_release(
     processed = Path(artwork_processed_dir) / f"{source_basename}.jpg" if artwork_processed_dir is not None else None
     artwork_data: Optional[bytes] = None
     try:
-        if processed is not None and processed.is_file():
+        _image_choices = ({k: v for k, v in _media_entry.media_choices.items() if k != "manual"}
+                          if _media_entry is not None else {})
+        if _pending_media - {"manual"}:
+            conflicts.append("Multiple matching images await an operator choice.")
+        elif _image_choices:
+            from .media_review import selected_image
+            _chosen_image = selected_image(_image_choices)
+            if _chosen_image:
+                artwork_data = artwork_mod.process_artwork_bytes(Path(_chosen_image["path"]), progressive=False)
+        elif processed is not None and processed.is_file():
             artwork_data = processed.read_bytes()
         elif artwork_original_dir is not None:
             master = artwork_mod.find_artwork_master(group, artwork_original_dir)
@@ -360,9 +391,9 @@ def export_release(
                         artwork_data = artwork_mod.process_artwork_bytes(master, progressive=True)
         # (GH-136) Fallback: use manually-assigned artwork from the
         # staged library when no processed artifact or master exists.
-        if artwork_data is None:
+        if artwork_data is None and not _image_choices and not (_pending_media - {"manual"}):
             artwork_data = _find_staged_artwork(staged_library, release_key)
-    except RuntimeError as exc:
+    except (RuntimeError, OSError, ValueError) as exc:
         conflicts.append(f"artwork processing failed: {exc}")
 
     if artwork_data is not None:

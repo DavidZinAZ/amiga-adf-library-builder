@@ -148,6 +148,11 @@ def _flag_near_duplicate_spellings(groups: list[ReleaseGroup]) -> None:
             continue
         siblings = []
         for h in titled[i + 1 :]:
+            gv = re.search(r"\s+v\d[\d.]*[a-z]?$", g.title or "", re.IGNORECASE)
+            hv = re.search(r"\s+v\d[\d.]*[a-z]?$", h.title or "", re.IGNORECASE)
+            if gv and hv and _norm_title(g.title[:gv.start()]) == _norm_title(h.title[:hv.start()]):
+                # Inline release versions are intentional identities, not typos.
+                continue
             gh = _norm_title(h.title)
             if not gh or gi == gh:
                 continue

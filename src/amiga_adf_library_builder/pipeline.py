@@ -330,6 +330,12 @@ def run_pipeline(
         except Exception:  # logging must never break the pipeline
             pass
     library_root = cfg.library_root
+    # Saved media choices are curation authority on subsequent runs too.
+    if not library_state_path:
+        from .media_review import latest_state_path
+        _saved_state_path = latest_state_path(library_root)
+        if _saved_state_path is not None:
+            library_state_path = str(_saved_state_path)
     original_dir = cfg.original_dir
     catalog_dir = cfg.catalog_dir
     nfo_dir = cfg.nfo_dir
@@ -911,6 +917,22 @@ def run_pipeline(
                 except Exception:
                     pass
             return result
+        # Carry candidate review gates into the first export as well as reruns.
+        # No generated media is silently used while alternatives await a choice.
+        from .media_review import deduplicate_candidates
+        if staged_library is None:
+            staged_library = StagedLibrary()
+        _rtfm_candidate_map = {r.release_key: r.media_candidates for r in rtfm_results}
+        for _group in groups:
+            _entry = staged_library.releases.get(_group.release_key)
+            if _entry is None:
+                _entry = StagedReleaseEntry(release_key=_group.release_key, title=_group.title,
+                    edition=_group.edition, group=_group.group, chipset=_group.chipset)
+                staged_library.releases[_group.release_key] = _entry
+            _enriched = _enrich_by_key.get(str(_group.release_key))
+            _entry.media_candidates = deduplicate_candidates(
+                list(getattr(_enriched, "media_candidates", []))
+                + _rtfm_candidate_map.get(_group.release_key, []))
         export_result = exporter.export_all(
             groups,
             staging_dir=cfg.staging_dir,
@@ -1060,6 +1082,10 @@ def run_pipeline(
         _pg["folder"] = planned_names[_pg["release_key"]]
         _pg["canonical_proposed_name"]["basename"] = _pg["folder"]
         _pg["rtfm_results"] = _rtfm_by_key.get(_pg["release_key"], [])
+        _er_media = _enrich_by_key.get(str(_pg["release_key"]))
+        _pg["media_candidates"] = list(getattr(_er_media, "media_candidates", []))
+        for _manual_result in _pg["rtfm_results"]:
+            _pg["media_candidates"].extend(_manual_result.get("media_candidates", []))
 
     # (GH-192) Add DAT/local metadata diagnostics to per_group.
     # Index enrich results by release_key (captured above, before the
@@ -1431,6 +1457,8 @@ def build_staged_library_from_result(
         # Only set when no curation-operator artwork choice exists
         # (CURATION-authority claims are preserved by carry_over).
         artwork_processed = pg.get("artwork_processed")
+        from .media_review import deduplicate_candidates
+        entry.media_candidates = deduplicate_candidates(pg.get("media_candidates", []))
         if artwork_processed and not entry.artwork_front:
             entry.artwork_front = str(artwork_processed)
 
@@ -1528,7 +1556,10 @@ def _persist_canonical_library(
             # Scope retirement: releases not in current library are
             # marked retired (soft delete) to halt monotonic growth.
             active_ids = {
-                r.release_id for r in library.releases.values()
+                row["entity_id"] for row in canon._conn.execute(
+                    "SELECT entity_id, value FROM field_claim "
+                    "WHERE entity_type = 'release' AND field_name = 'release_key'"
+                ) if row["value"] in library.releases
             }
             canon.retire_releases(active_ids)
     except (OSError, sqlite3.Error, ValueError, TypeError) as exc:

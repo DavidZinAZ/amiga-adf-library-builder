@@ -638,67 +638,77 @@ class MetadataSourceManager:
         return self
 
     def lookup_by_sha256(self, sha256: str) -> list[SourceEntry]:
-        """Look up indexed entries by SHA-256 hash (exact or alternate).
+        """Compatibility API: standard DATs cannot be queried by SHA-256.
 
-        Returns matching SourceEntry objects or empty list.
-        Only searches enabled sources.
+        Use lookup_file to compute comparable DAT hashes from the disk bytes.
         """
-        if not sha256:
+        # Standard DATs contain SHA-1/MD5/CRC, not SHA-256. Hashes from
+        # different algorithms cannot be compared, including their prefixes.
+        return []
+
+    def lookup_file(self, path: Path, *, expected_sha256: str = "") -> list[SourceEntry]:
+        """Match actual disk bytes using the strongest DAT hash available.
+
+        Verify the scan identity before accepting a result so a changed intake
+        file cannot acquire metadata belonging to different bytes.
+        """
+        import zlib
+        sha256, sha1, md5 = hashlib.sha256(), hashlib.sha1(), hashlib.md5()
+        crc, size = 0, 0
+        with Path(path).open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                size += len(chunk)
+                sha256.update(chunk)
+                sha1.update(chunk)
+                md5.update(chunk)
+                crc = zlib.crc32(chunk, crc)
+        if expected_sha256 and sha256.hexdigest() != expected_sha256.lower():
             return []
-        prefix = sha256[:16] if len(sha256) >= 16 else sha256
-        cur = self._conn.execute(
+        values = (sha1.hexdigest(), md5.hexdigest(), f"{crc & 0xffffffff:08x}")
+        rows = self._conn.execute(
             "SELECT e.* FROM metadata_source_entries e "
             "JOIN metadata_sources s ON e.source_id = s.source_id "
-            "WHERE s.enabled = 1 AND (e.sha1 LIKE ? OR e.md5 LIKE ?)",
-            (prefix + "%", prefix + "%"),
+            "WHERE s.enabled = 1 AND (e.size IS NULL OR e.size = ?) "
+            "AND (e.sha1 = ? OR e.md5 = ? OR e.crc32 = ?) "
+            "ORDER BY e.source_id, e.title, e.id",
+            (size, *values),
         )
-        return [self._row_to_entry(row) for row in cur.fetchall()]
+        matches = []
+        for row in rows:
+            # A weaker hash must never override a conflicting stronger hash.
+            available = [(row[k], v) for k, v in zip(("sha1", "md5", "crc32"), values) if row[k]]
+            if available and all(actual.lower() == expected for actual, expected in available):
+                matches.append(self._row_to_entry(row))
+        return matches
+
+    def matching_title_rows(self, title: str) -> list:
+        """Normalized title lookup without lossy raw-text filters or pool caps.
+
+        Cache the normalized index for this database revision. Source changes,
+        including enable/disable, invalidate it through SQLite change counters.
+        """
+        keys = title_match_keys(title)
+        if not keys:
+            return []
+        revision = (self._conn.total_changes, self._conn.execute("PRAGMA data_version").fetchone()[0])
+        if getattr(self, "_title_cache_revision", None) != revision:
+            index = {}
+            rows = self._conn.execute(
+                "SELECT e.*, s.name AS source_name FROM metadata_source_entries e "
+                "JOIN metadata_sources s ON e.source_id = s.source_id "
+                "WHERE s.enabled = 1 ORDER BY s.name, e.title, e.id"
+            )
+            for row in rows:
+                for key in title_match_keys(row["title"]):
+                    index.setdefault(key, []).append(row)
+            self._title_cache = index
+            self._title_cache_revision = revision
+        matches = {row["id"]: row for key in keys for row in self._title_cache.get(key, [])}
+        return sorted(matches.values(), key=lambda row: (row["source_name"], row["title"] or "", row["id"]))
 
     def lookup_by_title(self, title: str, limit: int = 5) -> list[SourceEntry]:
-        """Look up indexed entries by game title identity.
-
-        Structural title match: ``[...]`` tag fields and ``(year)(publisher)
-        (Disk N of M)`` metadata are never treated as title text. A coarse SQL
-        pre-filter narrows rows to a distinctive title token, then an exact
-        :func:`title_match_keys` equality decides the match. Distinguishes
-        versions (``A-10 Tank Killer v1.0`` != ``v1.5``) and does NOT match on
-        a bare substring inside an unrelated title or a TOSEC tag field.
-        Returns matching SourceEntry objects or an empty list.
-        Only searches enabled sources.
-        """
-        if not title:
-            return []
-        needle_keys = title_match_keys(title)
-        if not needle_keys:
-            return []
-        token = _title_narrow_token(clean_tosec_title(title))
-        # LIKE '%token%' cannot use an index, so the scan cost is identical
-        # regardless of this bound; a generous pool ensures the exact-key gate
-        # never drops a true match that shares a common title token.
-        pool = max(limit * 100, 2000)
-        if token:
-            cur = self._conn.execute(
-                "SELECT e.* FROM metadata_source_entries e "
-                "JOIN metadata_sources s ON e.source_id = s.source_id "
-                "WHERE s.enabled = 1 AND lower(e.title) LIKE ? "
-                "LIMIT ?",
-                (f"%{token.lower()}%", pool),
-            )
-        else:
-            cur = self._conn.execute(
-                "SELECT e.* FROM metadata_source_entries e "
-                "JOIN metadata_sources s ON e.source_id = s.source_id "
-                "WHERE s.enabled = 1 "
-                "LIMIT ?",
-                (pool,),
-            )
-        rows = cur.fetchall()
-        matched = [
-            self._row_to_entry(r)
-            for r in rows
-            if title_match_keys(r["title"]) & needle_keys
-        ]
-        return matched[:limit]
+        """Match normalized release identity, then apply a deterministic limit."""
+        return [self._row_to_entry(row) for row in self.matching_title_rows(title)[:max(0, limit)]]
 
     @staticmethod
     def _row_to_entry(row: "sqlite3.Row") -> SourceEntry:

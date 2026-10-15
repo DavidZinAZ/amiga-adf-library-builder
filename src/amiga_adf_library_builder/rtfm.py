@@ -428,6 +428,7 @@ class RtfmResult:
     template_used: str = DEFAULT_TEMPLATE
     sources: list[RtfmProvenanceSource] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    media_candidates: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         """Return a JSON-serializable dict representation.
@@ -448,6 +449,7 @@ class RtfmResult:
             "template_used": self.template_used,
             "sources": [s.to_dict() for s in self.sources],
             "notes": self.notes,
+            "media_candidates": self.media_candidates,
         }
 
 
@@ -674,7 +676,7 @@ def _strip_release_tags(title: str) -> str:
         return ""
     t = re.sub(r"\s+", " ", title).strip()
     # Remove disk/side markers ("Disk 2", "Side B").
-    t = re.sub(r"\b(?:dis[ck]|disk|disc|side|part)\s*[0-9]+[ab]?\b", " ", t, flags=re.IGNORECASE)
+    t = re.sub(r"\b(?:dis[ck]|disk|disc|side)\s*[0-9]+[ab]?\b", " ", t, flags=re.IGNORECASE)
     # Remove parenthetical annotations.
     t = re.sub(r"\([^)]*\)", " ", t)
     # Remove known whole-word release tags.
@@ -684,7 +686,7 @@ def _strip_release_tags(title: str) -> str:
         "m3", "aga", "ecs", "ocs", "rtg", "agaecs",
         "qtx", "skr", "pd", "demo",
         "lang", "language", "ntsc", "pal",
-        "cd", "disk", "disks", "disc", "side", "part",
+        "cd", "disk", "disks", "disc", "side",
         "en", "de", "fr", "es", "it", "pl", "us", "uk",
     )
     toks = re.split(r"(\s+)", t)
@@ -897,6 +899,12 @@ def _match_candidates(stem: str, title: str, basename: str) -> "MatchScore":
     """Score ``stem`` against ONE identity form (``title`` or ``basename``)."""
     if not stem:
         return MatchScore(False, 0.0, "none", [])
+    # Part/chapter numbers name different games, unlike physical disk numbers.
+    def parts(value):
+        return [_pad_roman_token(n) for n in re.findall(
+            r"\b(?:part|chapter)\s+(\d+|[ivxlcdm]+)\b", value.lower())]
+    if parts(stem) != parts(title):
+        return MatchScore(False, 0.0, "none", ["different_numbered_part"])
     # 1) Exact raw identity (whitespace-insensitive).
     if stem.strip().lower() == title.strip().lower() and title:
         return MatchScore(True, 1.00, "exact", ["exact_title_identity"])
@@ -1749,6 +1757,25 @@ def build_rtfm_for_group(
             ((sc, s) for s, sc in scored if sc.matched),
             key=lambda scs: (-round(scs[0].confidence, 6), _canonical_game_key(scs[1])),
         )
+    from .media_review import manual_candidates
+    result.media_candidates = manual_candidates(scored)
+    if not explicit:
+        # Alternatives of the same document type require an operator choice.
+        # Separate hints/reference cards remain independent optional documents.
+        by_type = {}
+        for candidate in result.media_candidates:
+            if candidate["score"] >= HIGH_CONFIDENCE:
+                kind = candidate.get("doc_type") or candidate["category"]
+                by_type.setdefault(kind, []).append(candidate)
+        if any(len(items) > 1 for items in by_type.values()):
+            result.routed_for_review = True
+            result.review_reason = "Multiple different manuals found (near-tie alternatives); choose a primary manual in Review media choices."
+            result.notes.append(result.review_reason)
+            result.sources = [_provenance_source_from_scored(s, group, kind="candidate")
+                              for s, sc in scored if sc.matched]
+            write_json_atomic(prov_path, _build_provenance(group, result, max_bytes=cfg.max_bytes, mode="deterministic"))
+            result.provenance_path = prov_path
+            return result
     if not matched:
         # Nothing found. Route for review (operator may add a manual) rather
         # than emitting an empty file. Record the best non-matching candidate
@@ -1807,7 +1834,10 @@ def build_rtfm_for_group(
             )
             result.provenance_path = prov_path
             return result
-        # Unambiguous high-confidence: fall through to build + emit (auto-accept).
+        # A trusted winner must not carry weaker rival documents into output.
+        matched = [s for sc, s in ranked
+                   if sc.confidence >= HIGH_CONFIDENCE
+                   and _canonical_game_key(s) == top_key]
     else:
         # Best candidate is in the plausible-but-not-high band [0.5, 0.95) OR too
         # low to trust: route to review naming the ambiguity. Never auto-accept
@@ -1924,7 +1954,7 @@ def build_rtfm_for_group(
     # Emit the .rtfm (atomic write) + provenance sidecar.
     rtfm_dir.mkdir(parents=True, exist_ok=True)
     tmp = rtfm_path.with_suffix(rtfm_path.suffix + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
+    tmp.write_text(text, encoding="utf-8", newline="\n")
     tmp.replace(rtfm_path)
     result.rtfm_path = rtfm_path
     result.written = True
@@ -1974,12 +2004,30 @@ def build_rtfm_all(
             # Multi-disk set already emitted its shared .rtfm; skip the duplicate.
             continue
         seen_keys.add(key)
+        from .media_review import saved_entry, source_from_candidate, manual_candidates
+        saved = saved_entry(library_root, key)
+        chosen = saved.media_choices.get("manual") if saved is not None else None
+        if chosen == []:
+            results.append(RtfmResult(release_key=key, basename=names[g.release_key],
+                                      notes=["Manual omitted by saved operator choice."],
+                                      media_candidates=manual_candidates(
+                                          [(s, score_source_match(s, g)) for s in sources])))
+            continue
         try:
+            selected_sources = ([source_from_candidate(item) for item in chosen]
+                                if chosen is not None else (explicit_sources or {}).get(key))
             results.append(build_rtfm_for_group(
                 g, cfg=cfg, rtfm_dir=rtfm_dir, sources=sources,
-                explicit_sources=(explicit_sources or {}).get(key),
+                explicit_sources=selected_sources,
                 library_root=library_root, basename=names[g.release_key],
             ))
+            if selected_sources:
+                # Candidate review is independent of authoritative selection:
+                # retain discovered alternatives for a later change of mind.
+                from .media_review import deduplicate_candidates
+                results[-1].media_candidates = deduplicate_candidates(
+                    results[-1].media_candidates + manual_candidates(
+                        [(s, score_source_match(s, g)) for s in sources]))
         except RtfmDisabled:
             continue
         except Exception as exc:  # a single group failure must not abort the run

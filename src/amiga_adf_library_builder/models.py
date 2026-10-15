@@ -286,6 +286,9 @@ class StagedReleaseEntry:
 
     # RTFM/Manual files
     rtfm_files: list[str] = field(default_factory=list)
+    media_candidates: list[dict] = field(default_factory=list)
+    # Missing key means automatic; [] is an explicit "None of these".
+    media_choices: dict[str, list[dict]] = field(default_factory=dict)
 
     # Metadata provenance
     metadata_source: Optional[str] = None
@@ -324,6 +327,8 @@ class StagedReleaseEntry:
             "artwork_spine": self.artwork_spine,
             "artwork_other": self.artwork_other,
             "rtfm_files": self.rtfm_files,
+            "media_candidates": self.media_candidates,
+            "media_choices": self.media_choices,
             "metadata_source": self.metadata_source,
             "match_confidence": self.match_confidence,
             "locked_fields": self.locked_fields,
@@ -353,6 +358,8 @@ class StagedReleaseEntry:
             artwork_spine=d.get("artwork_spine"),
             artwork_other=d.get("artwork_other", []),
             rtfm_files=d.get("rtfm_files", []),
+            media_candidates=d.get("media_candidates", []),
+            media_choices=d.get("media_choices", {}),
             metadata_source=d.get("metadata_source"),
             match_confidence=d.get("match_confidence"),
             locked_fields=d.get("locked_fields", []),
@@ -679,6 +686,7 @@ class StagedLibrary:
             entry.artwork_spine = prev.artwork_spine
             entry.artwork_other = list(prev.artwork_other)
             entry.rtfm_files = list(prev.rtfm_files)
+            entry.media_choices = {k: list(v) for k, v in prev.media_choices.items()}
             entry.metadata_source = prev.metadata_source
             # (GH-99, defect 2) Confidence is canonical *metadata* from the
             # current run's match, not an operator curation decision. A fresh

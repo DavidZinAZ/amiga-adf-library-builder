@@ -949,6 +949,10 @@ class PreviewWidget(QWidget):
         self._export_changes_btn.clicked.connect(self._on_export_changes)
         toolbar.addWidget(self._export_changes_btn)
 
+        self._media_review_btn = QPushButton("Review media choices…")
+        self._media_review_btn.clicked.connect(self._on_review_media_queue)
+        toolbar.addWidget(self._media_review_btn)
+
         toolbar.addStretch(1)
 
         # Undo/Redo
@@ -1199,6 +1203,96 @@ class PreviewWidget(QWidget):
         pass
 
     # --- State management ---
+
+    def media_review_pending(self) -> list:
+        library = self._state.current_library
+        if library is None:
+            return []
+        pending = []
+        for entry in library.releases.values():
+            counts = {}
+            for candidate in entry.media_candidates:
+                purpose = candidate.get("purpose", "manual")
+                counts[purpose] = counts.get(purpose, 0) + 1
+            if any(count > 1 and purpose not in entry.media_choices for purpose, count in counts.items()):
+                pending.append(entry)
+        return pending
+
+    def notify_media_review(self) -> None:
+        pending = self.media_review_pending()
+        if not pending:
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle("Media choices need review")
+        box.setText(f"{len(pending)} release(s) have more than one matching image or manual.")
+        review = box.addButton("Review choices", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Decide later", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() == review:
+            self._on_review_media_queue()
+
+    def _on_review_media_queue(self) -> None:
+        library = self._state.current_library
+        if library is None:
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Review media choices")
+        dialog.resize(650, 450)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("Select a release to compare its candidates or change a saved choice."))
+        table = QTableWidget(0, 3)
+        table.setHorizontalHeaderLabels(["Release", "Candidates", "Saved choices"])
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        entries = [e for e in library.releases.values() if e.media_candidates or e.media_choices]
+        pending_keys = {e.release_key for e in self.media_review_pending()}
+        entries.sort(key=lambda e: (e.release_key not in pending_keys, (e.title or "").lower()))
+        for row, entry in enumerate(entries):
+            table.insertRow(row)
+            for col, value in enumerate([entry.title or entry.release_key, str(len(entry.media_candidates)), ", ".join(entry.media_choices) or "Awaiting review"]):
+                table.setItem(row, col, QTableWidgetItem(value))
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(table)
+        review = QPushButton("Compare selected release…")
+        def open_selected(*_):
+            row = table.currentRow()
+            if 0 <= row < len(entries):
+                self._review_media_entry(entries[row])
+                table.item(row, 2).setText(", ".join(entries[row].media_choices) or "Awaiting review")
+        review.clicked.connect(open_selected)
+        table.cellDoubleClicked.connect(open_selected)
+        layout.addWidget(review)
+        close = QPushButton("Close")
+        close.clicked.connect(dialog.accept)
+        layout.addWidget(close)
+        if entries:
+            table.selectRow(0)
+        dialog.exec()
+
+    def _review_media_entry(self, entry, purpose=None) -> None:
+        from .media_choice_dialog import MediaChoiceDialog
+        from copy import deepcopy
+        preview_dir = ((self._state.current_state_path.parent if self._state.current_state_path else Path.cwd()) / "media-previews")
+        dialog = MediaChoiceDialog(entry, preview_dir, self, initial_purpose=purpose)
+        if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.decisions:
+            return
+        before = deepcopy(entry.media_choices)
+        for purpose, candidates in dialog.decisions.items():
+            if candidates is None:
+                entry.media_choices.pop(purpose, None)
+            else:
+                entry.media_choices[purpose] = candidates
+        action = StagedChange(action=CurationAction.METADATA_EDIT,
+                              timestamp=datetime.now(timezone.utc).isoformat(),
+                              details="Reviewed image/manual choices",
+                              payload=json.dumps({"kind": "media_choices", "pre": before, "post": entry.media_choices}))
+        entry.actions.append(action)
+        self._record_action_for_undo(entry.release_key, action)
+        if self._state.state_manager is not None:
+            if not self._state.state_manager.save(self._state.current_library):
+                QMessageBox.warning(self, "Save choices", "Could not save media choices. Use Save State to retry.")
+        self._show_detail(entry)
+        self.state_changed.emit()
 
     def _on_load_state(self) -> None:
         """Load a .library_state.json file into the workspace."""
@@ -1715,9 +1809,9 @@ class PreviewWidget(QWidget):
         # Also try to find NFO path from Notes.
         self._nfo_path = _extract_nfo_path(entry.notes)
 
-        rtfm_str = ""
-        if entry.rtfm_files:
-            rtfm_str = ", ".join(entry.rtfm_files)
+        if "manual" in entry.media_choices:
+            self._rtfm_paths = [c["path"] for c in entry.media_choices["manual"] if c.get("path")]
+        rtfm_str = ", ".join(self._rtfm_paths)
         self._detail_rtfm.setText(rtfm_str or "(none)")
 
         # Provenance
@@ -1749,6 +1843,10 @@ class PreviewWidget(QWidget):
         """
         # Try front artwork first (active screenshot), then others
         artwork_path = entry.artwork_front or (entry.artwork_other[0] if entry.artwork_other else None)
+        if any(k != "manual" for k in entry.media_choices):
+            from ..media_review import selected_image
+            chosen = selected_image(entry.media_choices)
+            artwork_path = chosen.get("path") if chosen else None
 
         if artwork_path and Path(artwork_path).exists():
             pixmap = QPixmap(artwork_path)
@@ -2091,7 +2189,11 @@ class PreviewWidget(QWidget):
             if action.payload:
                 try:
                     payload = json.loads(action.payload)
-                    if payload.get("kind") == "field_edit":
+                    if payload.get("kind") == "media_choices":
+                        entry.media_choices = payload.get("pre", {})
+                        if self._state.state_manager:
+                            self._state.state_manager.save(self._state.current_library)
+                    elif payload.get("kind") == "field_edit":
                         field = payload.get("field")
                         if field in ("edition", "group"):
                             setattr(entry, field, (payload.get("pre") or {}).get(field))
@@ -2228,7 +2330,11 @@ class PreviewWidget(QWidget):
             if action.payload:
                 try:
                     payload = json.loads(action.payload)
-                    if payload.get("kind") == "field_edit":
+                    if payload.get("kind") == "media_choices":
+                        entry.media_choices = payload.get("post", {})
+                        if self._state.state_manager:
+                            self._state.state_manager.save(self._state.current_library)
+                    elif payload.get("kind") == "field_edit":
                         field = payload.get("field")
                         if field in ("edition", "group"):
                             setattr(entry, field, (payload.get("post") or {}).get(field))
@@ -2798,57 +2904,22 @@ class PreviewWidget(QWidget):
         self._show_detail(entry)
 
     def _on_select_artwork(self) -> None:
-        """Select artwork for the selected release."""
+        """Review matching images or browse for an explicit saved choice."""
         if self._state.current_library is None or not self._state.selected_release_key:
             return
-
         entry = self._state.current_library.releases.get(self._state.selected_release_key)
-        if not entry:
-            return
-
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select Artwork",
-            "",
-            "Images (*.png *.jpg *.jpeg *.bmp *.gif);;All files (*.*)"
-        )
-        if file_path:
-            entry.artwork_front = file_path
-            action = StagedChange(
-                action=CurationAction.ARTWORK_SELECTED,
-                timestamp=__import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
-                details=f"Selected front artwork: {file_path}",
-            )
-            entry.actions.append(action)
-            self._record_action_for_undo(self._state.selected_release_key, action)
-            self._show_detail(entry)
+        if entry is not None:
+            purpose = next((c.get("purpose") for c in entry.media_candidates
+                            if c.get("purpose") != "manual"), "Box - Front")
+            self._review_media_entry(entry, purpose=purpose)
 
     def _on_select_manual(self) -> None:
-        """Select RTFM/manual for the selected release."""
+        """Review the primary manual and optional extra documents."""
         if self._state.current_library is None or not self._state.selected_release_key:
             return
-
         entry = self._state.current_library.releases.get(self._state.selected_release_key)
-        if not entry:
-            return
-
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select RTFM/Manual",
-            "",
-            "Documents (*.pdf *.txt *.rtf *.html);;All files (*.*)"
-        )
-        if file_path:
-            entry.rtfm_files = entry.rtfm_files or []
-            entry.rtfm_files.append(file_path)
-            action = StagedChange(
-                action=CurationAction.MANUAL_SELECTED,
-                timestamp=__import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
-                details=f"Selected RTFM/manual: {file_path}",
-            )
-            entry.actions.append(action)
-            self._record_action_for_undo(self._state.selected_release_key, action)
-            self._show_detail(entry)
+        if entry is not None:
+            self._review_media_entry(entry, purpose="manual")
 
     def _on_show_source(self) -> None:
         """Show the source ADF file location."""

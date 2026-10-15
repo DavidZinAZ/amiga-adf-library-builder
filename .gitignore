@@ -54,6 +54,8 @@ Thumbs.db
 
 # Local scratch
 .task/
+.review-fixtures/
+amiga-adf-gui-data/
 
 # Kanban worker worktrees (never commit)
 .worktrees/

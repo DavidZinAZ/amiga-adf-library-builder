@@ -1075,6 +1075,10 @@ class LocalMediaProvider:
         # Flat candidate index, populated by discover().
         self._index: list[LocalMediaCandidate] = []
         self._discovered = False
+        self._review_candidates_cache = {}
+        self._candidate_identity_cache = {}
+        self._score_cache_key = None
+        self._score_cache = {}
         # GH-23 "first entry wins": the precedence order of configured roots.
         # Built in discover() from the config's scan order (legacy ``roots``
         # first, then typed ``media_roots`` in list order). Within-category
@@ -1294,6 +1298,10 @@ class LocalMediaProvider:
         by :func:`scan_launchbox_roots`, never deleted).
         """
         self._index = []
+        self._review_candidates_cache = {}
+        self._candidate_identity_cache = {}
+        self._score_cache_key = None
+        self._score_cache = {}
         self._root_order = {}
         # GH-164 RC6: dict indexes for O(1) candidate lookup
         self._norm_stem_index: dict[str, list] = {}
@@ -1357,6 +1365,28 @@ class LocalMediaProvider:
 
     # -- resolution ----------------------------------------------------------
 
+    def candidates_for_review(self, group) -> list[dict]:
+        """All plausible assets, grouped by purpose and deduplicated by bytes."""
+        from .media_review import deduplicate_candidates
+        if not self._discovered:
+            self.discover()
+        identities = self._group_identities(group)
+        cache_key = (identities["title"], tuple(identities["disk_stems"]))
+        if cache_key in self._review_candidates_cache:
+            return self._review_candidates_cache[cache_key]
+        items = []
+        for candidate in self._index:
+            method, score = self._score(candidate, identities)
+            if method == MatchMethod.NONE or score < self.config.review_threshold:
+                continue
+            items.append({"path": str(candidate.path), "root": str(candidate.root),
+                          "stem": candidate.path.stem, "category": candidate.category,
+                          "purpose": "manual" if candidate.category == "Manual" else candidate.category,
+                          "score": score, "method": method.value, "provider": "local_media"})
+        result = deduplicate_candidates(items)
+        self._review_candidates_cache[cache_key] = result
+        return result
+
     def resolve(self, group) -> LocalMediaResult:
         """Find the best artwork for ``group`` and copy it into the cache.
 
@@ -1396,6 +1426,14 @@ class LocalMediaProvider:
             return result
 
         best = self._select(group)
+        alternatives = self.candidates_for_review(group)
+        if best.candidate is not None:
+            purpose = "manual" if best.candidate.category == "Manual" else best.candidate.category
+            rivals = [c for c in alternatives if c["purpose"] == purpose]
+            if len(rivals) > 1:
+                best.outcome = "needs_review"
+                best.reason = "Multiple different assets found for this purpose; choose in Review media choices."
+                best.top_candidates = rivals
         result.candidates_evaluated = best.evaluated
         result.top_candidates = best.top_candidates
         result.outcome = best.outcome
@@ -1765,6 +1803,9 @@ class LocalMediaProvider:
 
     def _cand_identities(self, cand: LocalMediaCandidate) -> dict:
         """Folder + file identities a candidate may match against."""
+        key = (cand.path, cand.root, cand.category, cand.game_folder)
+        if key in self._candidate_identity_cache:
+            return self._candidate_identity_cache[key]
         # All ancestor folder names (any depth) may carry the game title.
         folder_chain = cand.folder_chain_norm
         # Same chain with only trailing LaunchBox ordinals stripped from each
@@ -1772,7 +1813,7 @@ class LocalMediaProvider:
         ordinal_chain = [
             _norm_text(_strip_launchbox_ordinal(n)) for n in folder_chain
         ]
-        return {
+        result = {
             "raw_stem": cand.path.stem,
             "raw_folder": cand.folder_name,
             "norm_stem": cand.norm_stem,
@@ -1787,8 +1828,21 @@ class LocalMediaProvider:
             "ordinal_chain": ordinal_chain,
             "norm_base_chain": [_canonical_norm(n) for n in folder_chain],
         }
+        self._candidate_identity_cache[key] = result
+        return result
 
     def _score(self, cand: LocalMediaCandidate, identities: dict):
+        # One release is scored repeatedly by discovery, selection and review.
+        # Keep only the current release's scores so memory stays bounded.
+        key = (identities["title"], tuple(sorted(identities["norm_disk_stems"])))
+        if key != self._score_cache_key:
+            self._score_cache_key, self._score_cache = key, {}
+        candidate_key = (cand.path, cand.root, cand.category, cand.game_folder)
+        if candidate_key not in self._score_cache:
+            self._score_cache[candidate_key] = self._score_uncached(cand, identities)
+        return self._score_cache[candidate_key]
+
+    def _score_uncached(self, cand: LocalMediaCandidate, identities: dict):
         """Score ``cand`` against a group's identities.
 
         Returns ``(method, score)``. ``method == NONE`` means no match.
@@ -1868,6 +1922,13 @@ class LocalMediaProvider:
             rkey = _manual_identity_key(title)
             if mkey and rkey and mkey == rkey:
                 return MatchMethod.NORMALIZED_TITLE, 0.99
+        # Generic game artwork can serve a versioned release. Keep an
+        # explicitly versioned rival distinct; only reuse versionless art.
+        if cand.category != "Manual" and _RELEASE_VERSION_RE.search(title):
+            game_key = _manual_identity_key(title)
+            for raw in (ci["raw_ordinal_stem"], ci["raw_ordinal_folder"]):
+                if raw and not _RELEASE_VERSION_RE.search(raw) and _manual_identity_key(raw) == game_key:
+                    return MatchMethod.CANONICAL_REUSE, 0.97
         # 5) carefully scored fuzzy match (guarded against false merges).
         if identities["norm_title"]:
             score = self._fuzzy_score(cand, identities)

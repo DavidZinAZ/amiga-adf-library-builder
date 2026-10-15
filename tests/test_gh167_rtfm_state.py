@@ -107,7 +107,7 @@ class TestPipelineRtfmState:
 
         assert len(per_group[0]["rtfm_results"]) == 1
         assert per_group[0]["rtfm_results"][0].written is True
-        assert str(per_group[0]["rtfm_results"][0].rtfm_path) == "/tmp/test.rtfm"
+        assert per_group[0]["rtfm_results"][0].rtfm_path == Path("/tmp/test.rtfm")
 
     def test_rtfm_results_empty_when_no_config(self):
         """When no [rtfm] config is present, rtfm_results is empty."""

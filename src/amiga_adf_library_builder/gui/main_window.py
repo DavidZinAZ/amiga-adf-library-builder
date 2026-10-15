@@ -2675,6 +2675,7 @@ class MainWindow(QMainWindow):
         try:
             if state_path and Path(state_path).exists():
                 self._preview_widget.load_state_file(state_path)
+                QTimer.singleShot(0, self._preview_widget.notify_media_review)
                 self._append_diag(f"Loaded curation state: {Path(state_path).name}")
                 # (GH-107 Slice 4) The run may have created/updated the
                 # canonical DB -- reload the Manual Lookup panel.
