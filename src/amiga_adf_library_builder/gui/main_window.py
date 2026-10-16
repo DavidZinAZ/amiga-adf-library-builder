@@ -555,7 +555,7 @@ class MainWindow(QMainWindow):
             "Useful to verify your library and settings before a real export."
         )
         self._cb_gate.hide()
-        gate_row.addWidget(self._cb_verify)
+        self._cb_verify.hide()
         gate_row.addStretch(1)
         run_layout.addLayout(gate_row)
 
@@ -632,7 +632,7 @@ class MainWindow(QMainWindow):
         self._review_button.clicked.connect(self._open_match_review)
         btn_row.addWidget(self._run_button)
         self._export_button = QPushButton("Export library")
-        self._export_button.setToolTip("Write the prepared library to the export folder. Check only verifies without writing.")
+        self._export_button.setToolTip("Write the prepared library to the export folder.")
         self._export_button.clicked.connect(self._on_export_clicked)
         btn_row.addWidget(self._export_button)
         btn_row.addWidget(self._cancel_button)
@@ -640,7 +640,7 @@ class MainWindow(QMainWindow):
         btn_row.addWidget(self._review_button)
         btn_row.addStretch(1)
         run_layout.addLayout(btn_row)
-        root.addWidget(run_box)
+        tabs.insertTab(1, run_box, "Build & Export")
 
         # Connect mode checkboxes to update export state display
         self._mode_build.stateChanged.connect(self._sync_export_controls)
@@ -1851,7 +1851,7 @@ class MainWindow(QMainWindow):
             online=self._cb_online.isChecked(),
             refresh_metadata=self._cb_refresh.isChecked(),
             require_artwork=self._cb_artwork.isChecked(),
-            verify_only=self._cb_verify.isChecked(),
+            verify_only=False,
             export_gate_acknowledged=self._mode_export.isChecked(),
             # (GH-24) independent metadata selection.
             include_artwork=self._cb_include_artwork.isChecked(),
@@ -1917,7 +1917,7 @@ class MainWindow(QMainWindow):
         self._cb_online.setChecked(s.online)
         self._cb_refresh.setChecked(s.refresh_metadata)
         self._cb_artwork.setChecked(s.require_artwork)
-        self._cb_verify.setChecked(s.verify_only)
+        self._cb_verify.setChecked(False)
         # (GH-43) The acknowledgement only applies while export mode is
         # selected; enforce the enabled state from the current mode.
         self._cb_gate.setChecked(s.export_gate_acknowledged and self._mode_export.isChecked())

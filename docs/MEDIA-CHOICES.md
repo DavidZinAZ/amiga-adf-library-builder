@@ -52,3 +52,15 @@ Manual matching preserves numbered part identities. A high-scoring manual
 does not cause weaker rival documents to be included in its output. Generic,
 versionless artwork can be reviewed for versioned releases; artwork explicitly
 marked for another version stays distinct.
+
+
+Review includes **Move disks to another release…** (select disks and destination,
+preview, then combine) and **Assign media to another release…**. These change
+curation associations, preserve original files, and support undo/redo.
+
+Use **Same media for the whole release** for shared artwork or RTFM. Select
+**Different media per disk** to choose a disk and save an override. Disks with no
+custom choice inherit the shared choice; Next/Previous step between disks.
+Disk-specific artwork and RTFM choices persist across builds and move with their
+disks. Returning to shared mode retains the saved overrides for later reuse but
+exports only the shared companions.

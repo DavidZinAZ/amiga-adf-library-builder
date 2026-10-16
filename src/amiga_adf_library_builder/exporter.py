@@ -201,6 +201,7 @@ def export_release(
     conflicts but performs no writes.
     """
     ext = (group.ext or "adf").lower()
+    release_key = release_key or group.release_key
     root = staging_root / ("ADF" if ext == "adf" else "DSK")
     if basename is not None:
         try:
@@ -406,6 +407,55 @@ def export_release(
             status = _copy_if_changed(artwork_data, art_dest)
             (written if status == "written" else unchanged).append(str(art_dest))
 
+    # Remove obsolete managed shared companions on a rerun, including media
+    # reassigned to another release. Never touch the original source files.
+    for suffix, data in ((".jpg", artwork_data), (".rtfm", rtfm_bytes)):
+        dest = folder / (basename + suffix)
+        if data is None and dest.is_file():
+            if verify_only:
+                conflicts.append(f"Obsolete release companion: {dest}")
+            else:
+                dest.unlink()
+
+    # Disk-specific companions use the exact exported disk stem; shared
+    # release companions remain the firmware's fallback.
+    if _media_entry is not None:
+        from .media_review import selected_image, render_manual_choices
+        for idx, rec in enumerate(ordered, start=1):
+            choices = _media_entry.disk_media_choices.get(rec.source_filename, {})
+            stem = Path(_disk_filename(basename, idx, ext, len(ordered))).stem
+            for kind, suffix in (("artwork", ".jpg"), ("manual", ".rtfm")):
+                dest = folder / (stem + suffix)
+                enabled = _media_entry.media_scopes.get(kind) == "per_disk"
+                if not enabled and len(ordered) == 1:
+                    continue  # The single-disk stem IS the shared companion.
+                try:
+                    data = None
+                    if enabled and kind == "artwork":
+                        image = selected_image(choices)
+                        if image:
+                            data = artwork_mod.process_artwork_bytes(Path(image["path"]), progressive=False)
+                    elif enabled and choices.get("manual"):
+                        data = render_manual_choices(group, choices["manual"],
+                            Path(rtfm_dir) if rtfm_dir else folder.parent / "manual-previews")
+                    if data is None:
+                        # Remove a previous managed override so shared fallback
+                        # works after a scope/selection change on a rerun.
+                        if len(ordered) > 1 and dest.is_file():
+                            if verify_only:
+                                conflicts.append(f"Obsolete disk companion: {dest}")
+                            else:
+                                dest.unlink()
+                        continue
+                    if verify_only:
+                        if dest.exists() and dest.read_bytes() != data:
+                            conflicts.append(str(dest))
+                    else:
+                        status = _copy_if_changed(data, dest)
+                        (written if status == "written" else unchanged).append(str(dest))
+                except (RuntimeError, OSError, ValueError) as exc:
+                    conflicts.append(f"Disk media failed: {rec.source_filename}: {exc}")
+
     return written, unchanged, conflicts
 
 
@@ -539,7 +589,22 @@ def export_all(
                 continue
             basename, _prov = _get_canonical_basename(group, staging_root, library_root=library_root)
             processed = Path(artwork_processed_dir) / f"{basename}.jpg" if artwork_processed_dir is not None else None
-            if processed is None or not processed.is_file():
+            entry = staged_library.releases.get(group.release_key) if staged_library else None
+            from .media_review import selected_image, pending_purposes
+            selected = selected_image(entry.media_choices) if entry else None
+            has_choice = bool(entry and any(k != "manual" for k in entry.media_choices))
+            pending = pending_purposes(entry) - {"manual"} if entry else set()
+            shared_ok = (bool(selected and Path(selected.get("path", "")).is_file()) if has_choice else
+                         bool(not pending and ((processed is not None and processed.is_file()) or
+                              (entry and entry.artwork_front and Path(entry.artwork_front).is_file()))))
+            if entry and entry.media_scopes.get("artwork") == "per_disk" and entry.adf_files:
+                valid = True
+                for disk in entry.adf_files:
+                    image = selected_image(entry.disk_media_choices.get(disk, {}))
+                    valid = valid and (bool(Path(image.get("path", "")).is_file()) if image else shared_ok)
+            else:
+                valid = shared_ok
+            if not valid:
                 missing.append(basename)
         if missing:
             result.errors.append("required artwork missing for: " + "; ".join(sorted(missing)))

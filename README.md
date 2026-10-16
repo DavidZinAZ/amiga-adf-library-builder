@@ -20,6 +20,7 @@ Download them from the project's **latest GitHub release**. Each release identif
 The current GUI includes these primary workspaces:
 
 - **Library** — choose the library/source and working locations.
+- **Build & Export** — start a build or export and check the destination, requirements, and progress.
 - **Options** — control online lookup, metadata refresh, artwork/manual behavior, matching thresholds, and related run options.
 - **Providers** — configure optional provider integrations.
 - **Local Media** — configure local artwork/manual folders.
@@ -28,7 +29,7 @@ The current GUI includes these primary workspaces:
 - **Metadata Sources** — review metadata-source configuration/state.
 - **Manual Lookup** — explicitly search/browse sources and persist a selected result into the normal Preview → Export lifecycle.
 
-Use **Build library** to prepare and review, then **Export library** to write to the displayed destination. **Check only** verifies without writing; no second acknowledgement checkbox is required. Online providers start unchecked. Local Media detects artwork category folders automatically.
+Use **Build library** to prepare and review, then **Export library** to write to the displayed destination. The GUI has no Check only or second acknowledgement checkbox. Online providers start unchecked. Local Media detects artwork category folders automatically.
 
 ## Core capabilities
 

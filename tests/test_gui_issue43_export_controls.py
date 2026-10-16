@@ -57,14 +57,14 @@ def test_export_and_build_buttons_choose_run_mode(qt_offscreen, monkeypatch):
     mw.close()
 
 
-def test_check_only_survives_export_action(qt_offscreen, monkeypatch):
+def test_check_only_removed_from_export_action(qt_offscreen, monkeypatch):
     mw = _make_window(qt_offscreen)
     calls = []
     monkeypatch.setattr(mw, "_on_run", lambda: calls.append(mw._state_from_widgets()))
     mw._cb_verify.setChecked(True)
     mw._export_button.click()
-    assert calls[-1].verify_only
-    assert "Check-only" in _state_text(mw)
+    assert not calls[-1].verify_only
+    assert mw._cb_verify.isHidden()
     mw.close()
 
 
@@ -72,4 +72,16 @@ def test_no_provider_enabled_on_fresh_install(qt_offscreen):
     mw = _make_window(qt_offscreen)
     assert all(not provider.enabled() for provider in mw._registry.all())
     assert mw._lb_media_table.isColumnHidden(1)
+    mw.close()
+
+
+def test_build_export_controls_live_in_tab(qt_offscreen):
+    from PySide6.QtWidgets import QTabWidget
+    mw = _make_window(qt_offscreen)
+    tabs = mw.findChild(QTabWidget)
+    index = next(i for i in range(tabs.count()) if tabs.tabText(i) == "Build & Export")
+    panel = tabs.widget(index)
+    assert panel.isAncestorOf(mw._export_button)
+    assert panel.isAncestorOf(mw._run_button)
+    assert mw._cb_verify.isHidden()
     mw.close()

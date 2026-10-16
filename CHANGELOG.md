@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.13 — 2026-10-16
+
+- Move run/export settings into the Build & Export tab and remove Check only from the GUI.
+- Add disk moves and media reassignment directly to candidate review, preserving source files and undo/redo.
+- Add shared release media and optional per-disk artwork/RTFM overrides with disk previews and Next/Previous navigation.
+- Persist disk choices across builds and carry custom media when disks move or releases merge.
+- Export exact disk-stem companions with shared fallback, and remove obsolete managed companions on repeat exports.
+- Recognise operator-selected artwork in the export requirement check.
+
 ## 0.3.12 — 2026-10-16
 
 - Simplify export to a single Export library action, with destination and Check only retained.

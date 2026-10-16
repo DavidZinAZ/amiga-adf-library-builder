@@ -289,6 +289,8 @@ class StagedReleaseEntry:
     media_candidates: list[dict] = field(default_factory=list)
     # Missing key means automatic; [] is an explicit "None of these".
     media_choices: dict[str, list[dict]] = field(default_factory=dict)
+    disk_media_choices: dict[str, dict[str, list[dict]]] = field(default_factory=dict)
+    media_scopes: dict[str, str] = field(default_factory=dict)
 
     # Metadata provenance
     metadata_source: Optional[str] = None
@@ -329,6 +331,8 @@ class StagedReleaseEntry:
             "rtfm_files": self.rtfm_files,
             "media_candidates": self.media_candidates,
             "media_choices": self.media_choices,
+            "disk_media_choices": self.disk_media_choices,
+            "media_scopes": self.media_scopes,
             "metadata_source": self.metadata_source,
             "match_confidence": self.match_confidence,
             "locked_fields": self.locked_fields,
@@ -360,6 +364,8 @@ class StagedReleaseEntry:
             rtfm_files=d.get("rtfm_files", []),
             media_candidates=d.get("media_candidates", []),
             media_choices=d.get("media_choices", {}),
+            disk_media_choices=d.get("disk_media_choices", {}),
+            media_scopes=d.get("media_scopes", {}),
             metadata_source=d.get("metadata_source"),
             match_confidence=d.get("match_confidence"),
             locked_fields=d.get("locked_fields", []),
@@ -436,6 +442,9 @@ class StagedLibrary:
                 raise ValueError(f"ADF file already exists in destination: {fname}")
 
         # Store source state for undo
+        from copy import deepcopy
+        media_before = {e.release_key: {"disk_media_choices": deepcopy(e.disk_media_choices),
+                                       "media_scopes": dict(e.media_scopes)} for e in (src_entry, dst_entry)}
         src_files_before = list(src_entry.adf_files)
         dst_files_before = list(dst_entry.adf_files)
         src_state_before = src_entry.curation_state
@@ -460,7 +469,20 @@ class StagedLibrary:
         from datetime import datetime, timezone
         timestamp = datetime.now(timezone.utc).isoformat()
 
+        for filename in src_files_before:
+            if filename in dst_entry.adf_files and filename not in src_entry.adf_files:
+                overrides = src_entry.disk_media_choices.pop(filename, None)
+                if overrides is not None:
+                    dst_entry.disk_media_choices[filename] = overrides
+                    for purpose in overrides:
+                        kind = "manual" if purpose == "manual" else "artwork"
+                        if src_entry.media_scopes.get(kind) == "per_disk":
+                            dst_entry.media_scopes[kind] = "per_disk"
+        media_after = {e.release_key: {"disk_media_choices": deepcopy(e.disk_media_choices),
+                                      "media_scopes": dict(e.media_scopes)} for e in (src_entry, dst_entry)}
         payload = json.dumps({
+            "media_before": media_before,
+            "media_after": media_after,
             "src_key": src_key,
             "dst_key": dst_key,
             "moved_files": list(filenames),
@@ -535,6 +557,9 @@ class StagedLibrary:
                 raise ValueError(f"ADF file already exists in destination: {fname}")
 
         # Store pre-merge state for undo
+        from copy import deepcopy
+        media_before = {e.release_key: {"disk_media_choices": deepcopy(e.disk_media_choices),
+                                       "media_scopes": dict(e.media_scopes)} for e in (src_entry, dst_entry)}
         src_files_before = list(src_entry.adf_files)
         dst_files_before = list(dst_entry.adf_files)
         src_state_before = src_entry.curation_state
@@ -578,7 +603,20 @@ class StagedLibrary:
         from datetime import datetime, timezone
         timestamp = datetime.now(timezone.utc).isoformat()
 
+        for filename in src_files_before:
+            if filename in dst_entry.adf_files and filename not in src_entry.adf_files:
+                overrides = src_entry.disk_media_choices.pop(filename, None)
+                if overrides is not None:
+                    dst_entry.disk_media_choices[filename] = overrides
+                    for purpose in overrides:
+                        kind = "manual" if purpose == "manual" else "artwork"
+                        if src_entry.media_scopes.get(kind) == "per_disk":
+                            dst_entry.media_scopes[kind] = "per_disk"
+        media_after = {e.release_key: {"disk_media_choices": deepcopy(e.disk_media_choices),
+                                      "media_scopes": dict(e.media_scopes)} for e in (src_entry, dst_entry)}
         payload = json.dumps({
+            "media_before": media_before,
+            "media_after": media_after,
             "src_key": src_key,
             "dst_key": dst_key,
             "src_files_before": src_files_before,
@@ -687,6 +725,9 @@ class StagedLibrary:
             entry.artwork_other = list(prev.artwork_other)
             entry.rtfm_files = list(prev.rtfm_files)
             entry.media_choices = {k: list(v) for k, v in prev.media_choices.items()}
+            from copy import deepcopy
+            entry.disk_media_choices = deepcopy(prev.disk_media_choices)
+            entry.media_scopes = dict(prev.media_scopes)
             entry.metadata_source = prev.metadata_source
             # (GH-99, defect 2) Confidence is canonical *metadata* from the
             # current run's match, not an operator curation decision. A fresh

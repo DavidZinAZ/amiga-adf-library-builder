@@ -98,7 +98,10 @@ def pending_purposes(entry) -> set[str]:
         purpose = candidate.get("purpose", "manual")
         counts[purpose] = counts.get(purpose, 0) + 1
     return {purpose for purpose, count in counts.items()
-            if count > 1 and purpose not in entry.media_choices}
+            if count > 1 and purpose not in entry.media_choices
+            and not (entry.media_scopes.get("manual" if purpose == "manual" else "artwork") == "per_disk"
+                     and entry.adf_files and all(purpose in entry.disk_media_choices.get(disk, {})
+                                                 for disk in entry.adf_files))}
 
 
 def selected_image(choices: dict) -> dict | None:

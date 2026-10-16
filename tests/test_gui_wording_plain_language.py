@@ -44,7 +44,6 @@ EXPECTED_LABELS = (
     "Use online metadata sources",
     "Refresh metadata even if cached",
     "Require artwork before export",
-    "Check only — don't change files",
     # (GH-43) the ambiguous 'Allow export' gate label was replaced by an
     # unmistakable safety acknowledgement (see test_gui_issue43_export_controls).
     "Build library",

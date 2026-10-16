@@ -19,6 +19,10 @@ def _pdf_backend():
 
 class MediaChoiceDialog(QDialog):
     choices_saved = Signal(dict)
+    disk_choices_saved = Signal(str, dict)
+    media_scope_changed = Signal(str, str)
+    move_disks_requested = Signal()
+    assign_media_requested = Signal(dict)
     def __init__(self, entry, preview_dir: Path, parent=None, initial_purpose=None):
         super().__init__(parent)
         self.entry = entry
@@ -27,7 +31,8 @@ class MediaChoiceDialog(QDialog):
         self.next_requested = False
         self.previous_requested = False
         self.candidates = [dict(c) for c in entry.media_candidates]
-        for items in entry.media_choices.values():
+        choice_sets = list(entry.media_choices.values()) + [items for choices in entry.disk_media_choices.values() for items in choices.values()]
+        for items in choice_sets:
             for candidate in items:
                 if not any(c.get("path") == candidate.get("path") and c.get("content") == candidate.get("content") for c in self.candidates):
                     self.candidates.append(dict(candidate))
@@ -49,6 +54,26 @@ class MediaChoiceDialog(QDialog):
             self.purpose.setCurrentIndex(self.purpose.findData(initial_purpose))
         self.purpose.setAccessibleName("Media purpose")
         layout.addWidget(self.purpose)
+        self.scope = QComboBox()
+        self.scope.addItem("Same media for the whole release", "shared")
+        self.scope.addItem("Different media per disk", "per_disk")
+        self.scope.setAccessibleName("Shared or disk-specific media")
+        layout.addWidget(self.scope)
+        self.disk = QComboBox()
+        self.disk.setAccessibleName("Disk receiving this media")
+        self.disk.addItems(entry.adf_files)
+        layout.addWidget(self.disk)
+        self.scope_note = QLabel("Disks without a custom choice inherit the shared release choice.")
+        self.scope_note.setWordWrap(True)
+        layout.addWidget(self.scope_note)
+        move_row = QHBoxLayout()
+        move_disks = QPushButton("Move disks to another release…")
+        move_disks.clicked.connect(lambda: self.move_disks_requested.emit())
+        move_row.addWidget(move_disks)
+        assign_media = QPushButton("Assign media to another release…")
+        assign_media.clicked.connect(self._assign_media)
+        move_row.addWidget(assign_media)
+        layout.addLayout(move_row)
         self.list = QListWidget()
         self.list.setAccessibleName("Matching candidates; check optional extra documents")
         self.list.setMinimumWidth(300)
@@ -110,14 +135,20 @@ class MediaChoiceDialog(QDialog):
         next_button.clicked.connect(self._next)
         buttons.addWidget(next_button)
         layout.addLayout(buttons)
-        self.purpose.currentTextChanged.connect(self._populate)
+        self.purpose.currentTextChanged.connect(self._sync_scope)
+        self.scope.currentIndexChanged.connect(self._scope_changed)
+        self.disk.currentIndexChanged.connect(self._populate)
         self.list.currentRowChanged.connect(self._selected)
-        self._populate()
+        self._sync_scope()
 
     def _populate(self, *_):
         self.list.clear()
         purpose = self.purpose.currentData()
-        choice = self.decisions.get(purpose, self.entry.media_choices.get(purpose))
+        choices = (self.entry.disk_media_choices.get(self.disk.currentText(), {})
+                   if self.scope.currentData() == "per_disk" else self.entry.media_choices)
+        choice = choices.get(purpose, self.entry.media_choices.get(purpose))
+        if self.scope.currentData() != "per_disk":
+            choice = self.decisions.get(purpose, choice)
         primary_row = 0
         for candidate in self.candidates:
             if candidate.get("purpose", "manual") != purpose:
@@ -139,7 +170,11 @@ class MediaChoiceDialog(QDialog):
             self.list.addItem(item)
             if choice and candidate == choice[0]:
                 primary_row = self.list.count() - 1
-        self.current.setPlainText("Saved / staged choices:\n" + (
+        inherited = self.scope.currentData() == "per_disk" and purpose not in choices
+        label = (f"{self.disk.currentText()}: inherited shared choice" if inherited else
+                 f"{self.disk.currentText()}: custom choice" if self.scope.currentData() == "per_disk" else
+                 "Shared release choice")
+        self.current.setPlainText(label + "\n" + (
             "Automatic matching" if choice is None else "None" if not choice else
             "\n".join(c.get("path") or c.get("stem", "Document") for c in choice)))
         if self.list.count():
@@ -231,7 +266,8 @@ class MediaChoiceDialog(QDialog):
     def _compare_saved(self):
         candidate = self._candidate()
         purpose = self.purpose.currentData()
-        saved = self.entry.media_choices.get(purpose)
+        saved = (self.entry.disk_media_choices.get(self.disk.currentText(), {}).get(purpose, self.entry.media_choices.get(purpose))
+                 if self.scope.currentData() == "per_disk" else self.entry.media_choices.get(purpose))
         if saved:
             current = saved[0]
         elif purpose in self.entry.media_choices:
@@ -300,8 +336,45 @@ class MediaChoiceDialog(QDialog):
 
     def _use(self):
         if self._candidate():
-            self.decisions[self.purpose.currentData()] = self._selection()
+            self._store_selection(self._selection())
+            self._populate()
+
+    def _sync_scope(self, *_):
+        key = "manual" if self.purpose.currentData() == "manual" else "artwork"
+        self.scope.blockSignals(True)
+        self.scope.setCurrentIndex(1 if self.entry.media_scopes.get(key) == "per_disk" else 0)
+        self.scope.blockSignals(False)
+        self.disk.setVisible(self.scope.currentData() == "per_disk")
+        self._populate()
+
+    def _scope_changed(self, *_):
+        key = "manual" if self.purpose.currentData() == "manual" else "artwork"
+        self.media_scope_changed.emit(key, self.scope.currentData())
+        self.disk.setVisible(self.scope.currentData() == "per_disk")
+        self._populate()
+
+    def _store_selection(self, selection):
+        purpose = self.purpose.currentData()
+        if self.scope.currentData() == "per_disk":
+            if not self.disk.currentText():
+                QMessageBox.information(self, "Choose a disk", "This release has no disks to receive a custom choice.")
+                return
+            self.disk_choices_saved.emit(self.disk.currentText(), {purpose: selection or None})
+        else:
+            self.decisions[purpose] = selection
             self._save_now()
+
+    def _assign_media(self):
+        candidate = self._candidate()
+        if candidate:
+            self.assign_media_requested.emit(dict(candidate))
+            self.decisions.pop(candidate.get("purpose", "manual"), None)
+            self.candidates = [dict(c) for c in self.entry.media_candidates]
+            saved = list(self.entry.media_choices.values()) + [items for choices in self.entry.disk_media_choices.values() for items in choices.values()]
+            for items in saved:
+                for item in items:
+                    if item not in self.candidates:
+                        self.candidates.append(dict(item))
             self._populate()
 
     def _save_now(self):
@@ -309,6 +382,9 @@ class MediaChoiceDialog(QDialog):
 
 
     def _previous(self):
+        if self.scope.currentData() == "per_disk" and self.disk.currentIndex() > 0:
+            self.disk.setCurrentIndex(self.disk.currentIndex() - 1)
+            return
         if self.purpose.currentIndex() > 0:
             self.purpose.setCurrentIndex(self.purpose.currentIndex() - 1)
         else:
@@ -316,6 +392,9 @@ class MediaChoiceDialog(QDialog):
             self.accept()
 
     def _next(self):
+        if self.scope.currentData() == "per_disk" and self.disk.currentIndex() + 1 < self.disk.count():
+            self.disk.setCurrentIndex(self.disk.currentIndex() + 1)
+            return
         index = self.purpose.currentIndex()
         for next_index in range(index + 1, self.purpose.count()):
             purpose = self.purpose.itemData(next_index)
@@ -326,13 +405,11 @@ class MediaChoiceDialog(QDialog):
         self.accept()
 
     def _none(self):
-        self.decisions[self.purpose.currentData()] = []
-        self._save_now()
+        self._store_selection([])
         self._populate()
 
     def _automatic(self):
-        self.decisions[self.purpose.currentData()] = None
-        self._save_now()
+        self._store_selection(None)
         self._populate()
 
     def _browse(self):

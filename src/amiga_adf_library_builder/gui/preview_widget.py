@@ -1215,7 +1215,8 @@ class PreviewWidget(QWidget):
             for candidate in entry.media_candidates:
                 purpose = candidate.get("purpose", "manual")
                 counts[purpose] = counts.get(purpose, 0) + 1
-            if any(count > 1 and purpose not in entry.media_choices for purpose, count in counts.items()):
+            from ..media_review import pending_purposes
+            if pending_purposes(entry):
                 pending.append(entry)
         return pending
 
@@ -1231,6 +1232,20 @@ class PreviewWidget(QWidget):
         box.exec()
         if box.clickedButton() == review:
             self._on_review_media_queue()
+
+    @staticmethod
+    def _media_choice_summary(entry):
+        labels = []
+        for kind, label in (("artwork", "Artwork"), ("manual", "RTFM")):
+            if entry.media_scopes.get(kind) == "per_disk":
+                count = sum(bool(choices.get("manual")) if kind == "manual" else
+                            any(items for purpose, items in choices.items() if purpose != "manual")
+                            for disk, choices in entry.disk_media_choices.items() if disk in entry.adf_files)
+                labels.append(f"{label}: {count} custom disk choice(s), others shared")
+            elif any(purpose == "manual" if kind == "manual" else purpose != "manual"
+                     for purpose in entry.media_choices):
+                labels.append(f"{label}: shared")
+        return "; ".join(labels) or "Awaiting review"
 
     def _on_review_media_queue(self) -> None:
         library = self._state.current_library
@@ -1250,7 +1265,7 @@ class PreviewWidget(QWidget):
         entries.sort(key=lambda e: (e.release_key not in pending_keys, (e.title or "").lower()))
         for row, entry in enumerate(entries):
             table.insertRow(row)
-            for col, value in enumerate([entry.title or entry.release_key, str(len(entry.media_candidates)), ", ".join("RTFM" if p == "manual" else "Artwork" if p == "Box - Front" else f"Artwork ({p})" for p in entry.media_choices) or "Awaiting review"]):
+            for col, value in enumerate([entry.title or entry.release_key, str(len(entry.media_candidates)), self._media_choice_summary(entry)]):
                 table.setItem(row, col, QTableWidgetItem(value))
         table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         layout.addWidget(table)
@@ -1259,7 +1274,7 @@ class PreviewWidget(QWidget):
             row = table.currentRow()
             if 0 <= row < len(entries):
                 self._review_media_entry(entries[row])
-                table.item(row, 2).setText(", ".join("RTFM" if p == "manual" else "Artwork" if p == "Box - Front" else f"Artwork ({p})" for p in entries[row].media_choices) or "Awaiting review")
+                table.item(row, 2).setText(self._media_choice_summary(entries[row]))
         review.clicked.connect(open_selected)
         table.cellDoubleClicked.connect(open_selected)
         layout.addWidget(review)
@@ -1281,6 +1296,10 @@ class PreviewWidget(QWidget):
             dialog = MediaChoiceDialog(current, preview_dir, self, initial_purpose=purpose if index == 0 else None)
             dialog.setWindowTitle(f"Review {index + 1} of {len(queue)} — {current.title}")
             dialog.choices_saved.connect(lambda choices, current=current: self._save_media_choices(current, choices))
+            dialog.disk_choices_saved.connect(lambda disk, choices, current=current: self._save_media_choices(current, choices, disk=disk))
+            dialog.media_scope_changed.connect(lambda key, scope, current=current: self._save_media_choices(current, {}, scope=(key, scope)))
+            dialog.move_disks_requested.connect(lambda current=current, dialog=dialog: self._move_review_disks(current, dialog))
+            dialog.assign_media_requested.connect(lambda candidate, current=current: self._assign_review_media(current, candidate))
             if dialog.exec() != QDialog.DialogCode.Accepted:
                 return
             if dialog.decisions:
@@ -1293,20 +1312,74 @@ class PreviewWidget(QWidget):
                 return
         self.status_message.emit("Reached the end of the media review list.")
 
-    def _save_media_choices(self, entry, decisions):
+    def _move_review_disks(self, entry, dialog):
+        self._state.selected_release_key = entry.release_key
+        self._on_move_adfs_to_release()
+        dialog.disk.clear()
+        dialog.disk.addItems(entry.adf_files)
+        if not entry.adf_files:
+            dialog.next_requested = True
+            dialog.accept()
+
+    def _assign_review_media(self, entry, candidate):
+        from PySide6.QtWidgets import QInputDialog
+        destinations = [e for e in self._state.current_library.releases.values()
+                        if e.release_key != entry.release_key and e.adf_files]
+        labels = [f"{e.title} ({e.release_key})" for e in destinations]
+        if not labels:
+            QMessageBox.information(self, "Assign media", "No other release is available.")
+            return
+        label, ok = QInputDialog.getItem(self, "Assign media to another release", "Destination release", labels, 0, False)
+        if ok:
+            self._apply_media_assignment(entry, destinations[labels.index(label)], candidate)
+
+    def _apply_media_assignment(self, source, destination, candidate):
+        from copy import deepcopy
+        fields = ("media_candidates", "media_choices", "disk_media_choices", "media_scopes")
+        before = {e.release_key: {f: deepcopy(getattr(e, f)) for f in fields} for e in (source, destination)}
+        purpose = candidate.get("purpose", "manual")
+        def same_media(item):
+            if candidate.get("path"):
+                return item.get("path") == candidate["path"]
+            return item == candidate
+        source.media_candidates = [c for c in source.media_candidates if not same_media(c)]
+        for choices in [source.media_choices, *source.disk_media_choices.values()]:
+            for key, items in list(choices.items()):
+                choices[key] = [c for c in items if not same_media(c)]
+        source.media_choices.setdefault(purpose, [])
+        if candidate not in destination.media_candidates:
+            destination.media_candidates.append(deepcopy(candidate))
+        destination.media_choices[purpose] = [deepcopy(candidate)]
+        after = {e.release_key: {f: deepcopy(getattr(e, f)) for f in fields} for e in (source, destination)}
+        action = StagedChange(action=CurationAction.METADATA_EDIT, timestamp=datetime.now(timezone.utc).isoformat(),
+                              details="Assigned media to another release", payload=json.dumps({"kind": "media_assignment", "pre": before, "post": after}))
+        source.actions.append(action)
+        self._record_action_for_undo(source.release_key, action)
+        if self._state.state_manager:
+            self._state.state_manager.save(self._state.current_library)
+        self.state_changed.emit()
+
+    def _save_media_choices(self, entry, decisions, disk=None, scope=None):
         from copy import deepcopy
         before = deepcopy(entry.media_choices)
+        disks_before = deepcopy(entry.disk_media_choices)
+        scopes_before = dict(entry.media_scopes)
+        if scope:
+            entry.media_scopes[scope[0]] = scope[1]
+        target = entry.disk_media_choices.setdefault(disk, {}) if disk else entry.media_choices
         for purpose, candidates in decisions.items():
             if candidates is None:
-                entry.media_choices.pop(purpose, None)
+                target.pop(purpose, None)
             else:
-                entry.media_choices[purpose] = candidates
-        if entry.media_choices == before:
+                target[purpose] = candidates
+        if entry.media_choices == before and entry.disk_media_choices == disks_before and entry.media_scopes == scopes_before:
             return
         action = StagedChange(action=CurationAction.METADATA_EDIT,
                               timestamp=datetime.now(timezone.utc).isoformat(),
                               details="Reviewed image/manual choices",
-                              payload=json.dumps({"kind": "media_choices", "pre": before, "post": entry.media_choices}))
+                              payload=json.dumps({"kind": "media_choices", "pre": before, "post": entry.media_choices,
+                                                  "disks_pre": disks_before, "disks_post": entry.disk_media_choices,
+                                                  "scopes_pre": scopes_before, "scopes_post": entry.media_scopes}))
         entry.actions.append(action)
         self._record_action_for_undo(entry.release_key, action)
         if self._state.state_manager is not None:
@@ -2205,8 +2278,18 @@ class PreviewWidget(QWidget):
             if action.payload:
                 try:
                     payload = json.loads(action.payload)
-                    if payload.get("kind") == "media_choices":
+                    if payload.get("kind") == "media_assignment":
+                        for key, fields in payload.get("pre", {}).items():
+                            target = self._state.current_library.releases.get(key)
+                            if target:
+                                for field, value in fields.items():
+                                    setattr(target, field, value)
+                        if self._state.state_manager:
+                            self._state.state_manager.save(self._state.current_library)
+                    elif payload.get("kind") == "media_choices":
                         entry.media_choices = payload.get("pre", {})
+                        entry.disk_media_choices = payload.get("disks_pre", entry.disk_media_choices)
+                        entry.media_scopes = payload.get("scopes_pre", entry.media_scopes)
                         if self._state.state_manager:
                             self._state.state_manager.save(self._state.current_library)
                     elif payload.get("kind") == "field_edit":
@@ -2228,6 +2311,17 @@ class PreviewWidget(QWidget):
         # Add more undo cases as needed
 
         # Move to redo stack
+        if action.action in (CurationAction.MOVE, CurationAction.MERGE) and action.payload:
+            try:
+                media = json.loads(action.payload).get("media_before", {})
+                for key, values in media.items():
+                    target = self._state.current_library.releases.get(key)
+                    if target:
+                        target.disk_media_choices = values["disk_media_choices"]
+                        target.media_scopes = values["media_scopes"]
+            except (ValueError, KeyError, TypeError):
+                pass
+
         self._redo_stack.append((release_key, action))
         self._refresh_table()
         self._update_summary()
@@ -2346,8 +2440,18 @@ class PreviewWidget(QWidget):
             if action.payload:
                 try:
                     payload = json.loads(action.payload)
-                    if payload.get("kind") == "media_choices":
+                    if payload.get("kind") == "media_assignment":
+                        for key, fields in payload.get("post", {}).items():
+                            target = self._state.current_library.releases.get(key)
+                            if target:
+                                for field, value in fields.items():
+                                    setattr(target, field, value)
+                        if self._state.state_manager:
+                            self._state.state_manager.save(self._state.current_library)
+                    elif payload.get("kind") == "media_choices":
                         entry.media_choices = payload.get("post", {})
+                        entry.disk_media_choices = payload.get("disks_post", entry.disk_media_choices)
+                        entry.media_scopes = payload.get("scopes_post", entry.media_scopes)
                         if self._state.state_manager:
                             self._state.state_manager.save(self._state.current_library)
                     elif payload.get("kind") == "field_edit":
@@ -2365,6 +2469,17 @@ class PreviewWidget(QWidget):
                 new_state = StagedState(action.details.split(" to ")[1])
                 entry.curation_state = new_state
             except (IndexError, ValueError):
+                pass
+
+        if action.action in (CurationAction.MOVE, CurationAction.MERGE) and action.payload:
+            try:
+                media = json.loads(action.payload).get("media_after", {})
+                for key, values in media.items():
+                    target = self._state.current_library.releases.get(key)
+                    if target:
+                        target.disk_media_choices = values["disk_media_choices"]
+                        target.media_scopes = values["media_scopes"]
+            except (ValueError, KeyError, TypeError):
                 pass
 
         # Move back to undo stack
