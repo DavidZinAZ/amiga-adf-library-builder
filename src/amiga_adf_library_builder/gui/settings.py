@@ -44,7 +44,7 @@ SETTINGS_KEYS = (
     # (GH-24) Independent artwork / manuals-RTFM selection. Both default ON.
     "include_artwork",
     "include_manuals_rtfm",
-    # (GH-33) LaunchBox local folder mappings (non-sensitive local paths).
+    # (GH-33) Local Media folder mappings (non-sensitive local paths).
     "launchbox_media_roots",
     "launchbox_manual_roots",
     # (GH-54) Local Asset Matching thresholds.
@@ -152,7 +152,7 @@ class Settings:
     # before. Old settings files without these keys load with this safe default.
     include_artwork: bool = True
     include_manuals_rtfm: bool = True
-    # (GH-33) LaunchBox local folder mappings (non-sensitive local paths).
+    # (GH-33) Local Media folder mappings (non-sensitive local paths).
     # ``launchbox_media_roots``: list of {"path": str, "asset_type": str};
     # ``launchbox_manual_roots``: list of paths (str). Old settings files
     # without these keys load with empty lists (no mappings).
@@ -209,7 +209,7 @@ class Settings:
             # (GH-24) Independent metadata selection.
             "include_artwork": self.include_artwork,
             "include_manuals_rtfm": self.include_manuals_rtfm,
-            # (GH-33) LaunchBox local folder mappings.
+            # (GH-33) Local Media folder mappings.
             "launchbox_media_roots": _clean_media_root_entries(
                 self.launchbox_media_roots
             ),
@@ -345,7 +345,7 @@ class Preset:
     # (GH-24) Independent metadata selection captured with the preset.
     include_artwork: bool = True
     include_manuals_rtfm: bool = True
-    # (GH-33) LaunchBox local folder mappings captured with the preset.
+    # (GH-33) Local Media folder mappings captured with the preset.
     launchbox_media_roots: list[dict] = field(default_factory=list)
     launchbox_manual_roots: list[str] = field(default_factory=list)
     # (GH-54) Local Asset Matching thresholds captured with the preset.
@@ -373,7 +373,7 @@ class Preset:
             "advanced_mode": self.advanced_mode,
             "include_artwork": self.include_artwork,
             "include_manuals_rtfm": self.include_manuals_rtfm,
-            # (GH-33) LaunchBox local folder mappings.
+            # (GH-33) Local Media folder mappings.
             "launchbox_media_roots": _clean_media_root_entries(
                 self.launchbox_media_roots
             ),

@@ -15,7 +15,7 @@ The application can use:
 - cached provider results;
 - operator-curated metadata;
 - indexed DAT/local metadata sources;
-- local LaunchBox/media folders;
+- local Local Media/media folders;
 - ROM-hash identity resolvers;
 - manual/document sources;
 - canonical curation claims.
@@ -45,7 +45,7 @@ Canonical Game / Release / Disk identity
         +--> Cached metadata
         +--> Online providers
         +--> DAT/indexed metadata sources
-        +--> Local media / LaunchBox
+        +--> Local media / Local Media
         +--> Hash identity services
         +--> Manual/document sources
 ```
@@ -386,14 +386,14 @@ Like Wikipedia, RAWG is not the central Amiga-specific source.
 
 ---
 
-# 19. Local media / LaunchBox
+# 19. Local media / Local Media
 
 Local media is not a live online provider.
 
 It is configured under:
 
 ```text
-LaunchBox media
+Local Media
 ```
 
 and/or the local-media configuration.
@@ -450,12 +450,12 @@ are not silently treated as the same title.
 
 # 21. Local manual roots
 
-LaunchBox/manual configuration can also include manual directories.
+Local Media/manual configuration can also include manual directories.
 
 Examples:
 
 ```text
-D:\LaunchBox\Manuals
+D:\Local Media\Manuals
 D:\AmigaManuals
 ```
 
@@ -679,7 +679,7 @@ Uses the online provider chain plus curated/cache state as configured.
 Uses local sources such as:
 
 ```text
-LaunchBox
+Local Media
 local media
 indexed metadata
 ```
@@ -933,7 +933,7 @@ For a typical Amiga user:
 
 ```text
 1. Wikipedia (enabled by default)
-2. Local LaunchBox/media sources
+2. Local Media/media sources
 3. ScreenScraper once developer credentials are available
 ```
 
@@ -1100,7 +1100,7 @@ Offline workflows can still use:
 - cached metadata;
 - curated metadata;
 - local DAT sources;
-- LaunchBox artwork;
+- Local Media artwork;
 - local manuals;
 - prior curation decisions.
 
@@ -1116,7 +1116,7 @@ This is useful for preservation environments and repeatable library builds.
 | ScreenScraper | Online provider | Developer credentials | Yes | Yes | Yes | Yes | Disabled |
 | MobyGames | Core online provider | API key | Yes | Yes | No | No | Disabled |
 | RAWG | Fallback | API key | Yes | Yes | No | No | Optional |
-| LaunchBox/local media | Local | No | Limited identity support | Yes | Yes | No | User configured |
+| Local Media/local media | Local | No | Limited identity support | Yes | Yes | No | User configured |
 | DAT sources | Local indexed | No | Yes | No | No | Depends on data | User configured |
 | RetroKit manuals | Manual provider | No | No | No | Yes | No | Disabled |
 | Curated records | Local authoritative | No | Yes | Can reference | Can reference | No | Authoritative when present |

@@ -118,7 +118,7 @@ Its current tabs are:
 - Library
 - Options
 - Providers
-- LaunchBox media
+- Local Media
 - Preview & Curation
 - Diagnostics
 - Metadata Sources

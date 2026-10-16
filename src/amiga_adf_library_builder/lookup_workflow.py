@@ -9,7 +9,7 @@ Routing between the two is explicit, centralized here, and reusable:
   this routing.
 * ``providers_for_mode`` -- the exact provider list shown for a mode. Online
   modes list the online resolver chain; offline modes list the local
-  (LaunchBox) media source and NOTHING else. An offline lookup can therefore
+  (Local Media) media source and NOTHING else. An offline lookup can therefore
   never list or contact an online provider (Hall of Light, RAWG, MobyGames,
   Wikipedia, ...) -- that is a GH-89 hard requirement.
 
@@ -19,7 +19,7 @@ The two execution paths reuse the existing, tested infrastructure:
   curated -> cache -> keyed-online -> Hall of Light -> Wikipedia chain with
   relevance validation.
 * Offline: :class:`amiga_adf_library_builder.local_media.LocalMediaProvider`
-  -- the read-only, stdlib-only, local LaunchBox media scanner/resolver. It
+  -- the read-only, stdlib-only, local Local Media scanner/resolver. It
   never opens a network socket.
 
 Lookup is strictly read-only with respect to the library: it produces a
@@ -108,7 +108,7 @@ def classify_lookup_mode(mode: str) -> str:
 
     The single routing decision shared by Online and Offline lookups.
     "online" and the "alternate" re-search both resolve to the online
-    provider chain; "offline" resolves to the local (LaunchBox) media source.
+    provider chain; "offline" resolves to the local (Local Media) media source.
     """
     key = (mode or MODE_ONLINE).strip().lower()
     if key == MODE_OFFLINE:
@@ -171,7 +171,7 @@ class _LookupRecord:
 
 
 def _local_source_state(cfg: LocalMediaConfig) -> list[str]:
-    """Human-readable state of the configured local (LaunchBox) media roots."""
+    """Human-readable state of the configured local (Local Media) media roots."""
     lines: list[str] = []
     try:
         report = scan_launchbox_roots(cfg, recursive=cfg.recursive)
@@ -188,7 +188,7 @@ def _local_source_state(cfg: LocalMediaConfig) -> list[str]:
 
 
 def _offline_lookup(mode: str, ctx: LookupContext) -> LookupResult:
-    """Run a real OFFLINE (local LaunchBox media) search.
+    """Run a real OFFLINE (local Local Media) search.
 
     Never touches the network and never references an online provider.
     """

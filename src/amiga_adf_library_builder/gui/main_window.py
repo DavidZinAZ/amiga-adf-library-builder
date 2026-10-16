@@ -497,8 +497,8 @@ class MainWindow(QMainWindow):
         tabs.addTab(self._build_paths_tab(), "Library")
         tabs.addTab(self._build_options_tab(), "Options")
         tabs.addTab(self._build_providers_tab(), "Providers")
-        # (GH-33) LaunchBox local folder mappings (image/media + manuals).
-        tabs.addTab(self._build_launchbox_tab(), "LaunchBox media")
+        # (GH-33) Local Media folder mappings (image/media + manuals).
+        tabs.addTab(self._build_launchbox_tab(), "Local Media")
         # (GH-80) Library Preview & Curation workspace.
         self._preview_widget = PreviewWidget(self)
         self._preview_widget.status_message.connect(self._on_preview_status_message)
@@ -534,8 +534,8 @@ class MainWindow(QMainWindow):
             "files to the export destination after the safety acknowledgement "
             "below is confirmed."
         )
-        mode_row.addWidget(self._mode_build)
-        mode_row.addWidget(self._mode_export)
+        self._mode_build.hide()
+        self._mode_export.hide()
         run_layout.addLayout(mode_row)
 
         # (GH-43) Safety acknowledgement + check-only controls. There is exactly
@@ -554,7 +554,7 @@ class MainWindow(QMainWindow):
             "Run the full build/export check without writing any files. "
             "Useful to verify your library and settings before a real export."
         )
-        gate_row.addWidget(self._cb_gate)
+        self._cb_gate.hide()
         gate_row.addWidget(self._cb_verify)
         gate_row.addStretch(1)
         run_layout.addLayout(gate_row)
@@ -616,8 +616,8 @@ class MainWindow(QMainWindow):
         run_layout.addWidget(self._status_label)
 
         btn_row = QHBoxLayout()
-        self._run_button = QPushButton("Run")
-        self._run_button.clicked.connect(self._on_run)
+        self._run_button = QPushButton("Build library")
+        self._run_button.clicked.connect(self._on_build_clicked)
         self._cancel_button = QPushButton("Cancel")
         self._cancel_button.setEnabled(False)
         self._cancel_button.clicked.connect(self._on_cancel)
@@ -631,6 +631,10 @@ class MainWindow(QMainWindow):
         self._review_button.setEnabled(False)
         self._review_button.clicked.connect(self._open_match_review)
         btn_row.addWidget(self._run_button)
+        self._export_button = QPushButton("Export library")
+        self._export_button.setToolTip("Write the prepared library to the export folder. Check only verifies without writing.")
+        self._export_button.clicked.connect(self._on_export_clicked)
+        btn_row.addWidget(self._export_button)
         btn_row.addWidget(self._cancel_button)
         btn_row.addWidget(self._open_log_button)
         btn_row.addWidget(self._review_button)
@@ -830,7 +834,7 @@ class MainWindow(QMainWindow):
         form = QFormLayout(box)
         enabled = QCheckBox("Enabled")
         # Restore persisted enablement state from Settings.
-        provider_enabled = self._settings.provider_enabled.get(provider.metadata.id, provider.enabled())
+        provider_enabled = self._settings.provider_enabled.get(provider.metadata.id, False)
         enabled.setChecked(provider_enabled)
         enabled.setToolTip(
             "Turn this metadata source on. A source only activates once it "
@@ -874,9 +878,9 @@ class MainWindow(QMainWindow):
         form.addRow("", status_btn)
         return box
 
-    # --- (GH-33) LaunchBox local media tab -------------------------------------
+    # --- (GH-33) Local Media media tab -------------------------------------
     def _build_launchbox_tab(self) -> QWidget:
-        """Local LaunchBox folder mappings: image/media roots + manual roots.
+        """Local Media folder mappings: image/media roots + manual roots.
 
         (GH-33) Everything here is LOCAL ONLY: native folder browsing, add /
         remove mappings, per-root asset-type selection, and a read-only
@@ -891,10 +895,9 @@ class MainWindow(QMainWindow):
         # (GH-23) The list ORDER is the precedence order: when the same
         # asset type is found in more than one root, the FIRST root in this
         # list wins. Move Up / Move Down therefore change which artwork wins.
-        media_box = QGroupBox("Artwork roots (each root has one asset type)")
+        media_box = QGroupBox("Artwork folders")
         media_box.setToolTip(
-            "Local LaunchBox artwork folders. Pick a folder and choose which "
-            "LaunchBox media type it holds (for example \"Box - Front\"). "
+            "Local artwork folders. Matching images are discovered automatically. "
             "List order is precedence order: when the same artwork type is "
             "present in several roots, the first root wins. Use Move Up / "
             "Move Down to change priority. Everything stays local; nothing "
@@ -903,6 +906,7 @@ class MainWindow(QMainWindow):
         media_layout = QVBoxLayout(media_box)
         self._lb_media_table = QTableWidget(0, 2)
         self._lb_media_table.setHorizontalHeaderLabels(["Folder", "Asset type"])
+        self._lb_media_table.setColumnHidden(1, True)
         self._lb_media_table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.ResizeToContents
         )
@@ -915,8 +919,7 @@ class MainWindow(QMainWindow):
         media_buttons = QHBoxLayout()
         self._lb_media_add_button = QPushButton("Add folder…")
         self._lb_media_add_button.setToolTip(
-            "Choose a local folder of images (Browse). You can then select "
-            "its asset type from the list."
+            "Choose a local image folder. Artwork categories are discovered automatically."
         )
         self._lb_media_add_button.clicked.connect(self._lb_add_media_root)
         self._lb_media_remove_button = QPushButton("Remove")
@@ -1009,7 +1012,7 @@ class MainWindow(QMainWindow):
         layout.addStretch(1)
         return w
 
-    # --- (GH-33) LaunchBox mapping helpers --------------------------------------
+    # --- (GH-33) Local Media mapping helpers --------------------------------------
     def _lb_asset_type_combo(self, asset_type: str) -> QComboBox:
         combo = QComboBox(self)
         combo.addItem(DEFAULT_MEDIA_ROOT_ASSET_TYPE)
@@ -1168,7 +1171,7 @@ class MainWindow(QMainWindow):
         return out
 
     def _lb_check_roots(self) -> None:
-        """Read-only diagnostics: scan the configured LaunchBox roots (GH-33)."""
+        """Read-only diagnostics: scan the configured Local Media roots (GH-33)."""
         cfg = LocalMediaConfig(
             enabled=True,
             media_roots=tuple(
@@ -1185,7 +1188,7 @@ class MainWindow(QMainWindow):
             self._lb_diag_label.setText(f"Check failed: {exc}")
             return
         if not report.roots:
-            self._lb_diag_label.setText("No LaunchBox roots configured yet.")
+            self._lb_diag_label.setText("No Local Media roots configured yet.")
             return
         self._lb_diag_label.setText("\n".join(report.to_lines()))
         for line in report.to_lines():
@@ -1651,8 +1654,7 @@ class MainWindow(QMainWindow):
         """Restore provider enablement and field state from Settings."""
         for provider in self._registry.all():
             pid = provider.metadata.id
-            if pid in self._settings.provider_enabled:
-                provider.set_enabled(self._settings.provider_enabled[pid])
+            provider.set_enabled(self._settings.provider_enabled.get(pid, False))
             if pid in self._settings.provider_fields:
                 for key, val in self._settings.provider_fields[pid].items():
                     provider.set_field(key, val)
@@ -1812,7 +1814,7 @@ class MainWindow(QMainWindow):
                 # (GH-24) independent metadata selection (non-sensitive).
                 "include_artwork": state.include_artwork,
                 "include_manuals_rtfm": state.include_manuals_rtfm,
-                # (GH-33) LaunchBox local folder mappings (non-sensitive local
+                # (GH-33) Local Media folder mappings (non-sensitive local
                 # paths; missing folders are kept, never deleted).
                 "launchbox_media_roots": self._lb_media_mappings(),
                 "launchbox_manual_roots": self._lb_manual_mappings(),
@@ -1850,11 +1852,11 @@ class MainWindow(QMainWindow):
             refresh_metadata=self._cb_refresh.isChecked(),
             require_artwork=self._cb_artwork.isChecked(),
             verify_only=self._cb_verify.isChecked(),
-            export_gate_acknowledged=self._cb_gate.isChecked(),
+            export_gate_acknowledged=self._mode_export.isChecked(),
             # (GH-24) independent metadata selection.
             include_artwork=self._cb_include_artwork.isChecked(),
             include_manuals_rtfm=self._cb_include_manuals.isChecked(),
-            # (GH-33) LaunchBox local folder mappings (LOCAL ONLY; empty lists
+            # (GH-33) Local Media folder mappings (LOCAL ONLY; empty lists
             # keep the pipeline identical to the CLI's provider-config path).
             launchbox_media_roots=self._lb_media_mappings(),
             launchbox_manual_roots=self._lb_manual_mappings(),
@@ -1873,15 +1875,18 @@ class MainWindow(QMainWindow):
         )
         return state
 
+    def _on_build_clicked(self):
+        self._mode_export.setChecked(False)
+        self._on_run()
+
+    def _on_export_clicked(self):
+        self._mode_export.setChecked(True)
+        self._on_run()
+
     def _sync_export_controls(self, _state: object = None) -> None:
-        """(GH-43) Keep the write-files acknowledgement available iff export mode
-        is selected. Outside export mode the acknowledgement has no meaning, so
-        it is disabled to prevent contradictory combinations; it never holds a
-        stale value that a later export run could silently pick up."""
+        """Mirror the explicit export action into the legacy gate state."""
         export_selected = self._mode_export.isChecked()
-        self._cb_gate.setEnabled(export_selected)
-        if not export_selected:
-            self._cb_gate.setChecked(False)
+        self._cb_gate.setChecked(export_selected)
         self._update_export_state_display()
 
     def _apply_settings_to_widgets(self) -> None:
@@ -1942,15 +1947,9 @@ class MainWindow(QMainWindow):
 
     def _update_export_state_display(self) -> None:
         """Update the pre-run export state summary label and destination preview."""
-        # Update destination preview
-        if self._mode_export.isChecked():
-            staging_dir = self._le_staging_dir.text().strip()
-            if staging_dir:
-                self._export_dest_label.setText(f"ADF Library Export Folder: {staging_dir}")
-            else:
-                self._export_dest_label.setText("ADF Library Export Folder: (using default from configuration)")
-        else:
-            self._export_dest_label.setText("")
+        staging_dir = self._le_staging_dir.text().strip()
+        self._export_dest_label.setText(
+            f"Export writes files to: {staging_dir or '(using default from configuration)'}")
 
         # Build export state summary. Exactly one primary choice decides the
         # outcome ('Export the library'); the acknowledgement and 'Check only'
@@ -1974,14 +1973,6 @@ class MainWindow(QMainWindow):
             self._export_state_label.setStyleSheet("font-weight: bold; color: #e65100;")
             return
 
-        if not self._cb_gate.isChecked():
-            self._export_state_label.setText(
-                "Files will NOT be exported: confirm 'I understand this run "
-                "will write files' to allow this run to write files."
-            )
-            self._export_state_label.setStyleSheet("font-weight: bold; color: #c62828;")
-            return
-
         will_export = True
         if will_export and not self._le_staging_dir.text().strip():
             reasons.append("export folder not set (the default will be used)")
@@ -1993,9 +1984,9 @@ class MainWindow(QMainWindow):
             )
             self._export_state_label.setStyleSheet("font-weight: bold; color: #2e7d32;")
 
-    # --- (GH-33) LaunchBox mappings: restore from persisted settings ----------
+    # --- (GH-33) Local Media mappings: restore from persisted settings ----------
     def _lb_restore_mappings(self, s: "Settings") -> None:
-        """Restore persisted LaunchBox mappings into the tab widgets (GH-33).
+        """Restore persisted Local Media mappings into the tab widgets (GH-33).
 
         Missing paths are KEPT (never deleted on absence) and surfaced as a
         status diagnostic — the same behavior as the Issue #17 folder fields.
@@ -2028,7 +2019,7 @@ class MainWindow(QMainWindow):
                 missing.append(text)
         if missing:
             message = (
-                "LaunchBox root(s) not found on this machine (kept): "
+                "Local Media root(s) not found on this machine (kept): "
                 + "; ".join(missing)
             )
             logger.debug("%s", message)
@@ -2038,7 +2029,7 @@ class MainWindow(QMainWindow):
     #
     # A profile is a named snapshot of the non-sensitive settings currently in
     # the widgets: the four folder paths, the run-mode toggles, the GH-24
-    # independent metadata selection, and the GH-33 LaunchBox local mappings.
+    # independent metadata selection, and the GH-33 Local Media mappings.
     # It is stored through the EXISTING SettingsStore preset API
     # (``save_preset`` / ``apply_preset`` / ``get().presets``), which already
     # serializes only non-sensitive data. There is deliberately no code path
@@ -2059,7 +2050,7 @@ class MainWindow(QMainWindow):
 
         Never touches SecretStore or any secret field: every value comes from
         the non-sensitive widgets (folder line edits, option checkboxes,
-        LaunchBox mapping tables) via the same accessors ``_persist_defaults``
+        Local Media mapping tables) via the same accessors ``_persist_defaults``
         uses for the last-used settings.
         """
         state = self._state_from_widgets()
@@ -2309,6 +2300,7 @@ class MainWindow(QMainWindow):
             # (Issue #21) run boundary: the log shows every run start/end.
             self._run_marker("=== RUN START ===")
             self._run_button.setEnabled(False)
+            self._export_button.setEnabled(False)
             self._cancel_button.setEnabled(True)
             self._status_label.setText("Running…")
             self._state = "RUNNING"
@@ -2529,6 +2521,7 @@ class MainWindow(QMainWindow):
         # operator is never left waiting on post-run bookkeeping.
         self._cancel_button.setEnabled(False)
         self._run_button.setEnabled(True)
+        self._export_button.setEnabled(True)
         self._state = "FINISHING"
         self._progress.setValue(100)
         groups = result.get("groups", 0) if result else 0
@@ -2709,6 +2702,7 @@ class MainWindow(QMainWindow):
         """Terminal UI state: running -> finishing -> idle, always reachable."""
         self._run_in_progress = False
         self._run_button.setEnabled(True)
+        self._export_button.setEnabled(True)
         self._cancel_button.setEnabled(False)
         self._state = "IDLE"
 
@@ -2733,7 +2727,7 @@ class MainWindow(QMainWindow):
         Mirrors :func:`build_pipeline_kwargs` ->
         :func:`resolve_local_media_config_path` EXACTLY, so the review UI loads
         the same ``[local_media]`` table (and hence the same ``enabled`` flag)
-        the pipeline read. When the run held GH-33 LaunchBox mappings this is
+        the pipeline read. When the run held GH-33 Local Media mappings this is
         the GUI-managed merged file; otherwise it is the operator config path.
         Only called from :meth:`_on_finished` (once per run).
         """

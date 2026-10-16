@@ -86,9 +86,9 @@ class GuiState:
     # in the CLI). Secrets are NOT here.
     provider_config_path: str = ""
 
-    # --- (GH-33) LaunchBox local folder mappings -----------------------------
+    # --- (GH-33) Local Media folder mappings -----------------------------
     # GUI-only LOCAL mappings (no network): image/media roots with an explicit
-    # LaunchBox asset type, plus manual-document roots (PDF/TXT). Each media
+    # Local Media asset type, plus manual-document roots (PDF/TXT). Each media
     # root is {"path": str, "asset_type": str}. Empty = no GUI mappings, which
     # keeps the pipeline behavior byte-for-byte identical to the CLI
     # (CLI<->GUI equivalence preserved).
@@ -146,7 +146,7 @@ def build_path_config_from_gui_state(
     return cfg
 
 
-# --- (GH-33) LaunchBox GUI mappings -> provider config ---------------------
+# --- (GH-33) Local Media GUI mappings -> provider config ---------------------
 
 
 def _launchbox_mappings(state: GuiState) -> tuple[list[dict], list[str]]:
@@ -183,7 +183,7 @@ def resolve_local_media_config_path(
 ) -> Optional[str]:
     """Resolve the provider-config path the pipeline should use.
 
-    (GH-33) When the GUI holds LaunchBox local mappings, the operator's
+    (GH-33) When the GUI holds Local Media mappings, the operator's
     provider config (if any) is merged with the GUI's ``[local_media]``
     ``media_roots`` / ``manual_roots`` into a DETERMINISTIC GUI-managed file
     (default: ``<cache_dir>/gui-local-media.toml``, where ``cache_dir`` is the
@@ -287,7 +287,7 @@ def resolve_rtfm_config_path(
     rtfm_table = data.get("rtfm")
     if not isinstance(rtfm_table, dict):
         rtfm_table = {}
-    # When manual roots are present (LaunchBox or explicit RTFM roots),
+    # When manual roots are present (Local Media or explicit RTFM roots),
     # RTFM must be enabled regardless of the standalone rtfm_enabled
     # toggle. The operator configured roots because they want RTFM —
     # the toggle is only for explicit opt-out when no roots are present.
@@ -387,7 +387,7 @@ def build_pipeline_kwargs(
         # CLI-equivalent verified artwork dimensions for the exporter gate.
         verified_artwork_width=ARTWORK_MAX_W,
         verified_artwork_height=ARTWORK_MAX_H,
-        # (GH-33) GUI LaunchBox mappings take precedence for local media;
+        # (GH-33) GUI Local Media mappings take precedence for local media;
         # otherwise identical to the CLI's provider-config behavior.
         local_media_config_path=local_media_cfg,
         # (GH-173) RTFM config path resolved from GUI settings;

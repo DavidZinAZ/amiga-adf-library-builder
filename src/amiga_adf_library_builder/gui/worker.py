@@ -157,7 +157,7 @@ class PipelineWorker(QObject):
             run_config, extra = build_pipeline_kwargs(
                 self._state, cfg, config_path=self._config_path,
                 activity=_enrich_progress_activity,
-                # (GH-33) GUI LaunchBox mappings are merged into a managed
+                # (GH-33) GUI Local Media mappings are merged into a managed
                 # provider config under the app's own cache dir (deterministic,
                 # atomic, never inside the read-only original corpus).
                 cache_dir=cfg.cache_dir,

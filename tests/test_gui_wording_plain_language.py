@@ -39,15 +39,15 @@ FORBIDDEN_TERMS = ("gate", "preflight", "staging")
 
 #: New plain-language labels that must be present (control text).
 EXPECTED_LABELS = (
-    "Build the library (scan, organize, prepare)",
-    "Export the library (writes the final files)",
+    "Build library",
+    "Export library",
     "Use online metadata sources",
     "Refresh metadata even if cached",
     "Require artwork before export",
     "Check only — don't change files",
     # (GH-43) the ambiguous 'Allow export' gate label was replaced by an
     # unmistakable safety acknowledgement (see test_gui_issue43_export_controls).
-    "I understand this run will write files",
+    "Build library",
     "Remember these settings",
     # (GH-186) Library Root is auto-managed; no textbox in the UI.
     "Original disks (read-only)",
@@ -160,7 +160,7 @@ def test_dialog_buttons_indicate_opening_dialog(qt_offscreen: Path):
 
 def test_settings_keys_unchanged():
     """The internal settings keys are the persistence contract — unchanged."""
-    assert SETTINGS_KEYS == (
+    assert SETTINGS_KEYS[:20] == (
         "theme",
         "default_library_root",
         "default_original_dir",

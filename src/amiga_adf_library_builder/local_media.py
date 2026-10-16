@@ -1,7 +1,7 @@
 """Generic offline, read-only local-media artwork provider (local-media provider base app).
 
 This module discovers box/screenshot artwork from operator-configured local
-media libraries -- the reference adapter is LaunchBox -- copies the chosen
+media libraries -- the reference adapter is Local Media -- copies the chosen
 source into the application's OWN cache, and records provenance that survives
 the original library later moving or disappearing.
 
@@ -70,7 +70,7 @@ IMAGE_SUFFIXES: frozenset[str] = frozenset(
 #: (issue #33: multiple manual roots for PDF/TXT manuals).
 MANUAL_SUFFIXES: frozenset[str] = frozenset({".pdf", ".txt"})
 
-#: Representative LaunchBox image/media categories offered by the GUI asset-type
+#: Representative Local Media image/media categories offered by the GUI asset-type
 #: selector (issue #33). Order is the order the GUI presents them; it is NOT a
 #: priority order (priority comes from ``preferred_image_types``).
 LAUNCHBOX_IMAGE_CATEGORIES: tuple[str, ...] = (
@@ -92,7 +92,7 @@ LAUNCHBOX_IMAGE_CATEGORIES: tuple[str, ...] = (
 )
 
 #: Fallback asset type for a bare-string typed media root whose folder name is
-#: not a recognized LaunchBox category.
+#: not a recognized Local Media category.
 DEFAULT_MEDIA_ROOT_ASSET_TYPE = "Box - Front"
 
 #: Image-category folder names that carry NO per-game identity. Used by
@@ -228,7 +228,7 @@ def _parse_media_roots(raw) -> tuple[MediaRoot, ...]:
     """Parse ``media_roots`` entries: bare strings OR ``{path, asset_type}``.
 
     A bare string becomes a typed root whose asset type is the folder's own
-    name when that name is a recognized LaunchBox category, else
+    name when that name is a recognized Local Media category, else
     :data:`DEFAULT_MEDIA_ROOT_ASSET_TYPE`. Entries without a usable path are
     dropped (defensive: a malformed mapping must not break config loading).
     """
@@ -275,9 +275,9 @@ def _parse_manual_roots(raw) -> tuple[ManualRoot, ...]:
 
 @dataclass(frozen=True)
 class MediaRoot:
-    """One typed LaunchBox image/media root (issue #33).
+    """One typed Local Media image/media root (issue #33).
 
-    ``path`` is the root directory; ``asset_type`` is the LaunchBox media
+    ``path`` is the root directory; ``asset_type`` is the Local Media
     category it holds (e.g. ``"Box - Front"``). Images directly under the root
     (or under region/per-game subfolders) are all attributed to ``asset_type``.
     A root is LOCAL ONLY: discovery is read-only and never touches the network.
@@ -298,9 +298,9 @@ class ManualRoot:
 class LocalMediaConfig:
     """Typed view of the ``[local_media]`` TOML table.
 
-    ``roots`` keeps its existing semantics (LaunchBox image-tree roots,
+    ``roots`` keeps its existing semantics (Local Media image-tree roots,
     ``<root>/Images/<Platform>/<Category>/...``) and is backward compatible.
-    ``media_roots`` and ``manual_roots`` are the issue #33 LaunchBox mappings:
+    ``media_roots`` and ``manual_roots`` are the issue #33 Local Media mappings:
     multiple image/media roots, each with an explicit asset type, plus multiple
     manual roots for PDF/TXT documents.
 
@@ -476,18 +476,18 @@ class LocalMediaProvenance:
 class LocalMediaCandidate:
     """One discovered source image and its derived identity.
 
-    LaunchBox images are named after the game at the *folder* level, the
+    Local Media images are named after the game at the *folder* level, the
     *file* level, or both (e.g. ``.../Box - Front/Example Space Tactics/001.png`` or
     ``.../Box - Front/Example Space Tactics.png``). We derive match identities from
     BOTH the immediate parent folder name and the filename stem, each in raw,
     normalized, and release-tag-stripped forms, so a match succeeds regardless
-    of which convention a given LaunchBox export uses.
+    of which convention a given Local Media export uses.
     """
 
     path: Path
     category: str
     root: Path
-    # Immediate parent folder (the per-game folder in LaunchBox's layout), when
+    # Immediate parent folder (the per-game folder in Local Media's layout), when
     # the adapter can determine it; falls back to path.parent.name.
     game_folder: Optional[str] = None
 
@@ -499,7 +499,7 @@ class LocalMediaCandidate:
         directory) so match logic sees the game name, while ``category`` holds
         the image type. When the adapter did not resolve a folder, the immediate
         parent is accepted ONLY if it is neither the image category nor a region
-        folder -- flat and region-nested LaunchBox layouts have no per-game
+        folder -- flat and region-nested Local Media layouts have no per-game
         folder, and the category/region MUST NOT be treated as a game title.
         """
         if self.game_folder:
@@ -516,7 +516,7 @@ class LocalMediaCandidate:
 
     @property
     def raw_ordinal_stem(self) -> str:
-        """Filename stem with only the trailing LaunchBox ordinal removed.
+        """Filename stem with only the trailing Local Media ordinal removed.
 
         Used so a flat/region-nested file named ``Bubble Bobble-01.png`` yields
         the genuine game name ``Bubble Bobble`` while a filename that IS the game
@@ -536,7 +536,7 @@ class LocalMediaCandidate:
 
     @property
     def raw_ordinal_folder(self) -> str:
-        """Parent folder with only the trailing LaunchBox ordinal removed.
+        """Parent folder with only the trailing Local Media ordinal removed.
 
         Returns ``""`` when there is no genuine per-game folder (flat/region-
         nested layout), so the folder identity never carries a category/region.
@@ -578,7 +578,7 @@ class LocalMediaCandidate:
     def folder_chain_norm(self) -> list:
         """Normalized names of every ancestor folder from the category down.
 
-        LaunchBox image files may sit at any depth under a category; the game
+        Local Media image files may sit at any depth under a category; the game
         name can appear at any level (e.g. ``.../Screenshot - Game Title/<Game>/
         deep/even/deeper/img.png``). We collect every ancestor folder name so the
         scoring can match against whichever level carries the game title.
@@ -688,7 +688,7 @@ def _canonical_norm(title: str) -> str:
     return _norm_text(_ct(title))
 
 
-# LaunchBox appends a trailing image ordinal to the *filename* (not the game
+# Local Media appends a trailing image ordinal to the *filename* (not the game
 # title) in flat and region-nested layouts, e.g. ``Bubble Bobble-01.png``,
 # ``Bubble Bobble-02.png``. The ordinal is a pure ``-<digits>`` suffix. We
 # strip ONLY that, and ONLY when it is a trailing hyphen+digits, so genuine
@@ -701,7 +701,7 @@ _LAUNCHBOX_ORDINAL_RE = re.compile(r"-[0-9]{1,3}$")
 
 
 def _strip_launchbox_ordinal(name: str) -> str:
-    """Remove a single trailing LaunchBox image ordinal (``-NN``) if present.
+    """Remove a single trailing Local Media image ordinal (``-NN``) if present.
 
     Returns the name unchanged when there is no trailing ``-<digits>`` suffix,
     so legitimate numeric/sequel titles are preserved exactly.
@@ -711,12 +711,12 @@ def _strip_launchbox_ordinal(name: str) -> str:
     return _LAUNCHBOX_ORDINAL_RE.sub("", name)
 
 
-# Filenames that carry NO game identity of their own (LaunchBox uses them as
+# Filenames that carry NO game identity of their own (Local Media uses them as
 # generic "this is the box/title/screenshot for the parent game" markers). When
 # the immediate file stem is one of these -- or is purely numeric -- the game
 # identity must be derived from the PARENT FOLDER, not the filename. Descriptive
 # filenames (e.g. ``Bubble Bobble-01.png``) keep their own identity, which is
-# how flat and region-nested LaunchBox layouts name games at the *file* level.
+# how flat and region-nested Local Media layouts name games at the *file* level.
 _GENERIC_IMAGE_STEMS = frozenset(
     {
         "title", "box", "front", "back", "cart", "disc", "disk", "cover",
@@ -727,7 +727,7 @@ _GENERIC_IMAGE_STEMS = frozenset(
 
 
 def _is_generic_stem(stem: str) -> bool:
-    """True when ``stem`` carries no game identity (generic LaunchBox marker)."""
+    """True when ``stem`` carries no game identity (generic Local Media marker)."""
     s = _strip_launchbox_ordinal(stem or "").strip().lower()
     if not s:
         return True
@@ -738,7 +738,7 @@ def _is_generic_stem(stem: str) -> bool:
     return False
 
 
-# Region-name folders that LaunchBox inserts between a category and the game
+# Region-name folders that Local Media inserts between a category and the game
 # image (e.g. ``.../Screenshot - Game Title/United States/<file>``). These carry
 # NO game identity and must never be used as a game title or matched against a
 # group title. Compared by normalized form (lower + alnum only) so spacing and
@@ -756,7 +756,7 @@ _REGION_NAMES_NORM = frozenset(_norm_text(r) for r in _REGION_NAMES_RAW)
 
 
 def _is_region_name(name: str) -> bool:
-    """True when ``name`` is a LaunchBox region/territory folder (no game id)."""
+    """True when ``name`` is a Local Media region/territory folder (no game id)."""
     if not name:
         return False
     return _norm_text(name) in _REGION_NAMES_NORM
@@ -839,15 +839,15 @@ class LocalMediaAdapter:
 
 
 class LaunchBoxAdapter(LocalMediaAdapter):
-    """LaunchBox image-tree adapter.
+    """Local Media image-tree adapter.
 
-    LaunchBox stores images under::
+    Local Media stores images under::
 
         <root>/Images/<Platform>/<Category>/<possibly nested>/<file>
 
     where ``<Category>`` is one of the configured ``preferred_image_types``
     (e.g. ``"Screenshot - Game Title"``). We match by the *folder name* so we
-    never rely on LaunchBox's internal path depth, and we recurse through any
+    never rely on Local Media's internal path depth, and we recurse through any
     nested subfolders when ``recursive`` is set.
     """
 
@@ -874,7 +874,7 @@ class LaunchBoxAdapter(LocalMediaAdapter):
     def _resolve_game_folder(self, parent: Path, category: str) -> Optional[str]:
         """Return the genuine per-game folder for an image, or ``None``.
 
-        LaunchBox stores the game name at the *folder* level, the *file* level,
+        Local Media stores the game name at the *folder* level, the *file* level,
         or both. The immediate parent of an image is a game title ONLY when it
         is neither the image category nor a region/territory folder. When it is
         the category (flat layout ``<cat>/<Game>-NN.png``) or a region (region-
@@ -910,14 +910,14 @@ class LaunchBoxAdapter(LocalMediaAdapter):
                          categories: Iterable[str]):
         """Enumerate image files and attribute each to its image *category*.
 
-        LaunchBox layout is ``<Category>/<Game>/<file>`` (the image type is an
+        Local Media layout is ``<Category>/<Game>/<file>`` (the image type is an
         ancestor folder, the game is the immediate parent). We therefore search
         for the nearest ancestor folder whose name is a recognized category and
         use that as ``category``; the immediate parent (game folder) is recorded
         as ``game_folder``. This is robust to extra nesting depth and does not
         depend on the category being a direct child of the platform dir.
 
-        Confinement: the LaunchBox root is treated as UNTRUSTED. Every candidate
+        Confinement: the Local Media root is treated as UNTRUSTED. Every candidate
         is resolved to its real (symlink/hardlink-free) path and skipped unless
         it lies *within* the configured root, and only regular files are
         accepted (symlinks, device nodes, FIFOs, and sockets are rejected). A
@@ -966,7 +966,7 @@ class LaunchBoxAdapter(LocalMediaAdapter):
             # Resolve the genuine per-game folder. The immediate parent is only
             # a game title when it is NOT the category and NOT a region folder;
             # otherwise we ascend toward the category and use the nearest folder
-            # that actually names the game. Flat and region-nested LaunchBox
+            # that actually names the game. Flat and region-nested Local Media
             # layouts (``<cat>/<Game>-NN.png`` and ``<cat>/<Region>/<file>``)
             # therefore yield the correct game identity instead of the
             # category/region name.
@@ -983,12 +983,12 @@ class TypedMediaRootAdapter(LocalMediaAdapter):
     """Adapter for issue #33 typed media roots.
 
     A typed media root is a directory whose ENTIRE image set belongs to one
-    explicit LaunchBox asset type (the GUI records ``asset_type`` per mapping,
+    explicit Local Media asset type (the GUI records ``asset_type`` per mapping,
     e.g. ``"Box - Front"``). The root's own folder name is NOT a category and
     must not be mistaken for one: every image under the root is attributed to
     the configured ``asset_type``.
 
-    Per-game identity resolution reuses the LaunchBox conventions: the
+    Per-game identity resolution reuses the Local Media conventions: the
     immediate parent folder is a game title when it is not a region and not a
     recognized category (per-game subfolders inside the root are respected);
     otherwise the filename stem carries the identity (flat root layout).
@@ -1035,9 +1035,17 @@ class TypedMediaRootAdapter(LocalMediaAdapter):
                 game_folder = parent.name
             else:
                 game_folder = None
+            # A selected library folder may contain several artwork folders.
+            # Preserve their categories instead of treating logos/back covers
+            # as competing front covers. Flat folders retain their saved type.
+            detected_type = root.name if root.name in CAT_SET_SKIP else asset_type
+            for ancestor in entry.relative_to(root).parts[:-1]:
+                if ancestor in CAT_SET_SKIP:
+                    detected_type = ancestor
+                    break
             yield LocalMediaCandidate(
                 path=entry,
-                category=asset_type,
+                category=detected_type,
                 root=root,
                 game_folder=game_folder,
             )
@@ -1291,7 +1299,7 @@ class LocalMediaProvider:
         Strictly read-only: only ``is_dir`` / directory enumeration is used.
         Returns the number of candidate images discovered.
 
-        Scans, in order: (1) the legacy ``roots`` (LaunchBox image-tree
+        Scans, in order: (1) the legacy ``roots`` (Local Media image-tree
         layout, existing adapter) and (2) the issue #33 typed ``media_roots``
         (each root's whole image set belongs to its explicit asset type).
         Missing roots are skipped (they are retained in config and surfaced
@@ -1808,7 +1816,7 @@ class LocalMediaProvider:
             return self._candidate_identity_cache[key]
         # All ancestor folder names (any depth) may carry the game title.
         folder_chain = cand.folder_chain_norm
-        # Same chain with only trailing LaunchBox ordinals stripped from each
+        # Same chain with only trailing Local Media ordinals stripped from each
         # level (so ``<cat>/Bubble Bobble-01/<file>`` matches ``bubblebobble``).
         ordinal_chain = [
             _norm_text(_strip_launchbox_ordinal(n)) for n in folder_chain
@@ -1848,7 +1856,7 @@ class LocalMediaProvider:
         Returns ``(method, score)``. ``method == NONE`` means no match.
         Order follows local-media provider requirement 5 exactly. The candidate's filename
         stem, its immediate parent folder, and ANY ancestor folder in the path
-        (LaunchBox nests arbitrarily deep) are considered at each tier.
+        (Local Media nests arbitrarily deep) are considered at each tier.
         """
         title = identities["title"]
         ci = self._cand_identities(cand)
@@ -1881,7 +1889,7 @@ class LocalMediaProvider:
             or identities["canonical_norm_title"] in ci.get("norm_base_chain", [])
         ):
             return MatchMethod.NORMALIZED_TITLE, 0.99
-        # 3b) normalized title WITH the trailing LaunchBox ordinal stripped
+        # 3b) normalized title WITH the trailing Local Media ordinal stripped
         # (flat / region-nested layouts name the game at the file or folder
         # level as ``Bubble Bobble-01`` / ``Bubble Bobble-01``). Only the
         # trailing ``-<digits>`` ordinal is removed, so genuine numbered/sequel
@@ -1985,7 +1993,7 @@ class LocalMediaProvider:
         """Copy the source read-only into the app cache and write provenance.
 
         The source is opened read-only (``"rb"``). The destination lives under
-        ``self.cache_dir`` (app-owned); never under any LaunchBox root.
+        ``self.cache_dir`` (app-owned); never under any Local Media root.
         """
         import datetime
 
@@ -2193,7 +2201,7 @@ def assert_read_only_roots(config: LocalMediaConfig) -> None:
             ) from exc
 
 
-# --- Issue #33: LaunchBox root diagnostics + manual discovery -----------------
+# --- Issue #33: Local Media root diagnostics + manual discovery -----------------
 
 
 @dataclass(frozen=True)
@@ -2209,7 +2217,7 @@ class RootStatus:
 
 @dataclass(frozen=True)
 class LaunchboxScanReport:
-    """Read-only scan report over all configured LaunchBox roots (issue #33).
+    """Read-only scan report over all configured Local Media roots (issue #33).
 
     Diagnostics only: identifies which configured roots were scanned
     (``status == "ok"``) and which are currently missing or inaccessible
@@ -2244,18 +2252,18 @@ class LaunchboxScanReport:
         for r in self.roots:
             if r.status == "missing":
                 lines.append(
-                    f"LaunchBox root not found (kept in config): {r.path}"
+                    f"Local Media root not found (kept in config): {r.path}"
                     + (f" [{r.asset_type}]" if r.asset_type else "")
                 )
                 continue
             if r.kind == "media":
                 lines.append(
-                    f"LaunchBox media root ok: {r.path} "
+                    f"Local Media root ok: {r.path} "
                     f"[{r.asset_type}] ({r.file_count} image candidate(s))"
                 )
             elif r.kind == "manual":
                 lines.append(
-                    f"LaunchBox manual root ok: {r.path} "
+                    f"Local Media manual root ok: {r.path} "
                     f"({r.file_count} manual file(s))"
                 )
             else:
@@ -2303,7 +2311,7 @@ def _count_files_under(
 def scan_launchbox_roots(
     config: LocalMediaConfig, *, recursive: bool = True
 ) -> LaunchboxScanReport:
-    """Read-only diagnostics scan of all configured LaunchBox roots.
+    """Read-only diagnostics scan of all configured Local Media roots.
 
     For every legacy ``roots`` entry, typed ``media_roots`` entry, and
     ``manual_roots`` entry: report ``ok``/``missing`` status plus a candidate

@@ -2,7 +2,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QImage, QPixmap, QIcon
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QComboBox, QListWidget, QListWidgetItem, QPushButton, QTextEdit,
@@ -18,11 +18,14 @@ def _pdf_backend():
 
 
 class MediaChoiceDialog(QDialog):
+    choices_saved = Signal(dict)
     def __init__(self, entry, preview_dir: Path, parent=None, initial_purpose=None):
         super().__init__(parent)
         self.entry = entry
         self.preview_dir = preview_dir
         self.decisions = {}
+        self.next_requested = False
+        self.previous_requested = False
         self.candidates = [dict(c) for c in entry.media_candidates]
         for items in entry.media_choices.values():
             for candidate in items:
@@ -31,18 +34,19 @@ class MediaChoiceDialog(QDialog):
         self.setWindowTitle(f"Review media choices — {entry.title}")
         self.resize(1050, 720)
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Compare candidates with your saved choice. Changes are saved when you finish."))
+        layout.addWidget(QLabel("Compare candidates with your saved choice. Use this saves your choice. Next moves to the next item."))
         self.purpose = QComboBox()
         purposes = sorted({c.get("purpose", "manual") for c in self.candidates} | set(entry.media_choices))
         if "manual" not in purposes:
             purposes.append("manual")
         if not any(p != "manual" for p in purposes):
             purposes.append("Box - Front")
-        self.purpose.addItems(purposes or ["manual", "Box - Front"])
+        for purpose in purposes:
+            self.purpose.addItem("RTFM" if purpose == "manual" else "Artwork" if purpose == "Box - Front" else f"Artwork ({purpose})", purpose)
         if initial_purpose:
-            if self.purpose.findText(initial_purpose) < 0:
-                self.purpose.addItem(initial_purpose)
-            self.purpose.setCurrentText(initial_purpose)
+            if self.purpose.findData(initial_purpose) < 0:
+                self.purpose.addItem("RTFM" if initial_purpose == "manual" else "Artwork", initial_purpose)
+            self.purpose.setCurrentIndex(self.purpose.findData(initial_purpose))
         self.purpose.setAccessibleName("Media purpose")
         layout.addWidget(self.purpose)
         self.list = QListWidget()
@@ -93,12 +97,18 @@ class MediaChoiceDialog(QDialog):
         layout.addLayout(row)
         layout.addWidget(QLabel("For manuals: select the primary document, then check optional reference cards, hints, or walkthroughs."))
         buttons = QHBoxLayout()
-        keep = QPushButton("Keep current / decide later")
+        keep = QPushButton("Close")
         keep.clicked.connect(self.reject)
-        finish = QPushButton("Save choices")
+        finish = QPushButton("Done")
         finish.clicked.connect(self.accept)
+        previous = QPushButton("Previous")
+        previous.clicked.connect(self._previous)
+        buttons.addWidget(previous)
         buttons.addWidget(keep)
         buttons.addWidget(finish)
+        next_button = QPushButton("Next")
+        next_button.clicked.connect(self._next)
+        buttons.addWidget(next_button)
         layout.addLayout(buttons)
         self.purpose.currentTextChanged.connect(self._populate)
         self.list.currentRowChanged.connect(self._selected)
@@ -106,7 +116,7 @@ class MediaChoiceDialog(QDialog):
 
     def _populate(self, *_):
         self.list.clear()
-        purpose = self.purpose.currentText()
+        purpose = self.purpose.currentData()
         choice = self.decisions.get(purpose, self.entry.media_choices.get(purpose))
         primary_row = 0
         for candidate in self.candidates:
@@ -220,7 +230,7 @@ class MediaChoiceDialog(QDialog):
 
     def _compare_saved(self):
         candidate = self._candidate()
-        purpose = self.purpose.currentText()
+        purpose = self.purpose.currentData()
         saved = self.entry.media_choices.get(purpose)
         if saved:
             current = saved[0]
@@ -280,7 +290,7 @@ class MediaChoiceDialog(QDialog):
         if primary is None:
             return []
         selected = [primary]
-        if self.purpose.currentText() == "manual":
+        if self.purpose.currentData() == "manual":
             for index in range(self.list.count()):
                 item = self.list.item(index)
                 candidate = item.data(Qt.ItemDataRole.UserRole)
@@ -290,19 +300,43 @@ class MediaChoiceDialog(QDialog):
 
     def _use(self):
         if self._candidate():
-            self.decisions[self.purpose.currentText()] = self._selection()
+            self.decisions[self.purpose.currentData()] = self._selection()
+            self._save_now()
             self._populate()
 
+    def _save_now(self):
+        self.choices_saved.emit(dict(self.decisions))
+
+
+    def _previous(self):
+        if self.purpose.currentIndex() > 0:
+            self.purpose.setCurrentIndex(self.purpose.currentIndex() - 1)
+        else:
+            self.previous_requested = True
+            self.accept()
+
+    def _next(self):
+        index = self.purpose.currentIndex()
+        for next_index in range(index + 1, self.purpose.count()):
+            purpose = self.purpose.itemData(next_index)
+            if purpose not in self.entry.media_choices:
+                self.purpose.setCurrentIndex(next_index)
+                return
+        self.next_requested = True
+        self.accept()
+
     def _none(self):
-        self.decisions[self.purpose.currentText()] = []
+        self.decisions[self.purpose.currentData()] = []
+        self._save_now()
         self._populate()
 
     def _automatic(self):
-        self.decisions[self.purpose.currentText()] = None
+        self.decisions[self.purpose.currentData()] = None
+        self._save_now()
         self._populate()
 
     def _browse(self):
-        purpose = self.purpose.currentText()
+        purpose = self.purpose.currentData()
         mask = "Documents (*.pdf *.txt *.rtfm)" if purpose == "manual" else "Images (*.png *.jpg *.jpeg *.bmp *.gif)"
         path, _ = QFileDialog.getOpenFileName(self, "Browse for media", "", mask)
         if path:
@@ -312,7 +346,7 @@ class MediaChoiceDialog(QDialog):
             self.list.setCurrentRow(self.list.count() - 1)
 
     def _rtfm_preview(self):
-        if self.purpose.currentText() != "manual" or not self._selection():
+        if self.purpose.currentData() != "manual" or not self._selection():
             return
         from ..media_review import source_from_candidate
         from ..rtfm import build_rtfm_for_group, RtfmConfig

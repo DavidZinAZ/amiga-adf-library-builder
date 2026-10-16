@@ -631,7 +631,7 @@ def test_launchbox_tab_present_and_labeled(gui_base):
         __import__("PySide6.QtWidgets", fromlist=["QTabWidget"]).QTabWidget
     )
     labels = [tabs.tabText(i) for i in range(tabs.count())]
-    assert "LaunchBox media" in labels, f"LaunchBox tab missing; tabs={labels}"
+    assert "Local Media" in labels, f"LaunchBox tab missing; tabs={labels}"
     mw.close()
 
 

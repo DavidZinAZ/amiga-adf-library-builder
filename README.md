@@ -22,13 +22,13 @@ The current GUI includes these primary workspaces:
 - **Library** — choose the library/source and working locations.
 - **Options** — control online lookup, metadata refresh, artwork/manual behavior, matching thresholds, and related run options.
 - **Providers** — configure optional provider integrations.
-- **LaunchBox media** — configure local artwork/manual folders.
+- **Local Media** — configure local artwork/manual folders.
 - **Preview & Curation** — review releases, filter state, inspect details, accept/reject, move/merge ADFs, perform lookup, and persist curation decisions.
 - **Diagnostics** — inspect runtime/provider/configuration state.
 - **Metadata Sources** — review metadata-source configuration/state.
 - **Manual Lookup** — explicitly search/browse sources and persist a selected result into the normal Preview → Export lifecycle.
 
-Build/review first, then export deliberately using the Run / Export controls and safety acknowledgement.
+Use **Build library** to prepare and review, then **Export library** to write to the displayed destination. **Check only** verifies without writing; no second acknowledgement checkbox is required. Online providers start unchecked. Local Media detects artwork category folders automatically.
 
 ## Core capabilities
 

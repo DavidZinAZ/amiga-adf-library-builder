@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.12 — 2026-10-16
+
+- Simplify export to a single Export library action, with destination and Check only retained.
+- Rename visible source branding to Local Media; remove the artwork asset-type selector and detect category folders automatically.
+- Leave online providers off on fresh installs, preserving explicitly saved provider choices.
+- Combine whole-release merging and selected-disk moves in one dialog with preview and undo.
+- Use muted green for approved entries and Artwork/RTFM labels during candidate review.
+- Save candidate selections immediately and add Next/Previous navigation through the review queue.
+- Prevent logos and other nested artwork categories from being misclassified as front-cover alternatives.
+
 ## 0.3.11 — 2026-10-15
 
 - Show live manual discovery, extraction, OCR page progress, cache reuse, and a ten-second heartbeat during long RTFM operations.

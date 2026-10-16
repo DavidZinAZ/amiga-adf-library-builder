@@ -26,6 +26,7 @@ from PySide6.QtCore import (
     Slot,
 )
 from PySide6.QtGui import (
+    QColor,
     QAction,
     QDesktopServices,
     QIcon,
@@ -327,7 +328,7 @@ class UnifiedLookupDialog(QDialog):
         ml = QVBoxLayout(mode_box)
         self._radio_online = QRadioButton("Online (Hall of Light, curated, cache)")
         self._radio_online.setChecked(True)
-        self._radio_offline = QRadioButton("Offline (local media / LaunchBox)")
+        self._radio_offline = QRadioButton("Offline (local media / Local Media)")
         self._radio_alternate = QRadioButton("Alternate search (custom query)")
         ml.addWidget(self._radio_online)
         ml.addWidget(self._radio_offline)
@@ -758,7 +759,7 @@ class UnifiedLookupDialog(QDialog):
                 for f in self._entry.adf_files:
                     p = Path(f).resolve()
                     if p.parent.name.lower() == "amiga":
-                        # Inside a LaunchBox-style tree; walk up to find canonical.db.
+                        # Inside a Local Media-style tree; walk up to find canonical.db.
                         candidate = p.parent.parent / "canonical.db"
                         if candidate.exists():
                             lib_path = candidate
@@ -1249,7 +1250,7 @@ class PreviewWidget(QWidget):
         entries.sort(key=lambda e: (e.release_key not in pending_keys, (e.title or "").lower()))
         for row, entry in enumerate(entries):
             table.insertRow(row)
-            for col, value in enumerate([entry.title or entry.release_key, str(len(entry.media_candidates)), ", ".join(entry.media_choices) or "Awaiting review"]):
+            for col, value in enumerate([entry.title or entry.release_key, str(len(entry.media_candidates)), ", ".join("RTFM" if p == "manual" else "Artwork" if p == "Box - Front" else f"Artwork ({p})" for p in entry.media_choices) or "Awaiting review"]):
                 table.setItem(row, col, QTableWidgetItem(value))
         table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         layout.addWidget(table)
@@ -1258,7 +1259,7 @@ class PreviewWidget(QWidget):
             row = table.currentRow()
             if 0 <= row < len(entries):
                 self._review_media_entry(entries[row])
-                table.item(row, 2).setText(", ".join(entries[row].media_choices) or "Awaiting review")
+                table.item(row, 2).setText(", ".join("RTFM" if p == "manual" else "Artwork" if p == "Box - Front" else f"Artwork ({p})" for p in entries[row].media_choices) or "Awaiting review")
         review.clicked.connect(open_selected)
         table.cellDoubleClicked.connect(open_selected)
         layout.addWidget(review)
@@ -1273,15 +1274,35 @@ class PreviewWidget(QWidget):
         from .media_choice_dialog import MediaChoiceDialog
         from copy import deepcopy
         preview_dir = ((self._state.current_state_path.parent if self._state.current_state_path else Path.cwd()) / "media-previews")
-        dialog = MediaChoiceDialog(entry, preview_dir, self, initial_purpose=purpose)
-        if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.decisions:
-            return
+        queue = [entry] + [e for e in self.media_review_pending() if e.release_key != entry.release_key]
+        index = 0
+        while 0 <= index < len(queue):
+            current = queue[index]
+            dialog = MediaChoiceDialog(current, preview_dir, self, initial_purpose=purpose if index == 0 else None)
+            dialog.setWindowTitle(f"Review {index + 1} of {len(queue)} — {current.title}")
+            dialog.choices_saved.connect(lambda choices, current=current: self._save_media_choices(current, choices))
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            if dialog.decisions:
+                self._save_media_choices(current, dialog.decisions)
+            if dialog.previous_requested:
+                index = max(0, index - 1)
+            elif dialog.next_requested:
+                index += 1
+            else:
+                return
+        self.status_message.emit("Reached the end of the media review list.")
+
+    def _save_media_choices(self, entry, decisions):
+        from copy import deepcopy
         before = deepcopy(entry.media_choices)
-        for purpose, candidates in dialog.decisions.items():
+        for purpose, candidates in decisions.items():
             if candidates is None:
                 entry.media_choices.pop(purpose, None)
             else:
                 entry.media_choices[purpose] = candidates
+        if entry.media_choices == before:
+            return
         action = StagedChange(action=CurationAction.METADATA_EDIT,
                               timestamp=datetime.now(timezone.utc).isoformat(),
                               details="Reviewed image/manual choices",
@@ -1392,7 +1413,8 @@ class PreviewWidget(QWidget):
             state_item.setData(Qt.ItemDataRole.UserRole + 1, entry.curation_state.value)
             # Color by state
             if entry.curation_state == StagedState.ACCEPTED:
-                state_item.setBackground(Qt.GlobalColor.green)
+                state_item.setBackground(QColor("#28543b"))
+                state_item.setForeground(QColor("#e4f1e8"))
                 state_item.setForeground(Qt.GlobalColor.white)
             elif entry.curation_state == StagedState.REJECTED:
                 state_item.setBackground(Qt.GlobalColor.red)
@@ -1646,15 +1668,9 @@ class PreviewWidget(QWidget):
 
         menu.addSeparator()
 
-        # Move ADF(s) to Release...
-        move_adfs_action = QAction("Move ADF(s) to Release…", self)
-        move_adfs_action.triggered.connect(self._on_move_adfs_to_release)
-        menu.addAction(move_adfs_action)
-
-        # Merge Release Into...
-        merge_release_action = QAction("Merge Release Into…", self)
-        merge_release_action.triggered.connect(self._on_merge_release_into)
-        menu.addAction(merge_release_action)
+        combine_action = QAction("Combine with another release…", self)
+        combine_action.triggered.connect(self._on_move_adfs_to_release)
+        menu.addAction(combine_action)
 
         menu.addSeparator()
 
@@ -2766,7 +2782,7 @@ class PreviewWidget(QWidget):
                 new_lines.append(new_note)
             entry.notes = "\n".join(new_lines)
         else:
-            # Offline: local LaunchBox media source. Never references an
+            # Offline: local Local Media source. Never references an
             # online provider. auto_match has already cached the artwork
             # (LocalMediaProvider guarantee); needs_review only flags it.
             entry.metadata_source = "local_media"
@@ -2991,7 +3007,7 @@ class PreviewWidget(QWidget):
 
         # Build destination picker dialog with a real selectable ADF list
         dialog = QDialog(self)
-        dialog.setWindowTitle("Move ADF(s) to Release")
+        dialog.setWindowTitle("Combine with another release")
         dialog.resize(520, 480)
         layout = QVBoxLayout(dialog)
 
@@ -3055,7 +3071,7 @@ class PreviewWidget(QWidget):
             search_text = search_edit.text().lower()
             for i in range(dest_combo.count()):
                 text = dest_combo.itemText(i).lower()
-                dest_combo.setItemHidden(i, search_text not in text)
+                dest_combo.view().setRowHidden(i, search_text not in text)
 
         search_edit.textChanged.connect(filter_dest)
         layout.addWidget(dest_combo)
@@ -3128,7 +3144,10 @@ class PreviewWidget(QWidget):
             QMessageBox.information(self, "Move ADF(s)", "No ADFs selected. Nothing was moved.")
             return
 
-        self._apply_move_adfs(src_entry.release_key, dst_key, selected)
+        if len(selected) == len(src_entry.adf_files):
+            self._apply_merge_release(src_entry.release_key, dst_key)
+        else:
+            self._apply_move_adfs(src_entry.release_key, dst_key, selected)
 
     def _apply_move_adfs(self, src_key: str, dst_key: str, selected: list[str]) -> None:
         """Execute an ADF move for exactly the given selected filenames.
@@ -3227,7 +3246,7 @@ class PreviewWidget(QWidget):
             search_text = search_edit.text().lower()
             for i in range(dest_combo.count()):
                 text = dest_combo.itemText(i).lower()
-                dest_combo.setItemHidden(i, search_text not in text)
+                dest_combo.view().setRowHidden(i, search_text not in text)
 
         search_edit.textChanged.connect(filter_dest)
         layout.addWidget(dest_combo)
