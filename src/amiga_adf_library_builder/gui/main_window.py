@@ -19,7 +19,7 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QEvent, QRect, QSize, Qt, QThread
+from PySide6.QtCore import QEvent, QRect, QSize, Qt, QThread, QTimer
 from PySide6.QtGui import QGuiApplication, QRegion
 from PySide6.QtWidgets import (
     QApplication,
@@ -2603,8 +2603,6 @@ class MainWindow(QMainWindow):
         plain-data payload; the curation state is applied back on the GUI
         thread in :meth:`_on_run_finalized`. No thread is ever waited on here.
         """
-        from datetime import datetime, timezone
-
         # (GH-192) Only the two heavy blocking steps run here, on a worker
         # thread: run-log serialization and the curation-state rebuild.
         if cfg is None:
@@ -2619,7 +2617,8 @@ class MainWindow(QMainWindow):
             cfg=cfg,
             run_mode=getattr(self, "_run_mode", "build"),
             identity_store=self._identity_store,
-            started_at=datetime.now(timezone.utc).isoformat(),
+            started_at=(self._live_log.started_at if self._live_log is not None
+                        else (result or {}).get("started_at")),
             # (live-run-logging) APPEND the final summary to the live log
             # file opened at Run start (never replace it). Passed explicitly
             # so a fast-follow-up run cannot steal the append.

@@ -58,6 +58,23 @@ _LANGUAGE_RANK: dict[str, int] = {
 }
 
 _VERSION_PATTERN = re.compile(r"^v?(\d+)(?:\.(\d+))*$")
+_INLINE_VERSION = re.compile(r"\s+v(\d[\d.]*[a-z]?)\s*$", re.IGNORECASE)
+
+
+def _game_identity(group):
+    """Keep release keys stable while grouping inline versions for 1G1R."""
+    title = group.title or ""
+    match = _INLINE_VERSION.search(title)
+    if match:
+        from .parser import _norm
+        return _norm(title[:match.start()])
+    return group.release_key.split("|")[0].lower()
+
+
+def _version_parts(group):
+    inline = _INLINE_VERSION.search(group.title or "")
+    version = group.version or (inline.group(1) if inline else "")
+    return tuple(int(n) for n in re.findall(r"\d+", version)) or (0,)
 
 
 @dataclass(frozen=True)
@@ -125,7 +142,8 @@ def _score_version(g: ReleaseGroup) -> float:
     "10" scores higher than "1.0": parsed numerically by segment,
     so "10" -> (10,) -> score 100, "1.0" -> (1, 0) -> score 90.
     """
-    version = (g.version or "").lower().strip()
+    inline = _INLINE_VERSION.search(g.title or "")
+    version = (g.version or (inline.group(1) if inline else "")).lower().strip()
     if not version:
         return 10.0
     m = _VERSION_PATTERN.match(version)
@@ -287,7 +305,7 @@ def select_one_per_game(
     # Group by game identity: use the release_key base (before |) as game id.
     games: dict[str, list[ReleaseGroup]] = {}
     for g in groups:
-        game_id = g.release_key.split("|")[0].lower()
+        game_id = _game_identity(g)
         games.setdefault(game_id, []).append(g)
 
     selected: list[ReleaseGroup] = []
@@ -298,8 +316,13 @@ def select_one_per_game(
     for game_id, game_groups in sorted(games.items()):
         # Apply persisted operator decision first, if still valid.
         decision_applied = False
-        if game_id in dec:
-            forced_key = dec[game_id].lower()
+        legacy_ids = {g.release_key.split("|")[0].lower() for g in game_groups}
+        forced = {dec[k].lower() for k in {game_id, *legacy_ids} if k in dec
+                  and any(g.release_key.lower() == dec[k].lower() for g in game_groups)}
+        if len(forced) > 1:
+            raise ValueError(f"Conflicting saved 1G1R choices for {game_id}; review the selection.")
+        if forced:
+            forced_key = next(iter(forced))
             for g in game_groups:
                 if g.release_key.lower() == forced_key:
                     record = SelectionRecord(
@@ -353,9 +376,12 @@ def select_one_per_game(
             candidates.append((g, score, reason, override))
 
         # Sort: override first, then by score desc, then deterministic tie-break.
+        width = max(len(_version_parts(c[0])) for c in candidates)
         def _sort_key(item: tuple) -> tuple:
             _, score, _, override = item
-            return (0 if override else 1, -score, item[0].release_key)
+            parts = _version_parts(item[0])
+            version_key = tuple(-n for n in parts + (0,) * (width - len(parts)))
+            return (0 if override else 1, -score, version_key, item[0].release_key)
 
         candidates.sort(key=_sort_key)
 

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.11 — 2026-10-15
+
+- Show live manual discovery, extraction, OCR page progress, cache reuse, and a ten-second heartbeat during long RTFM operations.
+- Restore the post-run media review popup and finish refreshing the preview and manual panels.
+- Name games and media types awaiting a choice; distinguish these from export errors and missing manuals from extraction failures.
+- Correct DAT provenance, review counts, run start timestamps, and filename suggestions.
+- Select one game across inline version variants while preserving release disk sets and saved choices.
+- Reuse cached OCR text without loading the OCR engine.
+
 ## 0.3.10 — 2026-10-15
 
 - Fix DAT byte matching using comparable hashes and only the current release's disks.

@@ -362,6 +362,8 @@ def extract_pdf_text(path, cfg: Optional[RtfmDocsConfig] = None) -> ExtractionRe
     """
     cfg = cfg or RtfmDocsConfig()
     path = Path(path)
+    from .rtfm_progress import report
+    report(f"{path.name}: checking PDF text layer")
     backend = pdf_backend()
 
     # --- Size guard (before opening). ---
@@ -514,6 +516,9 @@ def _extract_pdf_with_fitz(
     try:
         total = min(len(doc), cfg.page_cap)
         for idx in range(total):
+            if idx == 0 or idx % 10 == 0:
+                from .rtfm_progress import report
+                report(f"{path.name}: checking text page {idx + 1} of {total}")
             page = doc.load_page(idx)
             raw = page.get_text() or ""
             norm = _normalize_text(raw)

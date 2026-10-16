@@ -298,14 +298,8 @@ def ocr_pdf_document(
     started = time.monotonic()
     path = Path(path)
     name = name or path.name
-    backend = ocr_backend()
-
-    if backend != ENGINE_NAME:
-        return OcrResult(
-            text="", pages=0, cache="none",
-            elapsed=time.monotonic() - started, backend=backend,
-            reason="OCR engine unavailable",
-        )
+    from .rtfm_progress import report
+    report(f"{name}: checking cached OCR text")
 
     key: Optional[str] = None
     if use_cache and cache_dir is not None:
@@ -318,6 +312,7 @@ def ocr_pdf_document(
     if key is not None:
         cached = _read_cache(cache_dir, key)  # type: ignore[arg-type]
         if cached is not None:
+            report(f"{name}: reused cached OCR text ({_count_non_ws(cached)} characters)")
             _log(f"{name} backend={ENGINE_NAME} cache=hit "
                  f"text_chars={_count_non_ws(cached)}")
             return OcrResult(
@@ -325,7 +320,18 @@ def ocr_pdf_document(
                 elapsed=time.monotonic() - started, backend=ENGINE_NAME,
             )
 
+    report(f"{name}: loading offline OCR engine")
+    backend = ocr_backend()
+
+    if backend != ENGINE_NAME:
+        return OcrResult(
+            text="", pages=0, cache="none",
+            elapsed=time.monotonic() - started, backend=backend,
+            reason="OCR engine unavailable",
+        )
+
     _log(f"{name} backend={ENGINE_NAME} cache=miss ocr_fallback=started")
+    report(f"{name}: no cached OCR text; starting OCR")
 
     import fitz  # type: ignore  (imported lazily: core stays dependency-free)
 
@@ -347,6 +353,7 @@ def ocr_pdf_document(
             truncated = True
         matrix = fitz.Matrix(zoom, zoom)
         for idx in range(total_pages):
+            report(f"{name}: OCR page {idx + 1} of {total_pages} (elapsed {time.monotonic() - started:.0f}s)")
             if time.monotonic() - started > total_timeout:
                 truncated = True
                 break
@@ -372,6 +379,7 @@ def ocr_pdf_document(
 
     joined = "\n\n".join(page_texts).strip()
     elapsed = time.monotonic() - started
+    report(f"{name}: OCR finished, {len(page_texts)} page(s) yielded text ({elapsed:.1f}s)")
 
     if not joined:
         _log(f"{name} backend={ENGINE_NAME} result=failure "

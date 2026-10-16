@@ -548,8 +548,9 @@ def _resolve_local_media_master(group: ReleaseGroup, provider) -> tuple[Optional
         is_auto_match = (
             result.outcome == "auto_match"
             and result.found
-            and result.cached_path is not None
-            and Path(path).name == Path(result.cached_path).name
+            and category == result.category
+            and ((result.cached_path is not None and Path(path).name == Path(result.cached_path).name)
+                 or (result.manual_source is not None and Path(path) == Path(result.manual_source)))
             and method == result.match_method.value
         )
         is_manual_lock = (
@@ -557,21 +558,24 @@ def _resolve_local_media_master(group: ReleaseGroup, provider) -> tuple[Optional
             and result.found
             and result.manual_review_reason == "manually locked (protected from auto-overwrite)"
         )
-        is_needs_review = result.outcome == "needs_review" and method == result.match_method.value
+        review_paths = {c.get("path") for c in (getattr(result, "top_candidates", []) or [])}
+        is_needs_review = (result.outcome == "needs_review" and category == result.category
+                           and score >= getattr(provider.config, "review_threshold", .7)
+                           and (path in review_paths if review_paths else method == result.match_method.value))
 
         # Track counts and optional detail for debug mode
         _detail: dict = {"method": method, "score": score, "category": category}
         if is_auto_match or is_manual_lock:
             matched_count += 1
             _detail["outcome"] = "matched"
-        elif method != "none" and score >= getattr(provider.config, "confidence_threshold", lm.AUTO_ACCEPT_MIN_CONF):
-            rejected_count += 1
-            _detail["outcome"] = "rejected"
-            _detail["reason"] = "lower priority category"
         elif is_needs_review:
             needs_review_count += 1
             _detail["outcome"] = "needs_review"
             _detail["reason"] = result.manual_review_reason or "requires review"
+        elif method != "none" and score >= getattr(provider.config, "confidence_threshold", lm.AUTO_ACCEPT_MIN_CONF):
+            rejected_count += 1
+            _detail["outcome"] = "rejected"
+            _detail["reason"] = "lower priority category"
         elif method in ("fuzzy", "fuzzy_manual"):
             rejected_count += 1
             _detail["outcome"] = "rejected"
@@ -600,8 +604,13 @@ def _resolve_local_media_master(group: ReleaseGroup, provider) -> tuple[Optional
             f"evaluated: {_manual_eval}"
         )
     if _manual_eval:
+        _manual_plausible = any(c.get("category") == "Manual"
+                                and c.get("score", 0) >= getattr(provider.config, "review_threshold", .7)
+                                for c in candidates_evaluated)
         _manual_outcome = (
             "manual matched" if result.outcome == "auto_match" and result.category == "Manual"
+            else "manual awaiting review" if result.outcome == "needs_review" and result.category == "Manual"
+            else "manual candidates found (resolved separately by RTFM)" if _manual_plausible
             else "manual no-match"
         )
         _manual_detail += f"; {_manual_outcome}"
@@ -645,7 +654,7 @@ def _resolve_local_media_master(group: ReleaseGroup, provider) -> tuple[Optional
                 f"uncertain match routed to manual review: "
                 f"{result.manual_review_reason or 'low confidence'}"
             ),
-            cache="miss", ok=False,
+            cache="miss", ok=True,
         ))
         return None, events, None
     events.append(EnrichEvent(
@@ -935,6 +944,7 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                         platforms=[],
                     )
                     metadata.provider = "dat"
+                    provider = "dat"
                     metadata.confidence = 1.0
                     for _m in _sha_matches:
                         _dat_events.append(EnrichEvent(

@@ -102,11 +102,17 @@ def render_run_summary(
         lines.append("Result: cancelled by the operator.")
     elif export is not None and (export.get("errors") or export.get("conflicts")):
         n_err = len(export.get("errors") or [])
-        n_conf = len(export.get("conflicts") or [])
-        lines.append(
+        conflicts = export.get("conflicts") or []
+        pending = [c for c in conflicts if str(c).startswith("Awaiting media choice:")]
+        n_conf = len(conflicts) - len(pending)
+        if not n_err and not n_conf and pending:
+            lines.append(f"Result: export completed; {len(pending)} media choice(s) awaiting review.")
+        else:
+            lines.append(
             f"Result: finished with problems "
             f"({n_err} export error(s), {n_conf} conflict(s) -- see details below)."
-        )
+            )
+        lines.extend(str(c) for c in pending)
     else:
         lines.append("Result: success.")
 

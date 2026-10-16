@@ -290,7 +290,7 @@ def export_release(
     _pending_media = pending_purposes(_media_entry) if _media_entry is not None else set()
     _manual_choice = _media_entry.media_choices.get("manual") if _media_entry is not None else None
     if "manual" in _pending_media:
-        conflicts.append("Multiple matching manuals await an operator choice.")
+        conflicts.append(f"Awaiting media choice: {group.title or basename} — manual")
     elif _manual_choice is not None:
         if _manual_choice:
             from .media_review import render_manual_choices
@@ -354,7 +354,8 @@ def export_release(
         _image_choices = ({k: v for k, v in _media_entry.media_choices.items() if k != "manual"}
                           if _media_entry is not None else {})
         if _pending_media - {"manual"}:
-            conflicts.append("Multiple matching images await an operator choice.")
+            conflicts.append(f"Awaiting media choice: {group.title or basename} — "
+                             + ", ".join(sorted(_pending_media - {"manual"})))
         elif _image_choices:
             from .media_review import selected_image
             _chosen_image = selected_image(_image_choices)

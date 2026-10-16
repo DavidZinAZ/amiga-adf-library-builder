@@ -82,6 +82,7 @@ from .utils import write_json_atomic, sha256_bytes
 # Imported lazily inside the load path so the core library stays importable
 # without pypdf/pymupdf/pillow/pytesseract installed.
 from .rtfm_docs import RtfmDocsConfig  # noqa: F401  (re-exported for tests)
+from .rtfm_progress import report, progress_scope
 
 # --- Constants ---------------------------------------------------------------
 
@@ -471,6 +472,7 @@ def _decode_source(path: Path) -> str:
     The caller has already bounded the size. We never fabricate content or
     silently truncate.
     """
+    report(f"{path.name}: reading text")
     data = path.read_bytes()
     text: str
     try:
@@ -1209,6 +1211,7 @@ def _compose_sections(
             continue
 
         try:
+            report(f"{src.path.name}: extracting document text")
             if suf in PDF_SUFFIXES:
                 res = extract_pdf_text(src.path, _docs_cfg)
                 kind_prefix = "pdf"
@@ -1759,6 +1762,7 @@ def build_rtfm_for_group(
         )
     from .media_review import manual_candidates
     result.media_candidates = manual_candidates(scored)
+    report(f"{getattr(group, 'title', '') or basename}: {len(result.media_candidates)} matching manual candidate(s)")
     if not explicit:
         # Alternatives of the same document type require an operator choice.
         # Separate hints/reference cards remain independent optional documents.
@@ -1780,14 +1784,16 @@ def build_rtfm_for_group(
         # Nothing found. Route for review (operator may add a manual) rather
         # than emitting an empty file. Record the best non-matching candidate
         # stems (if any) for auditability without leaking host paths.
-        best_stems = sorted(
-            (s.stem for s, sc in scored),
-            key=lambda x: x.lower(),
-        )[:5]
+        from difflib import SequenceMatcher
+        query = _normalize_title_tokens(getattr(group, "title", "") or basename)
+        suggestions = [(SequenceMatcher(None, query, _normalize_title_tokens(s.stem)).ratio(), s.stem)
+                       for s, sc in scored]
+        best_stems = [stem for similarity, stem in sorted(suggestions, key=lambda x: (-x[0], x[1].lower()))
+                      if similarity >= 0.5][:5]
         result.routed_for_review = True
         result.review_reason = (
             "no matching manual source discovered for this title"
-            + (f"; nearest stems: {best_stems}" if best_stems else "")
+            + (f"; closest filename suggestions (unverified): {best_stems}" if best_stems else "")
         )
         result.notes.append(result.review_reason)
         result.sources = [
@@ -1965,7 +1971,7 @@ def build_rtfm_for_group(
     result.provenance_path = prov_path
     result.notes.append(f"rtfm written: {rtfm_path}")
     return result
-def build_rtfm_all(
+def _build_rtfm_all(
     groups: list,
     *,
     cfg: RtfmConfig,
@@ -1991,7 +1997,9 @@ def build_rtfm_all(
     names = export_basenames(groups, library_root)
     rtfm_dir = Path(rtfm_dir)
     # Discover once, then match per group (one shared .rtfm per group key).
+    report("discovering manual sources")
     sources = discover_sources(cfg)
+    report(f"indexed {len(sources)} local manual source(s)")
     if extra_sources:
         # Append (after local sources) so local sources keep their existing
         # ordering and any near-tie/precedence decisions stay deterministic.
@@ -2004,6 +2012,9 @@ def build_rtfm_all(
             # Multi-disk set already emitted its shared .rtfm; skip the duplicate.
             continue
         seen_keys.add(key)
+        import time
+        started = time.monotonic()
+        report(f"manual {len(seen_keys)} of {len(groups)} — {getattr(g, 'title', '') or key}: matching sources")
         from .media_review import saved_entry, source_from_candidate, manual_candidates
         saved = saved_entry(library_root, key)
         chosen = saved.media_choices.get("manual") if saved is not None else None
@@ -2012,6 +2023,7 @@ def build_rtfm_all(
                                       notes=["Manual omitted by saved operator choice."],
                                       media_candidates=manual_candidates(
                                           [(s, score_source_match(s, g)) for s in sources])))
+            report(f"{g.title}: omitted by saved choice")
             continue
         try:
             selected_sources = ([source_from_candidate(item) for item in chosen]
@@ -2039,4 +2051,16 @@ def build_rtfm_all(
                 template_used=cfg.template,
             )
             results.append(res)
+        last = results[-1]
+        outcome = "built" if last.written else (last.review_reason or "no output")
+        report(f"{getattr(g, 'title', '') or key}: {outcome} ({time.monotonic() - started:.1f}s)")
     return results
+
+
+def build_rtfm_all(groups, *, cfg, rtfm_dir, extra_sources=None,
+                   explicit_sources=None, library_root=None, activity=None):
+    """Build manuals with live per-release, per-source and OCR progress."""
+    with progress_scope(activity):
+        return _build_rtfm_all(groups, cfg=cfg, rtfm_dir=rtfm_dir,
+                               extra_sources=extra_sources, explicit_sources=explicit_sources,
+                               library_root=library_root)

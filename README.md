@@ -38,6 +38,7 @@ Build/review first, then export deliberately using the Run / Export controls and
 - Online and offline/local metadata lookup.
 - Artwork discovery, preservation, processing, and provenance.
 - RTFM/manual discovery and association.
+- During manual processing, the activity log shows the current game, source file, OCR page, and cache reuse. Long operations emit a heartbeat every ten seconds. Missing manuals and media awaiting your choice are reported separately from extraction or export errors.
 - [Preview and save image/manual choices](docs/MEDIA-CHOICES.md), with duplicate-file consolidation and a review queue.
 - Persistent curation memory and review state.
 - Multi-select, move, merge, accept/reject, undo/redo-oriented curation workflows.

@@ -57,7 +57,7 @@ def test_manual_root_file_reaches_rtfm_sidecar(tmp_path: Path) -> None:
         "\n"
         "[[local_media.manual_roots]]\n"
         'path = "{mr}"\n'
-        "\n".format(lr=library_root.resolve(), mr=manuals_root.resolve())
+        "\n".format(lr=library_root.resolve().as_posix(), mr=manuals_root.resolve().as_posix())
     )
 
     result = _run_build(config_toml)
@@ -109,7 +109,7 @@ def test_exported_staging_folder_carries_rtfm(tmp_path: Path) -> None:
         "\n"
         "[[local_media.manual_roots]]\n"
         'path = "{mr}"\n'
-        "\n".format(lr=library_root.resolve(), mr=manuals_root.resolve())
+        "\n".format(lr=library_root.resolve().as_posix(), mr=manuals_root.resolve().as_posix())
     )
 
     buf = io.StringIO()

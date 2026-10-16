@@ -159,6 +159,7 @@ class LiveRunLog:
                     "Amiga ADF Library Builder - live run log (GUI)",
                     "=" * 72,
                     f"run_id         : {run_id}",
+                    f"started_at     : {log.started_at}",
                     *header_lines,
                     "",
                     "=== RUN START ===",

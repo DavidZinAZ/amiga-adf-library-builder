@@ -330,6 +330,7 @@ def run_pipeline(
         except Exception:  # logging must never break the pipeline
             pass
     library_root = cfg.library_root
+    _started_at = datetime.now(timezone.utc).isoformat()
     # Saved media choices are curation authority on subsequent runs too.
     if not library_state_path:
         from .media_review import latest_state_path
@@ -672,6 +673,7 @@ def run_pipeline(
                     extra_sources=_fallback_sources or None,
                     explicit_sources=_explicit_manual_sources,
                     library_root=library_root,
+                    activity=_act,
                 )
                 _rtfm_built = [
                     r for r in rtfm_results
@@ -688,7 +690,13 @@ def run_pipeline(
 
                 _act(f"RTFM phase: built {len(_rtfm_built)} sidecar(s)")
                 if _rtfm_no_output:
-                    _act(f"RTFM phase: {len(_rtfm_no_output)} failed/no-output")
+                    from collections import Counter
+                    reasons = Counter(
+                        "no matching manual" if "no matching manual source" in (r.review_reason or "")
+                        else "extraction/build failed" if any(x in (r.review_reason or "") for x in ("failed to decode", "build error"))
+                        else "omitted by choice" if any("omitted by saved" in n for n in r.notes)
+                        else "awaiting review" for r in _rtfm_no_output)
+                    _act("RTFM phase: " + "; ".join(f"{count} {reason}" for reason, count in sorted(reasons.items())))
                     _title_by_key = {g.release_key: g.title for g in groups}
                     for _r in _rtfm_no_output:
                         _reason = _no_output_reason(_r)
@@ -959,7 +967,7 @@ def run_pipeline(
         )
         _act(
             f"Export finished: {export_result.releases_exported} release(s), "
-            f"{export_result.folders_written} folder(s) written to "
+            f"{len(export_result.folders_written)} folder(s) written to "
             f"{redact(str(export_result.staging_root))}."
         )
 
@@ -1206,6 +1214,7 @@ def run_pipeline(
     _resolved_cache_path = _portable_cache_path(library_root) if library_root else cfg.cache_dir
 
     result: dict = {
+        "started_at": _started_at,
         "run_id": run_id,
         "online": online,
         # (GH-24) The operator's per-type selection is recorded for observability.
