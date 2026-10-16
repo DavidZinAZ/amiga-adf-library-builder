@@ -1,66 +1,44 @@
-# Reviewing images and manuals
+# Reviewing Artwork and RTFM
 
-For this source checkout, **Launch-Updated-GUI.cmd** opens the updated GUI using
-the project's installed `.venv` environment. Downloaded release executables
-remain separate from these local source changes.
+**Applies to v0.3.13. Reviewed 2026-10-16.**
 
-After a run, the application offers **Review choices** when a release has
-multiple different matching images or manuals. **Decide later** leaves them in
-the review queue. You can open **Preview & Curation → Review media choices…**
-at any time to inspect candidates or change a saved decision.
+## Open and inspect choices
 
-Choose a release, then a purpose such as **Box - Front**, **Screenshot - Game
-Title**, or **manual**. Identical files are shown once, with the number of
-copies and their locations retained. Covers and screenshots are reviewed
-separately.
+After a build, **Review choices** opens releases with multiple distinct matching images or manuals. **Decide later** leaves them for later review. You can reopen **Preview & Curation → Review media choices…** to inspect candidates or change saved choices.
 
-- Select a candidate to preview it. Images show dimensions and can be enlarged.
-  PDFs support page navigation and enlarged page previews. Text documents show
-  a readable excerpt. **Compare with saved choice…** opens a side-by-side view.
-- **Use this** stages the selected candidate for that purpose.
-- For manuals, select the primary document and check any optional additional
-  documents, such as reference cards or hints. These are combined only after
-  your explicit selection.
-- **Preview generated RTFM** shows the converted output for the currently
-  selected primary document and checked extras.
-- **None of these** records an explicit omission. Later scans respect it.
-- **Browse…** adds a file of your choice.
-- **Use automatic matching** removes the saved override for that purpose.
-- **Save choices** persists all staged decisions in the existing library
-  curation state. **Keep current / decide later** discards unsaved changes.
+Choose Artwork or RTFM. Other artwork categories are labelled separately where needed. Identical files are consolidated; their locations remain available. Preview images, dimensions, PDF pages, or text. **Enlarge image / PDF page…** and **Compare with saved choice…** help inspect details.
 
-Saved choices survive later runs and remain available for review. Undo and redo
-also save changes to media choices. Source disks and media are never modified;
-RTFM previews and converted export files are generated in managed working
-directories. A selected PDF is converted to RTFM text before export.
+## Save and navigate
 
-Gotek exports one image per release. When several image purposes have saved
-selections, the default priority is title screen, front cover, then gameplay
-screenshot, followed by other purposes. Unresolved image alternatives are held
-for review. Manuals awaiting a choice are also withheld from export.
+- **Use this** saves immediately. For RTFM, select the primary document and check optional reference cards, hints, or walkthroughs. Extras are combined only after explicit selection.
+- **Preview generated RTFM** shows converted text for the current manual selection.
+- **Browse…** adds a local file of your choice.
+- In shared mode, **None of these** records an explicit omission. **Use automatic matching** removes the override.
+- In per-disk mode, removing a custom choice returns the disk to shared inheritance.
+- **Next / Previous** navigate purposes, disks, and releases. **Done / Close** finish review; already-saved choices remain saved.
 
-## Matching corrections
+Undo/redo also persists media-choice changes. Sources are never rewritten. A selected PDF is converted to text, not copied as PDF bytes into an RTFM file.
 
-DAT matching computes comparable SHA-1, MD5 and CRC hashes from each release's
-own disk files, checks file size, and verifies that the bytes still match the
-scan's SHA-256 identity. It never compares different hash algorithms or borrows
-another release's disks. Normalized title lookup applies its limit after
-identity matching, avoiding missing candidates because of punctuation or
-spacing differences.
+## Shared and per-disk media
 
-Manual matching preserves numbered part identities. A high-scoring manual
-does not cause weaker rival documents to be included in its output. Generic,
-versionless artwork can be reviewed for versioned releases; artwork explicitly
-marked for another version stays distinct.
+**Same media for the whole release** is the default for artwork and RTFM independently. **Different media per disk** adds a disk selector. The saved-choice panel identifies a custom or inherited choice for that disk.
 
+Disks without a custom choice inherit shared release media. Overrides persist across builds and follow disks moved or merged into another release. Switching back to shared mode retains overrides for later reuse but exports only shared companions.
 
-Review includes **Move disks to another release…** (select disks and destination,
-preview, then combine) and **Assign media to another release…**. These change
-curation associations, preserve original files, and support undo/redo.
+Shared output uses `<release>.jpg` / `<release>.rtfm`. Overrides use the exact exported disk stem, such as `<release>-2.jpg` / `<release>-2.rtfm`. Re-exporting into the same staging run removes obsolete managed companions. Device game-list cover caching remains release-level; see [Export Format](gotek-export-format.md).
 
-Use **Same media for the whole release** for shared artwork or RTFM. Select
-**Different media per disk** to choose a disk and save an override. Disks with no
-custom choice inherit the shared choice; Next/Previous step between disks.
-Disk-specific artwork and RTFM choices persist across builds and move with their
-disks. Returning to shared mode retains the saved overrides for later reuse but
-exports only the shared companions.
+When several artwork purposes have saved choices, priority is title screen, front cover, gameplay screenshot, then other purposes. Unresolved alternatives are withheld and reported as awaiting review. Complete per-disk choices can resolve the purpose without a shared selection.
+
+## Correct the destination release
+
+**Move disks to another release…** selects disks and a destination, previews the result, and applies the same staged move/combine workflow available in curation.
+
+**Assign media to another release…** associates the selected candidate with a different release and removes that selected source association. The original media file stays in place. Both actions support undo/redo.
+
+## Matching behaviour
+
+DAT matching uses compatible SHA-1/MD5/CRC hashes, file size, and each release's own disks, checking against the scan's SHA-256 identity. Normalized title matches are candidates, not equivalent to byte identity.
+
+Manual matching preserves numbered parts and does not mix weaker rival documents into an accepted manual. Generic versionless artwork may match versioned releases; artwork explicitly marked for another version stays distinct. Recognised category folders prevent logos and unrelated image types from competing as front covers.
+
+For source development, [the developer guide](DEVELOPER-GUIDE.md) describes the launcher in `tools/`; release users should use the published Windows build.

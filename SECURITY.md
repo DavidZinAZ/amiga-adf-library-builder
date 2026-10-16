@@ -4,10 +4,10 @@
 
 | Version | Supported |
 | ------- | --------- |
-| 0.2.x   | ✅ Yes     |
-| < 0.2   | ❌ No      |
+| Latest 0.3.x release | ✅ Yes |
+| Older releases | ❌ No |
 
-We support the latest released `0.2.x` line. Older releases are out of support
+We support the latest released `0.3.x` version. Older releases are out of support
 and will not receive security fixes.
 
 ## Reporting a vulnerability

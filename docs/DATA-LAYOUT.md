@@ -1,7 +1,7 @@
 # Data and State Layout
 
-**Current baseline:** Amiga ADF Library Builder v0.2.26<br>
-**Reviewed:** 2026-09-22
+**Current baseline:** Amiga ADF Library Builder v0.3.13<br>
+**Reviewed:** 2026-10-16
 
 The repository contains code. User library data and portable GUI application
 state live outside Git-tracked source.
@@ -19,7 +19,10 @@ A typical library layout is:
 ├── assets/
 │   ├── artwork-original/      retained source/master artwork
 │   ├── artwork-processed/     processed export artwork
-│   └── nfo/                   generated NFO/provenance files
+│   ├── nfo/                   generated NFO/provenance files
+│   └── rtfm/                  generated manual/provenance files
+├── data/
+│   └── metadata_sources.db    authoritative DAT source index
 ├── curation/                  canonical/library-state data when configured there
 ├── unknown/                   unresolved/quarantined material
 ├── work/
@@ -31,7 +34,7 @@ A typical library layout is:
 └── logs/                      application/pipeline logs
 ```
 
-Exact locations are resolved through `PathConfig` and can be overridden.
+The GUI creates `Library-Root` under its application base automatically. Original and export folders are selectable. CLI locations are resolved through `PathConfig` and can be overridden.
 
 ## Canonical and indexed metadata databases
 
@@ -66,12 +69,9 @@ The application base must not be confused with the Library Root.
 
 ## Export
 
-Export uses run-owned staging before publication/final output. The GUI clearly
-distinguishes:
+Build prepares managed working data. Export writes a run-owned staging tree via the **Build & Export** tab. The GUI has no Check only or second acknowledgement checkbox; CLI `--verify-only` and acknowledgement flags remain separate supported controls.
 
-- Build — scan/organize/prepare;
-- Check only — validate without final writes;
-- Export — writes final files after the explicit safety acknowledgement.
+Curation files under `curation/` preserve shared `media_choices`, `disk_media_choices` keyed by original disk filename, `media_scopes`, and action history. Keep these with the rest of Library-Root when backing up or upgrading.
 
 ## Preservation rule
 

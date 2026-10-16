@@ -1,6 +1,8 @@
 # Command Reference
 
-> **Reference status:** Current CLI reference for v0.2.26. Reviewed as part of the 2026-09-22 documentation cleanup.
+> **Reference status:** Current CLI reference for v0.3.13. Reviewed as part of the 2026-10-16 documentation cleanup.
+
+The GUI uses a single Export action and has no Check only control. CLI flags below remain supported.
 
 All normal commands (`scan`, `build`, `export`, `verify-export-gate`,
 `list-quarantine`, `approve`, `list-approvals`, `inspect-approval`, `revoke`)
@@ -93,6 +95,10 @@ Important options:
 - `--verify-only`: inspect conflicts and report intended changes without writing.
 - `--run-id`: name the staging directory; use only letters, digits, dots, underscores, and hyphens.
 - `--json`: emit machine-readable results.
+- `--library-state-path PATH`: load GUI curation state for CLI export convergence.
+- `--1g1r` / `--no-1g1r`: select one release per game (default) or export all.
+- `--operator-decisions PATH`: apply persisted release-selection decisions.
+- `--selection-manifest PATH`: write selection evidence to a chosen JSON file.
 
 ## `verify-export-gate`
 
@@ -102,7 +108,7 @@ Reports whether export is permitted without writing anything.
 amiga-adf-library-builder verify-export-gate --export-gate-acknowledged
 ```
 
-## manual-approval feature manual-approval commands
+## Manual approval commands
 
 These take the same config flags as above. They never write to `original/` and
 never write to the SD card.
@@ -113,4 +119,4 @@ never write to the SD card.
 - `inspect-approval --approval-id ID` — print one record in full.
 - `revoke --approval-id ID --reason TEXT` — revoke (history retained, never deleted).
 
-See the approval command sections above for the operator workflow.
+Use `amiga-adf-library-builder <command> --help` for the full arguments of each approval command. Approval records are hash-bound operator decisions, separate from GUI media choices.

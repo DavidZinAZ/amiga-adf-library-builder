@@ -1,7 +1,7 @@
 # Building the Windows GUI
 
-**Current baseline:** Amiga ADF Library Builder v0.2.26<br>
-**Reviewed:** 2026-09-22
+**Current baseline:** Amiga ADF Library Builder v0.3.13<br>
+**Reviewed:** 2026-10-16
 
 This is the current packaging reference for the Windows GUI.
 
@@ -115,14 +115,15 @@ from source. At minimum verify:
 - executable launches;
 - displayed/application version is correct;
 - paths with spaces work;
-- Library Root selection works;
+- Library-Root is created beside the app and selected original/export paths work;
 - Preview & Curation populates;
 - provider/settings state loads;
 - artwork processing works;
 - move/merge and lookup workflows work;
 - Manual Lookup -> Preview -> Export state survives;
-- check-only validation works;
+- Build & Export is a tab with no Check only/acknowledgement controls;
+- shared/per-disk media and review reassignment work;
 - final export works;
 - original ADF/DSK files remain unchanged.
 
-See [DEVELOPER-GUIDE.md](DEVELOPER-GUIDE.md) for broader release engineering.
+Use the maintained [Release Checklist](RELEASE-CHECKLIST.md) and [Developer Guide](DEVELOPER-GUIDE.md). Documentation-only changes do not need a new application tag; main pushes still trigger the current build workflow.

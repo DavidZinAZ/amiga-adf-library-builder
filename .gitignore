@@ -69,3 +69,9 @@ unknown/
 review/
 rejected/
 reports/
+
+# Portable GUI state created by source launches
+/Library-Root/
+/data/
+/config/gui-settings.toml
+*.vault

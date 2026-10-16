@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased — repository maintenance
+
+- Refresh current guides for v0.3.13 and consolidate stale/repetitive GUI, installation, provider, and developer instructions.
+- Archive ticket-specific root QA/task records and the older documentation audit; relocate the source launcher to tools.
+- Add a maintained release checklist, local Markdown-link checker, and documentation CI.
+- Update bug-report prompts, supported-release wording, example provider opt-in settings, and portable-runtime ignore rules.
+- Keep application version and existing release tags unchanged.
+
 ## 0.3.13 — 2026-10-16
 
 - Move run/export settings into the Build & Export tab and remove Check only from the GUI.

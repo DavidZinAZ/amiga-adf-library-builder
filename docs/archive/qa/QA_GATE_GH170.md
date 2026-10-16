@@ -1,3 +1,5 @@
+> Historical record, archived 2026-10-16. Labels, task status, and instructions below describe their original context. See [current documentation](../../README.md) and the [current release checklist](../../RELEASE-CHECKLIST.md).
+
 # GH-170 Mandatory Packaged-Windows QA Gate (Columbo)
 
 ## Overview

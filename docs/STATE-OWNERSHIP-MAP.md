@@ -1,7 +1,7 @@
 # State Ownership Map
 
-**Current baseline:** Amiga ADF Library Builder v0.2.26<br>
-**Reviewed:** 2026-09-22
+**Current baseline:** Amiga ADF Library Builder v0.3.13<br>
+**Reviewed:** 2026-10-16
 
 This document is the current high-level ownership map. The detailed 2026-09-14
 architecture-review snapshot is preserved at
@@ -20,7 +20,8 @@ for every fact.
 | online metadata cache | metadata cache | provider result reuse; refreshable |
 | curated metadata | metadata-curated | operator/project curated values; stronger than normal refresh |
 | manual approval records | manual approvals store | explicit operator approval state |
-| local-media review decisions | local-media review state | persistent ambiguous media/manual decisions |
+| shared/per-disk media choices and scope | staged library curation state | saved choices, omissions, overrides, and reassignment history |
+| provider ambiguous-match queue | local-media review state | provider-level diagnostic/review routing |
 | selection / 1G1R decisions | selection/operator-decision state | deterministic export selection |
 | GUI preferences | `gui-settings.toml` | non-sensitive settings only |
 | GUI credentials | `secrets.vault` / secret backend | never ordinary settings/logs |

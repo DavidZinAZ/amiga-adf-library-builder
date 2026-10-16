@@ -1,3 +1,5 @@
+> Historical record, archived 2026-10-16. Labels, task status, and instructions below describe their original context. See [current documentation](../../README.md) and the [current release checklist](../../RELEASE-CHECKLIST.md).
+
 # Documentation Audit — 2026-09-22
 
 **Baseline:** Amiga ADF Library Builder v0.2.26

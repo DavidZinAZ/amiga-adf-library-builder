@@ -1,6 +1,6 @@
 # Amiga ADF Library Builder Documentation
 
-**Current documentation baseline: v0.2.26 — 2026-09-22**
+**Current documentation baseline: v0.3.13 — 2026-10-16**
 
 Everything in the main list below is intended to describe the current
 application. Ticket-era, migration, research, and superseded implementation
@@ -8,6 +8,7 @@ documents have been moved under [`archive/`](archive/).
 
 ## User documentation
 
+- [Media Choices](MEDIA-CHOICES.md) — saved previews, shared/per-disk media, move/reassign, and undo.
 - [Quick Start](QUICKSTART.md) — fastest Windows-first path to a first build.
 - [Full User Guide](USER-GUIDE.md) — complete end-user workflow.
 - [Installation Guide](INSTALLATION.md) — Windows installation, upgrades, source/developer install.
@@ -22,6 +23,7 @@ documents have been moved under [`archive/`](archive/).
 - [State Ownership Map](STATE-OWNERSHIP-MAP.md) — current durable-state ownership model.
 - [Data and State Layout](DATA-LAYOUT.md) — current library/application state layout.
 - [Command Reference](COMMANDS.md) — CLI reference.
+- [Release Checklist](RELEASE-CHECKLIST.md) — current packaged qualification and publication checks.
 - [Windows Build Reference](BUILD-Windows.md) — current Windows packaging/qualification path.
 - [Gotek Export Format](gotek-export-format.md) — stable Gotek-facing layout reference.
 - [Gotek NFO Provenance](gotek-nfo-provenance.md) — stable NFO/provenance reference.
@@ -29,9 +31,12 @@ documents have been moved under [`archive/`](archive/).
 
 ## Documentation maintenance
 
-- [Documentation Audit — 2026-09-22](DOCUMENTATION-AUDIT-2026-09-22.md)
+- [Repository cleanup — 2026-10-16](archive/documentation/REPOSITORY-CLEANUP-2026-10-16.md)
+- [Historical documentation audit — 2026-09-22](archive/documentation/DOCUMENTATION-AUDIT-2026-09-22.md)
 - [Historical / research archive](archive/)
 
 When current behavior changes, update the corresponding current guide and
 `CHANGELOG.md` with the code change. Historical ticket documents should remain
 in the archive rather than being presented as current product documentation.
+
+Check local links with `python tools/check_docs.py`. Project policies stay at the repository root; historical tasks and QA records belong in the archive.

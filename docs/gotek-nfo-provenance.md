@@ -1,6 +1,6 @@
 # Gotek-facing NFO format and durable provenance (Gotek NFO contract)
 
-> **Reference status:** Current stable NFO/provenance reference for the v0.2.26 documentation set.
+> **Reference status:** Current stable NFO/provenance reference for the v0.3.13 documentation set.
 
 This document defines the contract for the Gotek Touchscreen Interface display
 `.nfo` files and where the detailed source / metadata / manual-approval

@@ -13,7 +13,7 @@ The project is designed as a companion utility for the [Gotek Touchscreen Interf
 - **`amiga-adf-gui-portable.zip`** — recommended portable folder build.
 - **`amiga-adf-gui.exe`** — single-file portable executable.
 
-Download them from the project's **latest GitHub release**. Each release identifies the version and source commit used to build the artifacts.
+Download them from the project's [latest GitHub release](https://github.com/DavidZinAZ/amiga-adf-library-builder/releases/latest). Each release identifies the version and source commit used to build the artifacts.
 
 ## Windows workflow at a glance
 
@@ -29,7 +29,7 @@ The current GUI includes these primary workspaces:
 - **Metadata Sources** — review metadata-source configuration/state.
 - **Manual Lookup** — explicitly search/browse sources and persist a selected result into the normal Preview → Export lifecycle.
 
-Use **Build library** to prepare and review, then **Export library** to write to the displayed destination. The GUI has no Check only or second acknowledgement checkbox. Online providers start unchecked. Local Media detects artwork category folders automatically.
+Use **Build library** to prepare and review, then **Export library** to write to the displayed destination. Review supports shared or per-disk artwork/RTFM, disk moves, media reassignment, and undo. Online providers start unchecked. Local Media detects artwork category folders automatically.
 
 ## Core capabilities
 
@@ -74,6 +74,8 @@ A configured library root owns the application's working data. Typical locations
 <library_root>/
 ├── original/                 immutable ADF/DSK source collection
 ├── catalog/                  provider/cache/curated metadata state
+├── data/                     indexed DAT sources
+├── curation/                 canonical identity and saved review decisions
 ├── assets/                   artwork and generated metadata/manual assets
 ├── unknown/                  unresolved/quarantined material
 ├── work/staging/             reviewable staging runs
@@ -94,12 +96,16 @@ Current reference material includes:
 - [Quick Start](docs/QUICKSTART.md)
 - [Command Reference](docs/COMMANDS.md)
 - [Data Layout](docs/DATA-LAYOUT.md)
-- [Migration Guide](docs/archive/migrations/portable-path-migration.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Windows Build Reference](docs/BUILD-Windows.md)
 - [Architecture](docs/ARCHITECTURE.md)
+- [User Guide](docs/USER-GUIDE.md)
+- [GUI Walkthrough](docs/WINDOWS-GUI-WALKTHROUGH.md)
+- [Media Choices](docs/MEDIA-CHOICES.md)
+- [Developer Guide](docs/DEVELOPER-GUIDE.md)
+- [Release Checklist](docs/RELEASE-CHECKLIST.md)
 
-The documentation refresh is adding a full User Guide, Installation Guide, Windows GUI Walkthrough, Metadata/Provider Guide, expanded Troubleshooting Guide, and consolidated Developer Guide.
+Historical task, QA, audit, and research records live in [docs/archive](docs/archive/README.md). Source launch/build/QA utilities live in `tools/`.
 
 ## Project philosophy
 
@@ -111,10 +117,6 @@ The application favors reviewable, explainable behavior over aggressive guessing
 - provider/cache/provenance state is kept separate from source disks;
 - final export is deliberate and gated;
 - curation decisions are intended to persist across reruns instead of forcing the operator to repeat the same work.
-
-## Credits, development history, security, and contribution
-
-The existing project acknowledgements, AI-assisted-development disclosure, security policy, contribution policy, license, and detailed command examples from the current README should be retained below the revised product/usage sections when this replacement is applied. This file intentionally replaces only the stale product-facing upper portion rather than deleting project-history content.
 
 ## Credits and acknowledgements
 

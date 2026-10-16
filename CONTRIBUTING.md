@@ -29,13 +29,15 @@ From a clone of this repository:
 python3 -m venv .venv
 . .venv/bin/activate
 
-# 2. Install the project with dev + artwork extras (editable).
+# 2. Install the GUI, PDF/OCR, artwork, and test dependencies (editable).
 python -m pip install -U pip
-python -m pip install -e '.[artwork,dev]'
+python -m pip install -e '.[gui,dev]'
 ```
 
 `artwork` pulls in Pillow (used only for artwork resize/processing). `dev`
 pulls in pytest. The build backend is setuptools (declared in `pyproject.toml`).
+
+For Windows commands and current workflow contracts see the [Developer Guide](docs/DEVELOPER-GUIDE.md). Keep historical task/QA records under `docs/archive/`; current release qualification belongs in the [Release Checklist](docs/RELEASE-CHECKLIST.md). Run `python tools/check_docs.py` after documentation changes.
 
 ## Running the tests
 

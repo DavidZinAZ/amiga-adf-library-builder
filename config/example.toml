@@ -19,19 +19,15 @@ library_root = "/path/to/my-amiga-library"
 # logs_dir       = "/path/to/my-amiga-library/logs"
 # cache_dir      = "/path/to/cache/amiga-adf-library-builder"
 
-# --- local-media provider local-media artwork provider (base app) ------------------------
-# Offline, read-only, no signup/key/network. Point at one or more LaunchBox
-# (or LaunchBox-compatible) image libraries. The builder searches the configured
-# platform folders, copies the chosen source into its OWN artwork cache, and
-# records provenance. It NEVER modifies anything under the source roots.
-#
-# Platform mapping: platform_names maps to the LaunchBox Images/<Platform>
-# folders. preferred_image_types sets the exact priority order searched
-# (higher-priority confident matches win): Screenshot - Game Title, then
-# Box - Front, then Screenshot - Gameplay.
+# --- Local Media: offline, read-only artwork/manual sources -----------------
+# Legacy roots use Images/<Platform>/<Category>. For a selected artwork folder
+# use media_roots instead; recognised category subfolders are detected.
+# See docs/METADATA-PROVIDERS.md. Source libraries are never modified.
 [local_media]
 enabled = false
-roots = ["/path/to/LaunchBox"]
+roots = []
+media_roots = [{ path = "/path/to/media/Images/Commodore Amiga", asset_type = "Box - Front" }]
+manual_roots = ["/path/to/media/Manuals/Commodore Amiga"]
 platform_names = ["Commodore Amiga", "Amiga"]
 preferred_image_types = ["Screenshot - Game Title", "Box - Front", "Screenshot - Gameplay"]
 recursive = true
@@ -39,7 +35,7 @@ recursive = true
 
 # --- RTFM v2 manual sidecar (deterministic, local-only, NO-AI) ----------------
 # Offline, read-only, no signup/key/network. Point at one or more local manual
-# libraries (Manuals, Instructions, Cheats). The builder discovers plain-text
+# libraries (Manuals, Instructions, Cheats). The builder discovers TXT/PDF
 # sources, composes them into a GTi-compatible .rtfm, and writes a provenance
 # sidecar. It NEVER modifies anything under the source roots.
 #
@@ -67,35 +63,7 @@ cheats = ["/path/to/cheats"]
 # DEFERRED in M1. Parsed and ignored. Online must stay disabled.
 enabled = false
 
-# --- Issue #14 LaunchBox Games Database online provider (BLOCKED) --------------
-# FEASIBILITY: INFEASIBLE / BLOCKED — see docs/issue14-launchbox-gamesdb-feasibility.md
-#
-# No official public API exists (confirmed by LaunchBox feedback portal: the
-# "Public API Access" request is OPEN, not implemented). The ONLY officially
-# supported third-party access path is the LOCAL LaunchBox Desktop plugin model
-# (parse the user's local LaunchBox.Metadata.db / Unbroken.LaunchBox.Plugins.Data
-# namespace) — an in-app plugin, NOT a standalone online provider. That does not
-# satisfy ISS-14's standalone external provider requirement.
-# The remaining accessible artifact is Metadata.zip (daily XML dump), which
-# carries no explicit license for third-party automated access, caching, or
-# image redistribution. Image URLs can be constructed from the XML, but no terms
-# authorize external automated retrieval or redistribution.
-#
-# This placeholder remains DISABLED by default and is NON-FUNCTIONAL. It mirrors
-# the proposed issue #14 config shape for future reference only. Implementation is
-# gated behind a compliant access path (official API + explicit integration terms).
-#
-#[launchbox_gamesdb]
-#enabled = false
-#metadata_enabled = true
-#artwork_enabled = true
-#preferred_regions = ["us", "eu", "wor"]
-#cache_enabled = true
-#metadata_zip_url = "https://gamesdb.launchbox-app.com/Metadata.zip"
-#image_base_url = ""        # Constructed from XML; no documented schema/terms
-#api_base_url = ""          # No public API endpoint exists
-#require_explicit_opt_in = true
-#attribution = "LaunchBox Games Database"
+# Historical provider feasibility records: docs/archive/provider-research/
 
 # --- Optional MobyGames online metadata/artwork provider (Issue #1) ------------
 # DISABLED BY DEFAULT. Enable by setting enabled = true and providing an API key
@@ -103,14 +71,14 @@ enabled = false
 # The provider searches MobyGames for the title, filters to Amiga platform
 # releases, and returns metadata + cover/screenshot artwork. It reuses the
 # shared cache/provenance/security architecture (no new HTTP libs, SSRF guards,
-# allowlisted hosts only). See docs/mobygames-provider.md for setup and precedence.
+# allowlisted hosts only). See docs/METADATA-PROVIDERS.md for setup and precedence.
 [mobygames]
 enabled = false
 # api_key_env = "MOBYGAMES_API_KEY"
 # preferred_image_types = ["cover", "screenshot", "box"]
 # timeout = 20.0
 
-# --- Wikipedia metadata/artwork provider (PRIMARY, enabled by default) -------
+# --- Wikipedia metadata/artwork provider (explicit opt-in in this example) ---
 # Wikipedia is the main online source for release metadata and artwork. It needs
 # no account, key or signup. Requests are PACED so the site is not overloaded:
 # the settings below are applied to the shared request gate that every
@@ -119,7 +87,7 @@ enabled = false
 # These values are the effective runtime policy, not decoration. They can also
 # be edited in the GUI Providers section, which writes the same table.
 [wikipedia]
-enabled = true
+enabled = false
 # Minimum wall-clock seconds between two outbound requests. Raising this
 # reduces HTTP 429 rate limiting. Allowed range 0.5 - 10.0.
 min_interval_seconds = 1.0

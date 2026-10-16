@@ -1,3 +1,5 @@
+> Historical record, archived 2026-10-16. Labels, task status, and instructions below describe their original context. See [current documentation](../../README.md) and the [current release checklist](../../RELEASE-CHECKLIST.md).
+
 # ACTIVE-TASK — GH-192 REM-3 — Diagnostic/Observability Fixes
 
 - Task: GH-192 REM-3 (from corrected Q-Branch research handoff)

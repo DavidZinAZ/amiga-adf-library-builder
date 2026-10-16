@@ -1,7 +1,7 @@
 # Architecture
 
-**Current baseline:** Amiga ADF Library Builder v0.2.26<br>
-**Reviewed:** 2026-09-22
+**Current baseline:** Amiga ADF Library Builder v0.3.13<br>
+**Reviewed:** 2026-10-16
 
 This document describes the current high-level architecture. Historical design,
 issue, and architecture-review documents are retained under [`archive/`](archive/).
@@ -116,6 +116,7 @@ The released Windows GUI is a normal supported interface, not a future design.
 Its current tabs are:
 
 - Library
+- Build & Export
 - Options
 - Providers
 - Local Media
@@ -155,6 +156,10 @@ See [DATA-LAYOUT.md](DATA-LAYOUT.md).
 - run-owned staging is used before final publication;
 - provenance is retained for metadata, artwork, manuals, and operator decisions;
 - GUI and CLI behavior should converge on shared core code.
+
+## Media curation
+
+Shared media choices, per-disk overrides, and media scope live in staged library state. Save/load, carry-over, undo/redo, and disk move/merge operations preserve them. The exporter resolves final disk filenames before naming JPEG/RTFM companions and removes obsolete managed companions on repeat export. See [Media Choices](MEDIA-CHOICES.md).
 
 ## Historical architecture material
 
