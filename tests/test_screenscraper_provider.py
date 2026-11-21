@@ -1061,3 +1061,54 @@ def test_screenscraper_retries_versioned_dat_title_as_plain_game_title(tmp_path)
     provider.lookup_group(group, {}, lookup_title=group.title)
     searches = [parse_qs(urlsplit(url).query)["recherche"][0] for url in opener.log]
     assert searches == ["Dark Queen of Krynn, The v1.0", "The Dark Queen of Krynn"]
+
+
+@pytest.mark.parametrize("usable", [True, False])
+def test_screen_artwork_is_tried_before_wikipedia(tmp_path, monkeypatch, usable):
+    import urllib.error
+    from PIL import Image
+    from amiga_adf_library_builder import enrich
+    from amiga_adf_library_builder.metadata import MetadataRecord
+    from amiga_adf_library_builder.paths import resolve_config
+    from amiga_adf_library_builder.pipeline import run_pipeline
+    from amiga_adf_library_builder.run_config import RunConfig
+    from amiga_adf_library_builder.screenscraper import ScreenScraperResult
+
+    cfg, _ = resolve_config(library_root=str(tmp_path))
+    cfg.original_dir.mkdir()
+    (cfg.original_dir / "Star Voyage.adf").write_bytes(b"fixture disk")
+    image = io.BytesIO()
+    Image.new("RGB", (40, 40)).save(image, "PNG")
+    calls = []
+    match = ScreenScraperResult(
+        found=True, provider_id="1111", canonical_title="Star Voyage",
+        artwork_media_type="box-2D", confidence=1.0,
+    )
+    monkeypatch.setattr(ScreenScraperProvider, "lookup_group", lambda *args, **kwargs: match)
+
+    def screen_art(*args, **kwargs):
+        calls.append("ScreenScraper")
+        return image.getvalue() if usable else b"unusable artwork"
+
+    def lookup_wiki(*args, wikipedia_enabled, **kwargs):
+        if not wikipedia_enabled:
+            return None, "offline", []
+        calls.append("Wikipedia")
+        return MetadataRecord(canonical_title="Star Voyage", provider="wikipedia",
+                              artwork_url="https://upload.wikimedia.org/cover.png"), "wikipedia", []
+
+    def rate_limited(*args):
+        calls.append("Wikimedia image")
+        raise urllib.error.HTTPError("https://upload.wikimedia.org/cover.png", 429, "Rate limited", {}, None)
+
+    monkeypatch.setattr(ScreenScraperProvider, "download_artwork", screen_art)
+    monkeypatch.setattr(enrich, "lookup_metadata", lookup_wiki)
+    monkeypatch.setattr(enrich, "_download_artwork", rate_limited)
+    result = run_pipeline(
+        cfg, RunConfig(online=True),
+        wikipedia_config={"enabled": True},
+        screenscraper_config={"enabled": True, "download_manuals": False},
+        screenscraper_developer=("fixture-dev", "fixture-secret", "Fixture"),
+    )
+    assert bool(result["artwork_resized"]) is usable
+    assert calls == (["ScreenScraper"] if usable else ["ScreenScraper", "Wikipedia", "Wikimedia image"])

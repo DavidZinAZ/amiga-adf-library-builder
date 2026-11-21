@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Try ScreenScraper first for missing artwork. Use Wikipedia when ScreenScraper cannot provide a usable image.
+
 ## 0.3.15 — 2026-11-20
 
 - Apply verified DAT titles to pending Preview rows and use them for ScreenScraper title searches.

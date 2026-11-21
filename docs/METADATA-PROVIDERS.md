@@ -68,9 +68,9 @@ builds. Turning it off skips Wikipedia searches and Wikipedia metadata cache
 hits during online builds, so other enabled providers can fill the gap.
 Saved artwork files and offline metadata remain available.
 
-When the release matches and ScreenScraper advertises media, the artwork
-option downloads a cover or screenshot if no artwork is already available.
-If a download is unusable, the app tries other advertised media.
+An exact DAT match supplies the lookup title. When artwork is missing, the app
+tries ScreenScraper before Wikipedia. It tries alternative advertised images
+and uses Wikipedia if ScreenScraper yields no usable image.
 With manuals enabled for the build and in ScreenScraper, an advertised PDF
 can supply the RTFM builder after saved and local manual sources are checked.
 Downloaded artwork and PDFs are reused on subsequent builds. Offline builds

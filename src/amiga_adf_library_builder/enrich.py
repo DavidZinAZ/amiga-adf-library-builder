@@ -7,7 +7,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from datetime import datetime, timezone
 import hashlib
@@ -885,6 +885,165 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
     lookup_title = dat_title or filename_title
     metadata_cache_title = lookup_title
     artwork_backoff_dir = metadata_cache_dir / "artwork-retry"
+    artwork_group = replace(group, title=lookup_title) if lookup_title != group.title else group
+    master = None
+    from .media_review import saved_entry
+    _saved_media = saved_entry(library_root, group.release_key)
+    _media_choices = _saved_media.media_choices if _saved_media is not None else {}
+    _image_choices = {k: v for k, v in _media_choices.items() if k != "manual"}
+    _image_candidates = (local_media_provider.candidates_for_review(artwork_group)
+                         if local_media_provider is not None and include_artwork else [])
+    processed: Optional[Path] = None
+    # Manual-vs-artwork routing: matched PDF/TXT manuals (never artwork) are
+    # collected here and returned on EnrichResult.manual_sources so the
+    # pipeline can feed them to the existing RTFM/manual-sidecar build.
+    manual_sources: list[dict] = []
+    if include_artwork:
+        master = _find_existing_master(artwork_group, artwork_original_dir)
+        if master is None:
+            for suffix in (".jpg", ".jpeg", ".png", ".webp"):
+                cached_master = artwork_original_dir / f"{cache_key(lookup_title)}{suffix}"
+                if cached_master.is_file() and cached_master.stat().st_size:
+                    master = cached_master
+                    break
+        if _image_choices:
+            from .media_review import selected_image
+            _selected_image = selected_image(_image_choices)
+            master = Path(_selected_image["path"]) if _selected_image else None
+        # Provider order #2: configured local-media libraries. Only consulted when no
+        # approved local-artwork master already exists. The provider copies a
+        # selected source into the app cache and returns the cached master; it never
+        # writes into the source library.
+        if master is None and local_media_provider is not None and not _image_choices:
+            lm_master, lm_events, lm_manual_source = _resolve_local_media_master(artwork_group, local_media_provider)
+            events.extend(lm_events)
+            if lm_master is not None:
+                master = lm_master
+                _act("Found artwork in a local library.")
+            elif lm_manual_source is not None:
+                # Manual-vs-artwork routing: the local library matched a
+                # PDF/TXT manual, not artwork. Keep it as a manual source for
+                # the RTFM/manual-sidecar pipeline; never an artwork master.
+                # The image path above is untouched for image candidates.
+                manual_sources.append({
+                    "path": str(lm_manual_source),
+                    "root": str(lm_manual_source.parent),
+                    "filename": lm_manual_source.name,
+                    "category": "manuals",
+                })
+                _act("Found manual in a local library.")
+                notes.append(f"matched manual source: {lm_manual_source.name}")
+
+    # Optional ScreenScraper metadata/artwork/manual provider. Hash-first (CRC/MD5/SHA1),
+    # then cached provider ID reuse, then title + system search.
+    # Non-fatal; failures are caught and logged as structured events.
+    _ss_success_event: Optional[EnrichEvent] = None
+    _ss_success_note: Optional[str] = None
+    screenscraper_result = None
+    if online and screenscraper_provider is not None:
+        try:
+            _act("Trying ScreenScraper metadata lookup…")
+            screenscraper_result = screenscraper_provider.lookup_group(
+                group, scans, lookup_title=dat_title or None
+            )
+            if screenscraper_result is not None:
+                if screenscraper_result.found and not screenscraper_result.needs_manual_review:
+                    _ss_success_event = EnrichEvent(
+                        category=EnrichCategory.SCREENSCRAPER,
+                        detail=(f"resolved via {screenscraper_result.match_method.value} "
+                                f"conf={screenscraper_result.confidence:.2f} "
+                                f"provider_id={screenscraper_result.provider_id}"),
+                        ok=True,
+                    )
+                    _act(f"ScreenScraper resolved identity (provider_id: {screenscraper_result.provider_id}).")
+                    if screenscraper_result.provider_id:
+                        _ss_success_note = (
+                            f"screenscraper provider_id: {screenscraper_result.provider_id}"
+                        )
+                elif screenscraper_result.needs_manual_review:
+                    events.append(EnrichEvent(
+                        category=EnrichCategory.SCREENSCRAPER_REVIEW,
+                        detail=(f"screenscraper needs manual review: "
+                                f"{screenscraper_result.relevance_category or 'ambiguous match'}"),
+                        ok=False, error=screenscraper_result.relevance_category or "ambiguous match",
+                    ))
+                    notes.append("screenscraper: routed to manual review")
+                    _act("ScreenScraper: routed to manual review.")
+                else:
+                    _ss_te = getattr(screenscraper_result, "transport_error", None)
+                    reason = f"transport error: {_ss_te}" if _ss_te else "no identity match"
+                    _act(f"ScreenScraper: no match ({reason}).")
+                    events.append(EnrichEvent(
+                        category=EnrichCategory.SCREENSCRAPER_MISS,
+                        detail="screenscraper: no identity match"
+                        + (f" (transport: {_ss_te})" if _ss_te else ""),
+                        cache="miss",
+                        ok=not _ss_te,
+                        error=_ss_te,
+                    ))
+        except Exception as exc:  # defensive: never break enrich
+            events.append(EnrichEvent(
+                category=EnrichCategory.SCREENSCRAPER_MISS,
+                detail=f"ScreenScraper lookup failed ({type(exc).__name__})",
+                ok=False, error=type(exc).__name__,
+            ))
+            _act(f"ScreenScraper lookup failed ({type(exc).__name__}).")
+
+    if _ss_success_event is not None:
+        events.append(_ss_success_event)
+        if _ss_success_note is not None:
+            notes.append(_ss_success_note)
+
+    approved_artwork = any(
+        item.get("url") and (item.get("role") or "").lower() == "artwork"
+        for item in approval_sources
+    )
+    if include_artwork:
+        if (
+            master is None and not _image_choices and not approved_artwork and _ss_success_event
+            and screenscraper_result.provider_id and screenscraper_result.artwork_media_type
+            and screenscraper_provider.config.download_artwork
+        ):
+            try:
+                from io import BytesIO
+                from PIL import Image
+                from .screenscraper import AGA_AMIGA_SYSTEM_ID, DEFAULT_AMIGA_SYSTEM_ID
+
+                system_id = AGA_AMIGA_SYSTEM_ID if (group.chipset or "").upper().startswith("AGA") else DEFAULT_AMIGA_SYSTEM_ID
+                _act("Fetching artwork from ScreenScraper…")
+                candidates = screenscraper_result.artwork_candidates or [(
+                    screenscraper_result.artwork_media_type, screenscraper_result.artwork_region,
+                    screenscraper_result.artwork_url,
+                )]
+                for media_type, region, public_url in candidates[:5]:
+                    data = screenscraper_provider.download_artwork(
+                        screenscraper_result.provider_id, media_type, region, system_id=system_id,
+                    )
+                    if not data:
+                        continue
+                    try:
+                        with Image.open(BytesIO(data)) as image:
+                            content_type = Image.MIME.get(image.format, "")
+                            image.verify()
+                    except (OSError, SyntaxError, ValueError):
+                        _act("ScreenScraper returned invalid artwork. Checking the next listed image.")
+                        continue
+                    source = MetadataRecord(
+                        canonical_title=screenscraper_result.canonical_title or lookup_title, artwork_provider="screenscraper",
+                        artwork_url=public_url or "",
+                        artwork_source_url=screenscraper_provider.config.base_url + "mediaJeu.php",
+                    )
+                    master = _save_artwork_master(source, artwork_original_dir, lookup_title, data, content_type)
+                    events.append(EnrichEvent(
+                        category=EnrichCategory.ARTWORK_GENERATED,
+                        detail="downloaded ScreenScraper artwork master", ok=True,
+                    ))
+                    break
+                if master is None:
+                    _act("ScreenScraper artwork was unavailable.")
+            except Exception as exc:
+                _act(f"ScreenScraper artwork failed ({type(exc).__name__}).")
+
     # Cached metadata is useful offline; network is used only with --online.
     from .metadata import load_cached
     if online:
@@ -907,7 +1066,11 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                 # Without a shared instance, pacing resets per release and
                 # provides no rate-limit protection at all.
                 wikipedia_gate=wikipedia_gate,
-                wikipedia_enabled=wikipedia_enabled,
+                wikipedia_enabled=wikipedia_enabled and not (
+                    _ss_success_event and (
+                        master is not None or not include_artwork or bool(_image_choices)
+                    )
+                ),
             )
             # Persist provider-level outcomes before the selected result is
             # reduced to the final metadata record.
@@ -1039,97 +1202,33 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
         else:  # metadata / reference
             metadata = metadata or MetadataRecord(canonical_title=lookup_title or group.title or "Unknown")
             metadata.source_url = url
-    # Optional ScreenScraper metadata/artwork/manual provider. Hash-first (CRC/MD5/SHA1),
-    # then cached provider ID reuse, then title + system search.
-    # Non-fatal; failures are caught and logged as structured events.
-    _ss_success_event: Optional[EnrichEvent] = None
-    _ss_success_note: Optional[str] = None
-    screenscraper_result = None
-    if online and screenscraper_provider is not None and (
-        refresh or metadata is None or metadata.provider == "dat"
-        or (include_artwork and not metadata.artwork_url
-            and _find_existing_master(group, artwork_original_dir) is None)
+    # Fill metadata from the accepted ScreenScraper match when no online or curated record was selected.
+    if _ss_success_event and screenscraper_result.provider_id and (
+        not metadata or metadata.provider == "dat"
     ):
-        try:
-            _act("Trying ScreenScraper metadata lookup…")
-            screenscraper_result = screenscraper_provider.lookup_group(
-                group, scans, lookup_title=dat_title or None
-            )
-            if screenscraper_result is not None:
-                if screenscraper_result.found and not screenscraper_result.needs_manual_review:
-                    _ss_success_event = EnrichEvent(
-                        category=EnrichCategory.SCREENSCRAPER,
-                        detail=(f"resolved via {screenscraper_result.match_method.value} "
-                                f"conf={screenscraper_result.confidence:.2f} "
-                                f"provider_id={screenscraper_result.provider_id}"),
-                        ok=True,
-                    )
-                    _act(f"ScreenScraper resolved identity (provider_id: {screenscraper_result.provider_id}).")
-                    if screenscraper_result.provider_id:
-                        _ss_success_note = (
-                            f"screenscraper provider_id: {screenscraper_result.provider_id}"
-                        )
-                    # Merge ScreenScraper metadata into the main metadata record if it improves things
-                    if screenscraper_result.provider_id and (not metadata or screenscraper_result.confidence > (metadata.confidence or 0.0)):
-                        # Use ScreenScraper metadata as primary source
-                        if metadata is None:
-                            metadata = MetadataRecord(canonical_title=lookup_title or group.title or "Unknown")
-                        # Merge fields
-                        if screenscraper_result.canonical_title:
-                            metadata.canonical_title = screenscraper_result.canonical_title
-                        if screenscraper_result.description:
-                            metadata.description = screenscraper_result.description
-                        if screenscraper_result.year:
-                            metadata.year = screenscraper_result.year
-                        if screenscraper_result.genre:
-                            metadata.genres = [screenscraper_result.genre]
-                        if screenscraper_result.developer:
-                            metadata.developer = screenscraper_result.developer
-                        if screenscraper_result.publisher:
-                            metadata.publisher = screenscraper_result.publisher
-                        if screenscraper_result.artwork_source_url:
-                            metadata.source_url = screenscraper_result.artwork_source_url
-                        if screenscraper_result.provider_id:
-                            metadata.provider_id = screenscraper_result.provider_id
-                        metadata.provider = "screenscraper"
-                        provider = "screenscraper"
-                        metadata.confidence = max(metadata.confidence, screenscraper_result.confidence)
-                        # External IDs
-                        if screenscraper_result.external_ids:
-                            pass  # Store for potential downstream use
-                elif screenscraper_result.needs_manual_review:
-                    events.append(EnrichEvent(
-                        category=EnrichCategory.SCREENSCRAPER_REVIEW,
-                        detail=(f"screenscraper needs manual review: "
-                                f"{screenscraper_result.relevance_category or 'ambiguous match'}"),
-                        ok=False, error=screenscraper_result.relevance_category or "ambiguous match",
-                    ))
-                    notes.append("screenscraper: routed to manual review")
-                    _act("ScreenScraper: routed to manual review.")
-                else:
-                    _ss_te = getattr(screenscraper_result, "transport_error", None)
-                    reason = f"transport error: {_ss_te}" if _ss_te else "no identity match"
-                    _act(f"ScreenScraper: no match ({reason}).")
-                    events.append(EnrichEvent(
-                        category=EnrichCategory.SCREENSCRAPER_MISS,
-                        detail="screenscraper: no identity match"
-                        + (f" (transport: {_ss_te})" if _ss_te else ""),
-                        cache="miss",
-                        ok=not _ss_te,
-                        error=_ss_te,
-                    ))
-        except Exception as exc:  # defensive: never break enrich
-            events.append(EnrichEvent(
-                category=EnrichCategory.SCREENSCRAPER_MISS,
-                detail=f"ScreenScraper lookup failed ({type(exc).__name__})",
-                ok=False, error=type(exc).__name__,
-            ))
-            _act(f"ScreenScraper lookup failed ({type(exc).__name__}).")
-
-    if _ss_success_event is not None:
-        events.append(_ss_success_event)
-        if _ss_success_note is not None:
-            notes.append(_ss_success_note)
+        # Use ScreenScraper metadata as primary source
+        if metadata is None:
+            metadata = MetadataRecord(canonical_title=lookup_title or group.title or "Unknown")
+        # Merge fields
+        if screenscraper_result.canonical_title:
+            metadata.canonical_title = screenscraper_result.canonical_title
+        if screenscraper_result.description:
+            metadata.description = screenscraper_result.description
+        if screenscraper_result.year:
+            metadata.year = screenscraper_result.year
+        if screenscraper_result.genre:
+            metadata.genres = [screenscraper_result.genre]
+        if screenscraper_result.developer:
+            metadata.developer = screenscraper_result.developer
+        if screenscraper_result.publisher:
+            metadata.publisher = screenscraper_result.publisher
+        if screenscraper_result.artwork_source_url:
+            metadata.source_url = screenscraper_result.artwork_source_url
+        if screenscraper_result.provider_id:
+            metadata.provider_id = screenscraper_result.provider_id
+        metadata.provider = "screenscraper"
+        provider = "screenscraper"
+        metadata.confidence = max(metadata.confidence, screenscraper_result.confidence)
 
     from .canonical_naming import _load_canonical_library, identity_for_release_group
     from .canonical import SourceAuthority, Provenance
@@ -1162,98 +1261,9 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
     # group.title. The metadata's own canonical_title must be preserved
     # and not leaked by pipeline-modified display text (GH-192 Problem 4).
 
-    master = None
-    from .media_review import saved_entry
-    _saved_media = saved_entry(library_root, group.release_key)
-    _media_choices = _saved_media.media_choices if _saved_media is not None else {}
-    _image_choices = {k: v for k, v in _media_choices.items() if k != "manual"}
-    _image_candidates = (local_media_provider.candidates_for_review(group)
-                         if local_media_provider is not None and include_artwork else [])
-    processed: Optional[Path] = None
-    # Manual-vs-artwork routing: matched PDF/TXT manuals (never artwork) are
-    # collected here and returned on EnrichResult.manual_sources so the
-    # pipeline can feed them to the existing RTFM/manual-sidecar build.
-    manual_sources: list[dict] = []
     if include_artwork:
-        master = _find_existing_master(group, artwork_original_dir)
-        if master is None:
-            for suffix in (".jpg", ".jpeg", ".png", ".webp"):
-                cached_master = artwork_original_dir / f"{cache_key(lookup_title)}{suffix}"
-                if cached_master.is_file() and cached_master.stat().st_size:
-                    master = cached_master
-                    break
-        if _image_choices:
-            from .media_review import selected_image
-            _selected_image = selected_image(_image_choices)
-            master = Path(_selected_image["path"]) if _selected_image else None
-        # Provider order #2: configured local-media libraries. Only consulted when no
-        # approved local-artwork master already exists. The provider copies a
-        # selected source into the app cache and returns the cached master; it never
-        # writes into the source library.
-        if master is None and local_media_provider is not None and not _image_choices:
-            lm_master, lm_events, lm_manual_source = _resolve_local_media_master(group, local_media_provider)
-            events.extend(lm_events)
-            if lm_master is not None:
-                master = lm_master
-                _act("Found artwork in a local library.")
-            elif lm_manual_source is not None:
-                # Manual-vs-artwork routing: the local library matched a
-                # PDF/TXT manual, not artwork. Keep it as a manual source for
-                # the RTFM/manual-sidecar pipeline; never an artwork master.
-                # The image path above is untouched for image candidates.
-                manual_sources.append({
-                    "path": str(lm_manual_source),
-                    "root": str(lm_manual_source.parent),
-                    "filename": lm_manual_source.name,
-                    "category": "manuals",
-                })
-                _act("Found manual in a local library.")
-                notes.append(f"matched manual source: {lm_manual_source.name}")
-        if (
-            online and metadata and not metadata.artwork_url and master is None and not _image_choices
-            and screenscraper_result and screenscraper_result.found and not screenscraper_result.needs_manual_review
-            and screenscraper_result.provider_id and screenscraper_result.artwork_media_type
-        ):
-            try:
-                from io import BytesIO
-                from PIL import Image
-                from .screenscraper import AGA_AMIGA_SYSTEM_ID, DEFAULT_AMIGA_SYSTEM_ID
-
-                system_id = AGA_AMIGA_SYSTEM_ID if (group.chipset or "").upper().startswith("AGA") else DEFAULT_AMIGA_SYSTEM_ID
-                _act("Fetching artwork from ScreenScraper…")
-                candidates = screenscraper_result.artwork_candidates or [(
-                    screenscraper_result.artwork_media_type, screenscraper_result.artwork_region,
-                    screenscraper_result.artwork_url,
-                )]
-                for media_type, region, public_url in candidates[:5]:
-                    data = screenscraper_provider.download_artwork(
-                        screenscraper_result.provider_id, media_type, region, system_id=system_id,
-                    )
-                    if not data:
-                        continue
-                    try:
-                        with Image.open(BytesIO(data)) as image:
-                            content_type = Image.MIME.get(image.format, "")
-                            image.verify()
-                    except (OSError, SyntaxError, ValueError):
-                        _act("ScreenScraper returned invalid artwork. Checking the next listed image.")
-                        continue
-                    source = MetadataRecord(
-                        canonical_title=metadata.canonical_title, artwork_provider="screenscraper",
-                        artwork_url=public_url or "",
-                        artwork_source_url=screenscraper_provider.config.base_url + "mediaJeu.php",
-                    )
-                    master = _save_artwork_master(source, artwork_original_dir, lookup_title, data, content_type)
-                    events.append(EnrichEvent(
-                        category=EnrichCategory.ARTWORK_GENERATED,
-                        detail="downloaded ScreenScraper artwork master", ok=True,
-                    ))
-                    break
-                if master is None:
-                    _act("ScreenScraper artwork was unavailable.")
-            except Exception as exc:
-                _act(f"ScreenScraper artwork failed ({type(exc).__name__}).")
-
+        if master is None and not _image_choices and group.title != artwork_group.title:
+            master = _find_existing_master(group, artwork_original_dir)
         if online and metadata and metadata.artwork_url and master is None and not _image_choices:
             try:
                 host = urllib.parse.urlsplit(metadata.artwork_url).hostname or ""
