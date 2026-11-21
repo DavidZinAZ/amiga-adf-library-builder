@@ -721,7 +721,7 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                  cancel_event: Optional[threading.Event] = None,
                  activity: Optional[Callable[[str], None]] = None,
                  library_root: Optional[Path] = None,
-                 wikipedia_gate=None) -> EnrichResult:
+                 wikipedia_gate=None, wikipedia_enabled: bool = True) -> EnrichResult:
     metadata_cache_dir = Path(metadata_cache_dir or (Path(nfo_dir).parent / "metadata-cache"))
     curated_metadata_dir = Path(curated_metadata_dir or (Path(nfo_dir).parent / "metadata-curated"))
     notes: list[str] = []
@@ -901,6 +901,7 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                 # Without a shared instance, pacing resets per release and
                 # provides no rate-limit protection at all.
                 wikipedia_gate=wikipedia_gate,
+                wikipedia_enabled=wikipedia_enabled,
             )
             # Persist provider-level outcomes before the selected result is
             # reduced to the final metadata record.
@@ -1393,6 +1394,7 @@ def enrich_all(groups: list[ReleaseGroup], *, nfo_dir: Path, scans: list[ScanRec
                online: bool = False, refresh: bool = False,
                local_media_provider=None,
                screenscraper_provider=None,
+               wikipedia_enabled: bool = True,
                include_artwork: bool = True,
                cancel_event: Optional[threading.Event] = None,
                activity: Optional[Callable[[str], None]] = None,
@@ -1442,5 +1444,5 @@ def enrich_all(groups: list[ReleaseGroup], *, nfo_dir: Path, scans: list[ScanRec
                      activity=activity,
                      metadata_source_manager=metadata_source_manager,
                      library_root=library_root,
-                     wikipedia_gate=_wiki_gate))
+                     wikipedia_gate=_wiki_gate, wikipedia_enabled=wikipedia_enabled))
     return results

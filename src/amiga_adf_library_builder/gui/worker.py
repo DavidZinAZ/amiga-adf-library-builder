@@ -55,6 +55,7 @@ class PipelineWorker(QObject):
         cancel_event: Optional[threading.Event] = None,
         run_id: Optional[str] = None,
         live_logger: Optional[Any] = None,
+        wikipedia_config: Optional[dict] = None,
         screenscraper_config: Optional[dict] = None,
         screenscraper_member: Optional[tuple[str, str]] = None,
         screenscraper_developer: Optional[tuple[str, str, str]] = None,
@@ -70,6 +71,7 @@ class PipelineWorker(QObject):
         # lines to it and captures its own uncaught exceptions into it.
         self._assigned_run_id = run_id
         self._live_logger = live_logger
+        self._wikipedia_config = wikipedia_config
         self._screenscraper_config = screenscraper_config
         self._screenscraper_member = screenscraper_member
         self._screenscraper_developer = screenscraper_developer
@@ -211,6 +213,8 @@ class PipelineWorker(QObject):
                 return
 
             extra_kwargs = {k: v for k, v in extra.items() if k != "cfg"}
+            if self._wikipedia_config is not None:
+                extra_kwargs["wikipedia_config"] = self._wikipedia_config
             if self._screenscraper_config is not None:
                 extra_kwargs["screenscraper_config"] = self._screenscraper_config
                 extra_kwargs["screenscraper_member"] = self._screenscraper_member

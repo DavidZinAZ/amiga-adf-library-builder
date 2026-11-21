@@ -848,6 +848,8 @@ class MainWindow(QMainWindow):
         form.addRow("", enabled)
         cfg = provider.to_config_dict()
         for field in provider.metadata.fields:
+            if provider.metadata.id == "wikipedia" and field.key == "enabled":
+                continue
             # Restore persisted field values from Settings.
             field_val = self._settings.provider_fields.get(provider.metadata.id, {}).get(field.key, cfg.get(field.key, field.default))
             le = QLineEdit(self)
@@ -1834,7 +1836,8 @@ class MainWindow(QMainWindow):
             provider.set_enabled(self._settings.provider_enabled.get(pid, False))
             if pid in self._settings.provider_fields:
                 for key, val in self._settings.provider_fields[pid].items():
-                    provider.set_field(key, val)
+                    if pid != "wikipedia" or key != "enabled":
+                        provider.set_field(key, val)
 
     def _on_provider_toggle(self, state: int, provider: Provider) -> None:
         """Handle provider enabled checkbox toggle: persist to Settings."""
@@ -2460,6 +2463,7 @@ class MainWindow(QMainWindow):
     def _on_run(self) -> None:
         try:
             state = self._state_from_widgets()
+            wikipedia = self._registry.get("wikipedia")
             screenscraper = self._registry.get("screenscraper")
             screenscraper_config = screenscraper.to_config_dict() if screenscraper else {}
             screenscraper_member = None
@@ -2508,6 +2512,7 @@ class MainWindow(QMainWindow):
                 cancel_event=self._cancel_event,
                 run_id=run_id,
                 live_logger=live_log,
+                wikipedia_config=wikipedia.to_config_dict() if wikipedia else None,
                 screenscraper_config=screenscraper_config,
                 screenscraper_member=screenscraper_member,
                 screenscraper_developer=screenscraper_developer,

@@ -1,6 +1,6 @@
 # Release Checklist
 
-**Applies to v0.3.13. Reviewed 2026-10-16.**
+**Applies to v0.3.14. Reviewed 2026-11-20.**
 
 Use this maintained checklist for current releases. Ticket-specific QA records live under [archive/qa](archive/README.md); they retain historical evidence and do not describe current control labels.
 

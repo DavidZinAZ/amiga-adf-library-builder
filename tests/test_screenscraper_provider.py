@@ -871,7 +871,7 @@ def test_pipeline_uses_configured_screenscraper_only_online(tmp_path, monkeypatc
     import urllib.request
     from urllib.parse import parse_qs, urlsplit
 
-    from amiga_adf_library_builder import enrich
+    from amiga_adf_library_builder import metadata
     from amiga_adf_library_builder.paths import resolve_config
     from amiga_adf_library_builder.pipeline import run_pipeline
     from amiga_adf_library_builder.run_config import RunConfig
@@ -882,7 +882,12 @@ def test_pipeline_uses_configured_screenscraper_only_online(tmp_path, monkeypatc
     config, _ = resolve_config(library_root=str(tmp_path))
     monkeypatch.setenv("SCREENSCRAPER_DEV_ID", "fake-dev")
     monkeypatch.setenv("SCREENSCRAPER_DEV_PASSWORD", "fake-app-password")
-    monkeypatch.setattr(enrich, "lookup_metadata", lambda *a, **kw: (None, "offline", []))
+    metadata.save_cached(
+        config.metadata_cache_dir, "Star Voyage",
+        metadata.MetadataRecord(canonical_title="Star Voyage", provider="wikipedia"),
+    )
+    wiki_calls = []
+    monkeypatch.setattr(metadata, "wikipedia_lookup", lambda *args, **kwargs: wiki_calls.append(args))
     monkeypatch.setattr("amiga_adf_library_builder.screenscraper.guard_url", lambda *a, **kw: None)
     opener = _xml_opener(_jeu_infos_xml(game_id=1111, title="Star Voyage"))
     monkeypatch.setattr(urllib.request, "build_opener", lambda *handlers: type(
@@ -891,10 +896,12 @@ def test_pipeline_uses_configured_screenscraper_only_online(tmp_path, monkeypatc
 
     result = run_pipeline(
         config, RunConfig(online=online),
+        wikipedia_config={"enabled": False},
         screenscraper_config={"enabled": True, "download_artwork": False, "download_manuals": False},
         screenscraper_member=("fake-member", "fake-member-password"),
     )
 
+    assert not wiki_calls
     assert len(opener.log) == int(online)
     if online:
         assert parse_qs(urlsplit(opener.log[0]).query)["ssid"] == ["fake-member"]

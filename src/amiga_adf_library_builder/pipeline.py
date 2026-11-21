@@ -277,6 +277,7 @@ def run_pipeline(
     cfg: PathConfig,
     run: RunConfig,
     *,
+    wikipedia_config: Optional[dict] = None,
     screenscraper_config: Optional[dict] = None,
     screenscraper_member: Optional[tuple[str, str]] = None,
     screenscraper_developer: Optional[tuple[str, str, str]] = None,
@@ -478,7 +479,8 @@ def run_pipeline(
         # so an operator's saved settings apply even when no explicit path was
         # supplied. A missing table yields the documented defaults.
         wikipedia_settings = apply_effective_policy(
-            load_wikipedia_config(wikipedia_config_path)
+            wikipedia_config if wikipedia_config is not None
+            else load_wikipedia_config(wikipedia_config_path)
         )
     except Exception:  # config problems must not break the pipeline
         wikipedia_settings = None
@@ -520,6 +522,7 @@ def run_pipeline(
         refresh=refresh_metadata,
         local_media_provider=local_media_provider,
         screenscraper_provider=screenscraper_provider,
+        wikipedia_enabled=wikipedia_settings.enabled if wikipedia_settings is not None else True,
         include_artwork=include_artwork,
         activity=activity,
         cancel_event=cancel_event,

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.14 — 2026-11-20
 
 ### Added
 
@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Apply the Windows Wikipedia checkbox to online builds and let enabled providers look up releases previously cached from Wikipedia.
 - Exact DAT hash matches supply the title for Wikipedia searches while preserving accepted Wikipedia descriptions and artwork.
 - Repeat builds reuse cached metadata and artwork, remember completed Wikipedia misses for 24 hours, and defer rate-limited artwork requests across sessions. RetroKit checks only releases that still need a manual.
 - Post-build diagnostics update on the GUI thread to prevent a native Qt crash during curation refresh.

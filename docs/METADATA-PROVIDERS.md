@@ -63,6 +63,11 @@ in the encrypted vault. Saving both fields blank selects guest access, subject
 to ScreenScraper availability and limits. A configured status does not make a
 live request.
 
+On the Providers tab, the Wikipedia **Enabled** checkbox controls online
+builds. Turning it off skips Wikipedia searches and Wikipedia metadata cache
+hits during online builds, so other enabled providers can fill the gap.
+Saved artwork files and offline metadata remain available.
+
 Use **Test ScreenScraper login** to verify the saved member account with
 ScreenScraper. The test needs the app's developer identity and performs no game lookup.
 

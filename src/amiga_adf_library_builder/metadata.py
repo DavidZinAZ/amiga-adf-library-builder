@@ -1271,7 +1271,7 @@ def lookup_metadata(title: str, *, cache_dir: Path, curated_dir: Path,
         # prose/image; Amiga-specific approved pages are then tried for artwork.
         supplement: Optional[MetadataRecord] = None
         _wiki_art: Optional[tuple[str, str, str]] = None
-        if not curated.description or not curated.artwork_url:
+        if wikipedia_enabled and (not curated.description or not curated.artwork_url):
             try:
                 supplement = wikipedia_lookup(title, timeout=timeout,
                                              opener=opener, gate=gate)
@@ -1303,7 +1303,7 @@ def lookup_metadata(title: str, *, cache_dir: Path, curated_dir: Path,
     relevance_events: list[dict] = []
     if not refresh:
         cached = load_cached(cache_dir, title)
-        if cached:
+        if cached and (wikipedia_enabled or (cached.provider or "").casefold() != "wikipedia"):
             # (GH-192 online-usability pass) An explicit cache hit is a
             # first-class diagnostic. Previously a reused cache entry was
             # indistinguishable from a fresh online match, so "why did this
