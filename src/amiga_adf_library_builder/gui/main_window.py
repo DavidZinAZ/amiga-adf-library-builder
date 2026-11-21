@@ -19,7 +19,7 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QEvent, QRect, QSize, Qt, QThread, QTimer
+from PySide6.QtCore import QEvent, QRect, QSize, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QGuiApplication, QRegion
 from PySide6.QtWidgets import (
     QApplication,
@@ -307,6 +307,8 @@ class MasterPasswordDialog(QDialog):
 
 class MainWindow(QMainWindow):
     """Primary application window (CLI-equivalent controls over the core)."""
+
+    _screenscraper_login_result = Signal(bool, str)
 
     def __init__(
         self,
@@ -856,7 +858,20 @@ class MainWindow(QMainWindow):
                 lambda text, p=provider, k=field.key: self._on_provider_field_change(p, k, text)
             )
             form.addRow(field.label, le)
-        if provider.metadata.requires_secret or provider.metadata.auth_required != "none":
+        if provider.metadata.id == "screenscraper":
+            account_btn = QPushButton("Set ScreenScraper login…")
+            account_btn.clicked.connect(self._edit_screenscraper_member)
+            form.addRow("Member account", account_btn)
+            developer_btn = QPushButton("Set local developer credentials…")
+            developer_btn.clicked.connect(self._edit_screenscraper_developer)
+            form.addRow("", developer_btn)
+            self._screenscraper_login_button = QPushButton("Test ScreenScraper login")
+            self._screenscraper_login_button.clicked.connect(self._test_screenscraper_login)
+            self._screenscraper_login_result.connect(
+                self._show_screenscraper_login_result, Qt.ConnectionType.QueuedConnection
+            )
+            form.addRow("", self._screenscraper_login_button)
+        elif provider.metadata.requires_secret or provider.metadata.auth_required != "none":
             secret_btn = QPushButton("Set credentials…")
             secret_btn.setToolTip(
                 "Store this source's token securely in the local encrypted "
@@ -867,7 +882,9 @@ class MainWindow(QMainWindow):
                 lambda _checked=False, p=provider: self._edit_credentials(p)
             )
             form.addRow("Credentials", secret_btn)
-        status_btn = QPushButton("Check connection…")
+        status_btn = QPushButton(
+            "Check configuration…" if provider.metadata.id == "screenscraper" else "Check connection…"
+        )
         status_btn.setToolTip(
             "Shows whether this source is set up and reachable. No live "
             "request is made."
@@ -1612,6 +1629,166 @@ class MainWindow(QMainWindow):
             return None
         return token_le.text() or None
 
+    def _edit_screenscraper_member(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("ScreenScraper member login")
+        form = QFormLayout(dialog)
+        form.addRow(QLabel("Enter your regular ScreenScraper login. Leave both fields blank to use guest access."))
+        username = QLineEdit(dialog)
+        password = QLineEdit(dialog)
+        password.setEchoMode(QLineEdit.EchoMode.Password)
+        form.addRow("Username", username)
+        form.addRow("Password", password)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel,
+            parent=dialog,
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        member = (username.text().strip(), password.text())
+        if bool(member[0]) != bool(member[1]):
+            QMessageBox.warning(self, "ScreenScraper", "Enter both fields or leave both blank.")
+            return
+        if not self._ensure_vault_unlocked():
+            return
+        try:
+            self._secret_store.set_secret("screenscraper_member", json.dumps(member))
+        except SecretError:
+            QMessageBox.warning(self, "ScreenScraper", "Could not save the ScreenScraper login.")
+            return
+        self._status_label.setText("ScreenScraper login preference saved.")
+
+    def _read_screenscraper_member(self) -> tuple[str, str]:
+        saved = self._secret_store.get_secret("screenscraper_member")
+        if saved:
+            username, password = json.loads(saved)
+            return username, password
+        return (
+            self._secret_store.get_secret("screenscraper_ssid") or "",
+            self._secret_store.get_secret("screenscraper_sspassword") or "",
+        )
+
+    def _edit_screenscraper_developer(self) -> bool:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Local ScreenScraper developer credentials")
+        form = QFormLayout(dialog)
+        dev_id = QLineEdit(dialog)
+        password = QLineEdit(dialog)
+        password.setEchoMode(QLineEdit.EchoMode.Password)
+        softname = QLineEdit(dialog)
+        softname.setPlaceholderText("AmigaADFLibraryBuilder")
+        form.addRow("Developer ID", dev_id)
+        form.addRow("Developer password", password)
+        form.addRow("Software name (optional)", softname)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel,
+            parent=dialog,
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return False
+        credentials = (
+            dev_id.text().strip(), password.text(),
+            softname.text().strip() or "AmigaADFLibraryBuilder",
+        )
+        if not credentials[0] or not credentials[1]:
+            QMessageBox.warning(self, "ScreenScraper", "Enter the developer ID and password.")
+            return False
+        if not self._ensure_vault_unlocked():
+            return False
+        try:
+            self._secret_store.set_secret("screenscraper_developer", json.dumps(credentials))
+        except SecretError:
+            QMessageBox.warning(self, "ScreenScraper", "Could not save developer credentials.")
+            return False
+        self._status_label.setText("ScreenScraper developer credentials saved locally.")
+        return True
+
+    def _read_screenscraper_developer(self) -> Optional[tuple[str, str, str]]:
+        saved = self._secret_store.get_secret("screenscraper_developer")
+        if saved:
+            dev_id, password, softname = json.loads(saved)
+            if dev_id and password:
+                return dev_id, password, softname
+        return None
+
+    def _test_screenscraper_login(self) -> None:
+        from threading import Thread
+
+        from .. import screenscraper
+
+        backend = self._secret_store.default_backend
+        vault_path = getattr(backend, "vault_path", None)
+        if vault_path is not None and not vault_path.is_file():
+            QMessageBox.information(self, "ScreenScraper login", "Save your ScreenScraper login first.")
+            return
+        if not self._ensure_vault_unlocked():
+            return
+        try:
+            credentials = self._read_screenscraper_developer() or screenscraper.developer_credentials()
+            if not credentials[0] or not credentials[1]:
+                if not self._edit_screenscraper_developer():
+                    return
+                credentials = self._read_screenscraper_developer()
+            if credentials is None:
+                return
+            dev_id, dev_password, softname = credentials
+            username, password = self._read_screenscraper_member()
+        except (SecretError, ValueError, TypeError):
+            QMessageBox.warning(self, "ScreenScraper login", "Could not read the saved login. Save it again.")
+            return
+        if not username or not password:
+            QMessageBox.information(self, "ScreenScraper login", "Save your ScreenScraper login first.")
+            return
+
+        self._screenscraper_login_button.setEnabled(False)
+        self._status_label.setText("Testing ScreenScraper login…")
+        cache_dir = self._paths.base
+
+        def check_login():
+            ok = False
+            try:
+                client = screenscraper.ScreenScraperProvider(
+                    screenscraper.ScreenScraperConfig(enabled=True, timeout_seconds=8.0),
+                    cache_dir, dev_id=dev_id, dev_password=dev_password, softname=softname,
+                    ssid=username, sspassword=password,
+                )
+                ok = client.verify_member_login()
+                message = ("ScreenScraper accepted your member login." if ok else
+                           "ScreenScraper could not verify this member login. Check your username and password.")
+            except screenscraper.ScreenScraperAuthError as error:
+                if error.status == 403:
+                    message = "ScreenScraper rejected the app's developer credentials (HTTP 403). Check the developer ID and API password."
+                elif error.status == 401:
+                    message = "ScreenScraper restricted API access (HTTP 401). Your member password was not verified. Try again later."
+                else:
+                    message = "ScreenScraper authentication could not be verified."
+            except (screenscraper.ScreenScraperRateLimited, screenscraper.ScreenScraperQuotaExceeded):
+                message = "ScreenScraper is limiting requests. Try again later."
+            except Exception:
+                message = "Could not verify the login. ScreenScraper may be unavailable or the response was unreadable."
+            try:
+                self._screenscraper_login_result.emit(ok, message)
+            except RuntimeError:
+                pass  # The window may have closed during the request.
+
+        Thread(target=check_login, name="screenscraper-login-test", daemon=True).start()
+
+    @Slot(bool, str)
+    def _show_screenscraper_login_result(self, ok: bool, message: str) -> None:
+        self._screenscraper_login_button.setEnabled(True)
+        self._status_label.setText(message)
+        self._append_diag(f"ScreenScraper login test: {message}")
+        if ok:
+            QMessageBox.information(self, "ScreenScraper login", message)
+        else:
+            QMessageBox.warning(self, "ScreenScraper login", message)
+
     def _edit_credentials(self, provider: Provider) -> None:
         token = self._prompt_credentials(provider)
         if not token:
@@ -1643,7 +1820,7 @@ class MainWindow(QMainWindow):
         )
 
     def _test_provider(self, provider: Provider) -> None:
-        status = provider.test_connection()
+        status = provider.status() if provider.metadata.id == "screenscraper" else provider.test_connection()
         QMessageBox.information(
             self,
             f"{provider.metadata.name} status",
@@ -1882,6 +2059,38 @@ class MainWindow(QMainWindow):
     def _on_export_clicked(self):
         self._mode_export.setChecked(True)
         self._on_run()
+
+    @Slot(object, object)
+    def _choose_export_releases(self, candidates: dict, request: tuple) -> None:
+        response, ready = request
+        choices = {}
+        try:
+            for index, (game_id, releases) in enumerate(candidates.items(), start=1):
+                if self._cancel_event.is_set():
+                    return
+                if len(releases) == 1:
+                    choices[game_id] = releases[0].release_key
+                    continue
+                labels = []
+                for number, release in enumerate(releases, start=1):
+                    details = ", ".join(filter(None, (
+                        release.version, release.edition, release.chipset,
+                        release.region, release.language, release.group,
+                    )))
+                    filename = next((disk.source_filename for disk in release.disks), "")
+                    label = " | ".join(filter(None, (release.title or game_id, details, filename)))
+                    labels.append(f"{number}. {label}")
+                choice, accepted = QInputDialog.getItem(
+                    self, f"Choose release {index} of {len(candidates)}",
+                    f"Which release of {releases[0].title or game_id} should the export keep?",
+                    labels, 0, False,
+                )
+                if not accepted:
+                    return
+                choices[game_id] = releases[labels.index(choice)].release_key
+            response["choices"] = choices
+        finally:
+            ready.set()
 
     def _sync_export_controls(self, _state: object = None) -> None:
         """Mirror the explicit export action into the legacy gate state."""
@@ -2251,6 +2460,20 @@ class MainWindow(QMainWindow):
     def _on_run(self) -> None:
         try:
             state = self._state_from_widgets()
+            screenscraper = self._registry.get("screenscraper")
+            screenscraper_config = screenscraper.to_config_dict() if screenscraper else {}
+            screenscraper_member = None
+            screenscraper_developer = None
+            backend = self._secret_store.default_backend
+            vault_path = getattr(backend, "vault_path", None)
+            if (
+                state.online and screenscraper_config.get("enabled")
+                and vault_path is not None and vault_path.is_file()
+            ):
+                if not self._ensure_vault_unlocked():
+                    return
+                screenscraper_member = self._read_screenscraper_member()
+                screenscraper_developer = self._read_screenscraper_developer()
             # (GH-102) Handle "prompt" for progressive JPEG conversion: ask the
             # operator PER detected progressive source BEFORE the worker thread
             # starts. Answers are recorded in a dict read by the prompt callback
@@ -2285,9 +2508,15 @@ class MainWindow(QMainWindow):
                 cancel_event=self._cancel_event,
                 run_id=run_id,
                 live_logger=live_log,
+                screenscraper_config=screenscraper_config,
+                screenscraper_member=screenscraper_member,
+                screenscraper_developer=screenscraper_developer,
             )
             self._worker.progress.connect(self._on_progress)
             self._worker.finished.connect(self._on_finished)
+            self._worker.export_choices_requested.connect(
+                self._choose_export_releases, Qt.ConnectionType.QueuedConnection
+            )
             # (Issue #21) live activity lines from the worker thread.
             self._worker.activity.connect(self._on_activity)
             worker_thread = QThread(self)
@@ -2622,14 +2851,10 @@ class MainWindow(QMainWindow):
         thread = QThread(self)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.finalized.connect(self._on_run_finalized)
-        worker.step_started.connect(lambda name: self._append_diag(
-            f"Finalize: {name} starting"))
-        worker.step_done.connect(
-            lambda name, ms: self._append_diag(f"Finalize: {name} {ms:.0f} ms"))
-        worker.step_failed.connect(
-            lambda name, msg: self._append_diag(
-                f"Finalize: {name} skipped ({redact(str(msg))})"))
+        worker.finalized.connect(self._on_run_finalized, Qt.ConnectionType.QueuedConnection)
+        worker.step_started.connect(self._on_finalize_step_started, Qt.ConnectionType.QueuedConnection)
+        worker.step_done.connect(self._on_finalize_step_done, Qt.ConnectionType.QueuedConnection)
+        worker.step_failed.connect(self._on_finalize_step_failed, Qt.ConnectionType.QueuedConnection)
         # Keep a reference so the thread/worker are not garbage collected
         # mid-run; cleared in _on_run_finalized. NOTE: we deliberately do NOT
         # call thread.wait() anywhere on the GUI thread.
@@ -2647,6 +2872,19 @@ class MainWindow(QMainWindow):
         self._finalize_thread = None
         self._finalize_worker = None
 
+    @Slot(str)
+    def _on_finalize_step_started(self, name: str) -> None:
+        self._append_diag(f"Finalize: {name} starting")
+
+    @Slot(str, float)
+    def _on_finalize_step_done(self, name: str, ms: float) -> None:
+        self._append_diag(f"Finalize: {name} {ms:.0f} ms")
+
+    @Slot(str, str)
+    def _on_finalize_step_failed(self, name: str, message: str) -> None:
+        self._append_diag(f"Finalize: {name} skipped ({redact(message)})")
+
+    @Slot(object)
     def _on_run_finalized(self, payload: dict) -> None:
         """Apply the off-thread finalization result on the GUI thread.
 

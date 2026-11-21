@@ -71,6 +71,13 @@ def _game_identity(group):
     return group.release_key.split("|")[0].lower()
 
 
+def group_releases_for_selection(groups: list[ReleaseGroup]) -> dict[str, list[ReleaseGroup]]:
+    games: dict[str, list[ReleaseGroup]] = {}
+    for group in groups:
+        games.setdefault(_game_identity(group), []).append(group)
+    return games
+
+
 def _version_parts(group):
     inline = _INLINE_VERSION.search(group.title or "")
     version = group.version or (inline.group(1) if inline else "")
@@ -280,6 +287,7 @@ def select_one_per_game(
     *,
     canon=None,
     decisions: Optional[dict] = None,
+    export_choices: Optional[dict[str, str]] = None,
 ) -> SelectionResult:
     """Select one release per game for 1G1R Gotek export.
 
@@ -302,11 +310,8 @@ def select_one_per_game(
     """
     appr = approvals or {}
     dec = decisions or {}
-    # Group by game identity: use the release_key base (before |) as game id.
-    games: dict[str, list[ReleaseGroup]] = {}
-    for g in groups:
-        game_id = _game_identity(g)
-        games.setdefault(game_id, []).append(g)
+    games = group_releases_for_selection(groups)
+    choices = export_choices or {}
 
     selected: list[ReleaseGroup] = []
     rejected: list[SelectionRecord] = []
@@ -317,19 +322,28 @@ def select_one_per_game(
         # Apply persisted operator decision first, if still valid.
         decision_applied = False
         legacy_ids = {g.release_key.split("|")[0].lower() for g in game_groups}
-        forced = {dec[k].lower() for k in {game_id, *legacy_ids} if k in dec
-                  and any(g.release_key.lower() == dec[k].lower() for g in game_groups)}
+        if game_id in choices:
+            selected_key = choices[game_id].lower()
+            if not any(g.release_key.lower() == selected_key and not g.quarantine_reason for g in game_groups):
+                raise ValueError(f"Selected release is unavailable for {game_id}.")
+            forced = {selected_key}
+        else:
+            forced = {dec[k].lower() for k in {game_id, *legacy_ids} if k in dec
+                      and any(g.release_key.lower() == dec[k].lower() for g in game_groups)}
         if len(forced) > 1:
             raise ValueError(f"Conflicting saved 1G1R choices for {game_id}; review the selection.")
         if forced:
             forced_key = next(iter(forced))
+            decision_type = "operator_export_choice" if game_id in choices else "operator_decision_persisted"
+            reason = ("Release chosen for this export" if game_id in choices
+                      else "operator decision persisted (loaded from decisions)")
             for g in game_groups:
                 if g.release_key.lower() == forced_key:
                     record = SelectionRecord(
                         release_key=g.release_key,
                         title=g.title,
                         selected=True,
-                        reason=f"operator decision persisted (loaded from decisions)",
+                        reason=reason,
                         rank_score=999.0,
                         override_source="operator",
                     )
@@ -338,14 +352,14 @@ def select_one_per_game(
                         "game_id": game_id,
                         "release_key": g.release_key,
                         "title": g.title,
-                        "decision": "operator_decision_persisted",
+                        "decision": decision_type,
                         "score": 999.0,
                         "reason": record.reason,
                         "override": True,
                     })
                     decisions_log.append({
                         "game_id": game_id,
-                        "decision": "operator_decision_persisted",
+                        "decision": decision_type,
                         "winner": g.release_key,
                         "reason": record.reason,
                     })

@@ -626,3 +626,40 @@ def test_sync_group_membership_sets_quarantine_for_ghost(tmp_path: Path) -> None
     assert "ghost" in group.quarantine_reason.lower(), (
         f"Expected ghost quarantine, got: {group.quarantine_reason}"
     )
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_1g1r_export_requests_a_choice_for_every_multi_version_game(tmp_path, cancel):
+    original = tmp_path / "original"
+    original.mkdir()
+    for title in ("Fixture Alpha", "Fixture Beta"):
+        for version in ("v1.0", "v2.0"):
+            name = f"{title} {version} (Disk 1 of 1).adf"
+            (original / name).write_bytes(name.encode())
+    (original / "Single Fixture.adf").write_bytes(b"single")
+    prompted = []
+
+    def choose(candidates):
+        prompted.extend(candidates.items())
+        if cancel:
+            return None
+        return {game_id: releases[-1].release_key for game_id, releases in candidates.items()}
+
+    result = run_pipeline(
+        _cfg(tmp_path), RunConfig(export=True, one_per_game=True, upstream_task_closed=True),
+        request_export_choices=choose,
+    )
+
+    assert len(prompted) == 2
+    assert all(len(releases) == 2 for _, releases in prompted)
+    if cancel:
+        assert result["cancelled"] is True
+        assert not list(_cfg(tmp_path).staging_dir.rglob("*.adf"))
+    else:
+        assert result["export"]["releases_exported"] == 3
+        written = {path.read_bytes() for path in _cfg(tmp_path).staging_dir.rglob("*.adf")}
+        assert written == {
+            b"Fixture Alpha v2.0 (Disk 1 of 1).adf",
+            b"Fixture Beta v2.0 (Disk 1 of 1).adf",
+            b"single",
+        }

@@ -62,7 +62,7 @@ online metadata lookup layer established in ``metadata.py``.
 
 === ScreenScraper API endpoints ===
 
-Base URL: ``https://www.screenscraper.fr/api2/``
+Base URL: ``https://api.screenscraper.fr/api2/``
 
 1. **jeuInfos.php** - Game metadata and media discovery
    - Parameters: ``devid``, ``devpassword``, ``softname``, ``ssid`` (optional), ``sspassword`` (optional)
@@ -82,8 +82,7 @@ Base URL: ``https://www.screenscraper.fr/api2/``
 
 === Amiga system identification ===
 
-ScreenScraper uses system IDs. For Amiga, the system ID needs to be determined
-from ScreenScraper's system list. This is cached on first discovery.
+ScreenScraper lists classic Amiga and Amiga AGA under separate system IDs.
 
 === Caching ===
 
@@ -108,12 +107,13 @@ import io
 from .utils import write_json_atomic
 import json
 import os
+import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as dataclass_replace
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -124,7 +124,7 @@ from .metadata import MetadataRecord, UnsafeUrlError, validate_metadata_relevanc
 # --- Bounds / defaults -------------------------------------------------------
 
 #: Public default ScreenScraper API endpoint.
-DEFAULT_BASE_URL = "https://www.screenscraper.fr/api2/"
+DEFAULT_BASE_URL = "https://api.screenscraper.fr/api2/"
 
 #: Hard upper bounds so a config cannot weaken the safety posture.
 _MAX_TIMEOUT_SECONDS = 30.0
@@ -148,10 +148,9 @@ TITLE_SEARCH_CONFIDENCE = 0.85
 #: Floor below which a title-fallback match is never auto-accepted.
 TITLE_FALLBACK_MIN_CONFIDENCE = 0.80
 
-#: ScreenScraper Amiga system ID (to be discovered/cached)
-# Per ScreenScraper documentation, Amiga system ID is typically around 23-25 range
-# We'll discover it on first use and cache it.
-DEFAULT_AMIGA_SYSTEM_ID = "23"
+#: Separate ScreenScraper systems for classic Amiga and AGA releases.
+DEFAULT_AMIGA_SYSTEM_ID = "64"
+AGA_AMIGA_SYSTEM_ID = "111"
 
 # --- Match method ------------------------------------------------------------
 
@@ -189,6 +188,10 @@ class ScreenScraperRateLimited(ScreenScraperError):
 
 class ScreenScraperAuthError(ScreenScraperError):
     """Raised when authentication fails (invalid credentials)."""
+
+    def __init__(self, message: str, *, status: Optional[int] = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 class ScreenScraperQuotaExceeded(ScreenScraperError):
@@ -617,6 +620,17 @@ def _parse_jeu_recherche(xml_bytes: bytes) -> list[dict]:
     return results
 
 
+def _public_media_url(url: Optional[str]) -> Optional[str]:
+    """Only persist media links whose URLs carry no ScreenScraper credentials."""
+    if url is None:
+        return None
+    query = urllib.parse.urlsplit(url).query
+    sensitive = {"devid", "devpassword", "ssid", "sspassword", "devdebugpassword"}
+    if any(key.casefold() in sensitive for key, _ in urllib.parse.parse_qsl(query, keep_blank_values=True)):
+        return None
+    return url
+
+
 def _select_best_media(medias: list[dict], preferred_regions: tuple[str, ...], media_types: list[str]) -> Optional[dict]:
     """Select the best media match based on region preference and media type priority."""
     if not medias:
@@ -689,9 +703,13 @@ def _fetch_xml(
             except (ValueError, TypeError):
                 retry_after = 1.0
             raise ScreenScraperRateLimited(retry_after)
-        elif e.code == 401:
-            raise ScreenScraperAuthError("Authentication failed")
-        raise ScreenScraperError(f"HTTP {e.code}: {e.reason}")
+        if e.code in (401, 403):
+            raise ScreenScraperAuthError("ScreenScraper authentication failed", status=e.code) from None
+        if e.code in (430, 431):
+            raise ScreenScraperQuotaExceeded("ScreenScraper daily quota reached") from None
+        if e.code == 404:
+            return b"<response />"
+        raise ScreenScraperError(f"ScreenScraper HTTP {e.code}") from None
 
 
 def _fetch_binary(
@@ -723,12 +741,39 @@ def _fetch_binary(
             except (ValueError, TypeError):
                 retry_after = 1.0
             raise ScreenScraperRateLimited(retry_after)
-        elif e.code == 401:
-            raise ScreenScraperAuthError("Authentication failed")
-        raise ScreenScraperError(f"HTTP {e.code}: {e.reason}")
+        if e.code in (401, 403):
+            raise ScreenScraperAuthError("ScreenScraper authentication failed", status=e.code) from None
+        if e.code in (430, 431):
+            raise ScreenScraperQuotaExceeded("ScreenScraper daily quota reached") from None
+        if e.code == 404:
+            return b""
+        raise ScreenScraperError(f"ScreenScraper HTTP {e.code}") from None
 
 
 # --- Provider class ----------------------------------------------------------
+
+def developer_credentials() -> tuple[str, str, str]:
+    """Resolve a local override or the app identity supplied by the release build."""
+    dev_id = os.environ.get("SCREENSCRAPER_DEV_ID", "").strip()
+    password = os.environ.get("SCREENSCRAPER_DEV_PASSWORD", "").strip()
+    softname = os.environ.get("SCREENSCRAPER_SOFTNAME", "AmigaADFLibraryBuilder").strip()
+    if dev_id or password or not getattr(sys, "frozen", False):
+        return dev_id, password, softname
+
+    from . import _frozen_version
+
+    payload = getattr(_frozen_version, "SCREENSCRAPER_BUILD_IDENTITY", None)
+    if payload is None:
+        return "", "", softname
+    key, ciphertext = payload
+    identity = bytes(a ^ b for a, b in zip(key, ciphertext, strict=True))
+    return tuple(json.loads(identity))
+
+
+class _NoScreenScraperRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
 
 class ScreenScraperProvider:
     """ScreenScraper metadata, artwork, and manual provider.
@@ -771,7 +816,10 @@ class ScreenScraperProvider:
             self._opener = opener
             self._resolve_urls = False
         else:
-            self._opener = None
+            if config.base_url not in (DEFAULT_BASE_URL, "https://www.screenscraper.fr/api2/"):
+                raise ScreenScraperAuthError("ScreenScraper requires the official HTTPS API endpoint")
+            self.config = dataclass_replace(config, base_url=DEFAULT_BASE_URL)
+            self._opener = urllib.request.build_opener(_NoScreenScraperRedirect()).open
             self._resolve_urls = True
 
         # Credentials
@@ -781,14 +829,29 @@ class ScreenScraperProvider:
         self._ssid = ssid
         self._sspassword = sspassword
 
-        # Discovered Amiga system ID (cached)
-        self._amiga_system_id: Optional[str] = None
-        self._system_id_lock = __import__("threading").RLock()
-
         # Negative lookup cache (file-backed, shared across provider instances)
         self._negative_ttl = 3600.0  # 1 hour
 
     # --- Credential helpers --------------------------------------------------
+
+    def verify_member_login(self) -> bool:
+        """Confirm ScreenScraper identifies the request as the supplied member."""
+        if not self._ssid or not self._sspassword:
+            return False
+        params = self._build_auth_params()
+        params["output"] = "xml"
+        url = self.config.base_url + "ssuserInfos.php?" + urllib.parse.urlencode(params)
+        payload = _fetch_xml(
+            url, timeout=self.config.timeout_seconds, max_bytes=self.config.max_response_bytes,
+            opener=self._opener, resolve=self._resolve_urls,
+        )
+        root = ET.fromstring(payload)
+        member = root if root.tag == "ssuser" else root.find(".//ssuser")
+        if member is None:
+            return False
+        account = member.findtext("id", "").strip()
+        member_id = member.findtext("numid", "").strip()
+        return member_id.isdecimal() and int(member_id) > 0 and account.casefold() == self._ssid.casefold()
 
     def _build_auth_params(self) -> dict[str, str]:
         """Build authentication parameters for API requests."""
@@ -802,16 +865,6 @@ class ScreenScraperProvider:
         if self._sspassword:
             params["sspassword"] = self._sspassword
         return params
-
-    def _get_amiga_system_id(self) -> str:
-        """Get the Amiga system ID, discovering if necessary."""
-        with self._system_id_lock:
-            if self._amiga_system_id:
-                return self._amiga_system_id
-            # For now, use the default. In a full implementation, we'd call
-            # the system list endpoint and find the Amiga entry.
-            self._amiga_system_id = DEFAULT_AMIGA_SYSTEM_ID
-            return self._amiga_system_id
 
     # --- Cache helpers -------------------------------------------------------
 
@@ -847,18 +900,45 @@ class ScreenScraperProvider:
 
     # --- Core lookup methods -------------------------------------------------
 
+    def lookup_group(self, group: Any, scans: dict[str, Any]) -> Optional[ScreenScraperResult]:
+        """Match this release using a fingerprint of one of its own disks."""
+        chipset = (getattr(group, "chipset", None) or "").upper()
+        system_id = AGA_AMIGA_SYSTEM_ID if chipset.startswith("AGA") else DEFAULT_AMIGA_SYSTEM_ID
+        for disk in getattr(group, "disks", ()):
+            scan = scans.get(disk.source_filename)
+            if scan is None:
+                continue
+            try:
+                with scan.path.open("rb") as disk_image:
+                    sha1 = hashlib.file_digest(disk_image, "sha1").hexdigest()
+            except OSError:
+                continue
+            result = self.lookup_by_hash(
+                None, None, sha1, group.title, size=scan.size, system_id=system_id,
+            )
+            if result.found:
+                return result
+            break
+        return self.lookup_by_title(group.title, group=group, system_id=system_id)
+
     def lookup_by_hash(
         self,
         crc: Optional[str],
         md5: Optional[str],
         sha1: Optional[str],
         canonical_title: str,
+        *,
+        size: Optional[int] = None,
+        system_id: Optional[str] = None,
     ) -> ScreenScraperResult:
         """Lookup game by ROM hash (CRC/MD5/SHA1)."""
         # Build cache key
         cache_key = _cache_key_hash(crc, md5, sha1)
         if not cache_key:
             return ScreenScraperResult(found=False, match_method=ScreenScraperMatchMethod.NONE)
+
+        if system_id is not None:
+            cache_key = f"{system_id}:{cache_key}"
 
         # Check metadata cache
         cached = _cache_load(self.cache_dir, cache_key, self.config.cache_ttl)
@@ -871,7 +951,10 @@ class ScreenScraperProvider:
 
         # Build query parameters
         params = self._build_auth_params()
-        params["systemeid"] = self._get_amiga_system_id()
+        params["systemeid"] = system_id or DEFAULT_AMIGA_SYSTEM_ID
+        if size is not None:
+            params["romtaille"] = str(size)
+            params["romtype"] = "rom"
 
         # Add hash parameters (ScreenScraper supports crc, md5, sha1)
         if crc:
@@ -928,6 +1011,8 @@ class ScreenScraperProvider:
                         if result.provider_id:
                             _cache_store(self.cache_dir, _cache_key_provider_id(result.provider_id), self._result_to_cache_dict(result))
                         return result
+                except (ScreenScraperAuthError, ScreenScraperQuotaExceeded):
+                    raise
                 except Exception:
                     pass  # Retry failed, fall through to miss
             # If we get here, either rate limiting not respected or retry failed
@@ -955,7 +1040,7 @@ class ScreenScraperProvider:
             return ScreenScraperResult(found=False, match_method=ScreenScraperMatchMethod.NONE)
 
         params = self._build_auth_params()
-        params["id"] = provider_id
+        params["gameid"] = provider_id
 
         url = self.config.base_url + "jeuInfos.php?" + urllib.parse.urlencode(params)
 
@@ -986,9 +1071,12 @@ class ScreenScraperProvider:
         except Exception:
             return ScreenScraperResult(found=False, match_method=ScreenScraperMatchMethod.NONE)
 
-    def lookup_by_title(self, title: str, group: Any = None) -> ScreenScraperResult:
+    def lookup_by_title(
+        self, title: str, group: Any = None, *, system_id: Optional[str] = None,
+    ) -> ScreenScraperResult:
         """Lookup game by title + system search, validated through relevance gate."""
-        cache_key = _cache_key_title(title, self._get_amiga_system_id())
+        system_id = system_id or DEFAULT_AMIGA_SYSTEM_ID
+        cache_key = _cache_key_title(title, system_id)
 
         # Check metadata cache
         cached = _cache_load(self.cache_dir, cache_key, self.config.cache_ttl)
@@ -1001,7 +1089,7 @@ class ScreenScraperProvider:
 
         params = self._build_auth_params()
         params["recherche"] = title
-        params["systemeid"] = self._get_amiga_system_id()
+        params["systemeid"] = system_id
 
         url = self.config.base_url + "jeuRecherche.php?" + urllib.parse.urlencode(params)
 
@@ -1053,7 +1141,7 @@ class ScreenScraperProvider:
                     result.match_method = ScreenScraperMatchMethod.TITLE_SEARCH
                     # Validate through relevance gate
                     if group is not None:
-                        decision = validate_metadata_relevance(title, result.to_metadata_record(), group=group)
+                        decision = validate_metadata_relevance(title, self.to_metadata_record(result), group=group)
                         result.relevance_category = decision.category
                         result.relevance_confidence = decision.confidence
                         result.relevance_evidence = list(decision.evidence)
@@ -1096,10 +1184,9 @@ class ScreenScraperProvider:
             return None
 
         params = self._build_auth_params()
-        params["id"] = provider_id
-        params["media"] = media_type
-        if region:
-            params["region"] = region
+        params["systemeid"] = DEFAULT_AMIGA_SYSTEM_ID
+        params["jeuid"] = provider_id
+        params["media"] = f"{media_type}({region})" if region else media_type
 
         url = self.config.base_url + "mediaJeu.php?" + urllib.parse.urlencode(params)
 
@@ -1134,9 +1221,9 @@ class ScreenScraperProvider:
             return None
 
         params = self._build_auth_params()
-        params["id"] = provider_id
-        if region:
-            params["region"] = region
+        params["systemeid"] = DEFAULT_AMIGA_SYSTEM_ID
+        params["jeuid"] = provider_id
+        params["media"] = f"manuel({region})" if region else "manuel"
 
         url = self.config.base_url + "mediaManuelJeu.php?" + urllib.parse.urlencode(params)
 
@@ -1178,7 +1265,7 @@ class ScreenScraperProvider:
             media_types = ["box", "cover", "title", "screenshot"]
             best_media = _select_best_media(parsed["medias"], self.config.preferred_regions, media_types)
             if best_media:
-                result.artwork_url = best_media["url"]
+                result.artwork_url = _public_media_url(best_media["url"])
                 result.artwork_media_type = best_media["type"]
                 result.artwork_source_url = self.config.base_url + "mediaJeu.php"  # placeholder
 
@@ -1186,7 +1273,7 @@ class ScreenScraperProvider:
         if self.config.download_manuals and parsed.get("manuals"):
             best_manual = _select_best_manual(parsed["manuals"], self.config.preferred_regions)
             if best_manual:
-                result.manual_url = best_manual["url"]
+                result.manual_url = _public_media_url(best_manual["url"])
                 result.manual_region = best_manual.get("region")
                 result.manual_language = best_manual.get("language")
 
@@ -1208,9 +1295,9 @@ class ScreenScraperProvider:
             players=cached.get("players"),
             region=cached.get("region"),
             language=cached.get("language"),
-            artwork_url=cached.get("artwork_url"),
+            artwork_url=_public_media_url(cached.get("artwork_url")),
             artwork_media_type=cached.get("artwork_media_type"),
-            manual_url=cached.get("manual_url"),
+            manual_url=_public_media_url(cached.get("manual_url")),
             manual_region=cached.get("manual_region"),
             manual_language=cached.get("manual_language"),
             external_ids=cached.get("external_ids", {}),
@@ -1304,6 +1391,8 @@ def enrich_group_with_screenscraper(
             resolve_urls=resolve_urls,
         )
 
+        if hasattr(group, "disks"):
+            return provider.lookup_group(group, scans)
         # Extract hashes from scan records
         crc = None
         md5 = None

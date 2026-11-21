@@ -27,7 +27,8 @@ Use the actual ZIP/EXE on Windows, not only source/widget tests. Record artifact
 - Move a disk with custom media, merge releases, assign media elsewhere, and verify undo/redo and persistence.
 - Inspect NFO, artwork, and generated RTFM from Preview; verify state and provenance agree after lookup Apply.
 - Confirm Build & Export is a tab with one Export action and no Check only/acknowledgement controls.
-- Verify required-artwork and 1G1R behaviour, export paths, unresolved-choice summaries, and actual errors.
+- Verify required artwork and export paths. With 1G1R enabled, choose a release for every multi-version game and verify that cancelling leaves the destination untouched.
+- Test ScreenScraper with a known developer identity and member account when available. Confirm that HTTP 401 and 403 are distinguishable and that diagnostics omit credentials.
 - Hash original ADF/DSK and media fixtures before/after; verify they were not modified.
 
 ## Publish and verify

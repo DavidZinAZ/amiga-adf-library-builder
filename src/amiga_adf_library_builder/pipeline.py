@@ -276,6 +276,10 @@ def _apply_curation(
 def run_pipeline(
     cfg: PathConfig,
     run: RunConfig,
+    *,
+    screenscraper_config: Optional[dict] = None,
+    screenscraper_member: Optional[tuple[str, str]] = None,
+    screenscraper_developer: Optional[tuple[str, str, str]] = None,
     **kwargs: Any,
 ) -> dict:
     """Execute phases 2-4, 5 (optional), and 6. Returns a result summary dict.
@@ -320,6 +324,7 @@ def run_pipeline(
     progressive_prompt_callback = kwargs.pop("progressive_prompt_callback", run.progressive_prompt_callback)
     cancel_event = kwargs.pop("cancel_event", None)
     activity = kwargs.pop("activity", None)
+    request_export_choices = kwargs.pop("request_export_choices", None)
     if kwargs:
         raise TypeError(f"unexpected keyword arguments: {sorted(kwargs)}")
     def _act(msg: str) -> None:
@@ -431,21 +436,22 @@ def run_pipeline(
     # reuse, then title + system search. Credentials (devid, devpassword, softname,
     # ssid, sspassword) come from environment variables / SecretStore only.
     screenscraper_provider = None
-    if screenscraper_config_path:
+    if online and (screenscraper_config is not None or screenscraper_config_path):
         try:
             from . import screenscraper as ss_mod
             from .paths import load_screenscraper_config
 
             ss_cfg = ss_mod.ScreenScraperConfig.from_dict(
-                load_screenscraper_config(screenscraper_config_path)
+                screenscraper_config if screenscraper_config is not None
+                else load_screenscraper_config(screenscraper_config_path)
             )
             if ss_cfg.enabled:
                 # Credentials from environment / SecretStore
-                dev_id = os.environ.get("SCREENSCRAPER_DEV_ID", "").strip()
-                dev_password = os.environ.get("SCREENSCRAPER_DEV_PASSWORD", "").strip()
-                softname = os.environ.get("SCREENSCRAPER_SOFTNAME", "AmigaADFLibraryBuilder").strip()
-                ssid = os.environ.get("SCREENSCRAPER_SSID", "").strip()
-                sspassword = os.environ.get("SCREENSCRAPER_SSPASSWORD", "").strip()
+                dev_id, dev_password, softname = screenscraper_developer or ss_mod.developer_credentials()
+                ssid, sspassword = screenscraper_member if screenscraper_member is not None else (
+                    os.environ.get("SCREENSCRAPER_SSID", "").strip(),
+                    os.environ.get("SCREENSCRAPER_SSPASSWORD", "").strip(),
+                )
                 if dev_id and dev_password:
                     screenscraper_provider = ss_mod.ScreenScraperProvider(
                         ss_cfg, cfg.metadata_cache_dir,
@@ -607,22 +613,10 @@ def run_pipeline(
                 _act("RTFM phase: enabled, building manual sidecars…")
                 manual_trace["category"] = "enabled"
                 manual_trace["roots_searched"] = list(rtfm_cfg.manuals_roots)
-                # Optional RetroKit / Archive.org manual provider (GH-10).
-                # OPTIONAL and DISABLED by default; only built when a
-                # [retrokit_manuals] config is present AND enabled AND the run
-                # is online. The provider performs network fetches (index +
-                # manual artifact), so --online is the operator's explicit
-                # network-authorization signal, exactly like the other online
-                # providers; an offline run never touches the network and the
-                # deterministic RTFM build is unchanged. No credentials are
-                # required (Archive.org is public). The cache lives under the
-                # managed metadata cache dir. A provider failure, miss, or
-                # outage degrades to extra_sources=None so the deterministic
-                # offline RTFM build is unchanged.
-                retrokit_sources = None
+                # Online manuals are a fallback after saved and local choices.
+                missing_manual_lookup = None
                 if online and retrokit_config_path:
                     try:
-                        _act("RTFM phase: querying RetroKit manual provider…")
                         from . import retrokit as rk_mod
                         from .paths import load_retrokit_config
 
@@ -630,24 +624,24 @@ def run_pipeline(
                             load_retrokit_config(retrokit_config_path)
                         )
                         if rk_cfg.enabled:
-                            rk_provider = rk_mod.RetroKitProvider(
-                                rk_cfg, metadata_cache_dir
-                            )
-                            rk_results = [
-                                rk_provider.resolve_and_acquire(g) for g in groups
-                            ]
-                            retrokit_sources = rk_mod.to_rtfm_sources(rk_results)
-                            _act(f"RTFM phase: RetroKit returned {len(rk_results)} candidate(s)")
-                            manual_trace["provider_statuses"].append("retrokit:queried")
-                    except Exception:  # provider failure must not break the pipeline
-                        retrokit_sources = None
+                            rk_provider = rk_mod.RetroKitProvider(rk_cfg, metadata_cache_dir)
+
+                            def missing_manual_lookup(group):
+                                if cancel_event is not None and cancel_event.is_set():
+                                    return []
+                                _act(f"RTFM phase: checking RetroKit for {group.title}")
+                                try:
+                                    result = rk_provider.resolve_and_acquire(group)
+                                    if "retrokit:queried" not in manual_trace["provider_statuses"]:
+                                        manual_trace["provider_statuses"].append("retrokit:queried")
+                                    return rk_mod.to_rtfm_sources([result])
+                                except Exception:
+                                    if "retrokit:error" not in manual_trace["provider_statuses"]:
+                                        manual_trace["provider_statuses"].append("retrokit:error")
+                                    return []
+                    except Exception:
                         manual_trace["provider_statuses"].append("retrokit:error")
 
-
-                # RetroKit sources remain fallback candidates. Local-media
-                # manuals are keyed separately: upstream already selected each
-                # source for a specific release, so the RTFM matcher must trust it.
-                _fallback_sources = list(retrokit_sources or [])
                 _explicit_manual_sources = {}
                 for _g, _r in zip(groups, enrich_results):
                     for _ms in getattr(_r, "manual_sources", None) or []:
@@ -670,7 +664,7 @@ def run_pipeline(
                     groups,
                     cfg=rtfm_cfg,
                     rtfm_dir=rtfm_dir,
-                    extra_sources=_fallback_sources or None,
+                    missing_manual_lookup=missing_manual_lookup,
                     explicit_sources=_explicit_manual_sources,
                     library_root=library_root,
                     activity=_act,
@@ -846,7 +840,10 @@ def run_pipeline(
         # before the export phase so only the selected releases are exported.
         selection_result = None
         try:
-            from .selection import select_one_per_game, load_operator_decisions, write_selection_manifest
+            from .selection import (
+                group_releases_for_selection, load_operator_decisions,
+                select_one_per_game, write_selection_manifest,
+            )
             decisions = None
             if operator_decisions_path:
                 decisions = load_operator_decisions(Path(operator_decisions_path))
@@ -873,6 +870,20 @@ def run_pipeline(
                 f"as unrecognized."
             )
             if one_per_game:
+                export_choices = None
+                if request_export_choices is not None and not verify_only:
+                    candidates = {}
+                    for game_id, releases in sorted(group_releases_for_selection(groups).items()):
+                        eligible = [release for release in releases if not release.quarantine_reason]
+                        if len(releases) > 1 and eligible:
+                            candidates[game_id] = eligible
+                    if candidates:
+                        export_choices = request_export_choices(candidates)
+                        if export_choices is None or (cancel_event is not None and cancel_event.is_set()):
+                            _act("Export cancelled while choosing releases.")
+                            return {"run_id": run_id, "cancelled": True, "files_scanned": len(scans), "groups": len(groups)}
+                        if export_choices.keys() != candidates.keys():
+                            raise ValueError("Export requires one choice per game with multiple releases.")
                 # Load canonical library once for region/language/version scoring.
                 # If no canonical.db exists yet (fresh CLI export), create one
                 # from the current staged result so region/language rank effectively.
@@ -880,7 +891,8 @@ def run_pipeline(
                 if _canon is None:
                     _canon = _ensure_canonical_library(library_root, groups)
                 selection_result = select_one_per_game(
-                    groups, approvals=approvals, canon=_canon, decisions=decisions
+                    groups, approvals=approvals, canon=_canon, decisions=decisions,
+                    export_choices=export_choices
                 )
                 if _canon is not None:
                     try:

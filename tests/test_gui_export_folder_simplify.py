@@ -205,3 +205,33 @@ def _collect_display_texts(widget) -> set[str]:
 
     _walk(widget)
     return results
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_1g1r_dialog_asks_for_every_multi_release_game(qt_offscreen, monkeypatch, cancel):
+    from threading import Event
+
+    from PySide6.QtWidgets import QInputDialog
+    from amiga_adf_library_builder.models import ReleaseGroup
+
+    window = _make_window(qt_offscreen)
+    window._cancel_event = Event()
+    candidates = {}
+    for title in ("Alpha", "Beta"):
+        candidates[title] = [
+            ReleaseGroup(f"{title}-{version}", f"{title} {version}", None, None, None)
+            for version in ("v1.0", "v2.0")
+        ]
+    prompts = []
+
+    def choose(parent, caption, message, labels, current, editable):
+        prompts.append(message)
+        return labels[1], not (cancel and len(prompts) == 2)
+
+    monkeypatch.setattr(QInputDialog, "getItem", choose)
+    response, ready = {}, Event()
+    window._choose_export_releases(candidates, (response, ready))
+    assert ready.is_set()
+    assert len(prompts) == 2
+    assert response == ({} if cancel else {"choices": {"Alpha": "Alpha-v2.0", "Beta": "Beta-v2.0"}})
+    window.close()

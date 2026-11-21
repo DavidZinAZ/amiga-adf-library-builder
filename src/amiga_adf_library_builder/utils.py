@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -41,3 +42,19 @@ def write_json_atomic(path: Path, data: dict) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     tmp.replace(path)
+
+
+def cache_deadline_active(path: Path) -> bool:
+    """Return whether a persisted retry deadline is still in the future."""
+    try:
+        return float(json.loads(path.read_text(encoding="utf-8"))["retry_at"]) > time.time()
+    except (OSError, ValueError, TypeError, KeyError):
+        return False
+
+
+def save_cache_deadline(path: Path, wait_seconds: float) -> None:
+    """Persist a best-effort deadline without making cache IO fatal."""
+    try:
+        write_json_atomic(path, {"retry_at": time.time() + wait_seconds})
+    except OSError:
+        pass

@@ -424,11 +424,11 @@ def test_screenscraper_remains_present_and_unconfigured_by_default():
     assert ss.auth_required() == "required"
 
 
-def test_screenscraper_field_set_is_unchanged_by_cleanup():
+def test_screenscraper_fields_exclude_an_editable_endpoint():
     from amiga_adf_library_builder.gui.providers import ScreenScraperProvider
     keys = {f.key for f in ScreenScraperProvider().metadata.fields}
     assert keys == {
-        "base_url", "timeout_seconds", "max_response_bytes",
+        "timeout_seconds", "max_response_bytes",
         "max_concurrency", "confidence_threshold", "preferred_regions",
         "download_metadata", "download_artwork", "download_manuals",
         "cache_ttl", "respect_rate_limit", "rate_limit_backoff_seconds",

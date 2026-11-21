@@ -483,3 +483,53 @@ class TestRegressionCompatibility:
         assert rec.canonical_title == "Test Game"
         assert rec.provider == "wikipedia"
         assert rec.confidence == 0.9
+
+def test_dat_hash_title_drives_wikipedia_and_preserves_its_metadata(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from amiga_adf_library_builder import enrich
+    from amiga_adf_library_builder.models import ParsedRecord, ScanRecord
+
+    disk = tmp_path / "King OF Chicago d2.adf"
+    source = SimpleNamespace(enabled=True, entry_count=1)
+    entry = SimpleNamespace(
+        title="King of Chicago, The (1987)(Cinemaware)(Disk 2 of 2)",
+        year="1987", publisher="Cinemaware", source_id="fixture-dat",
+    )
+    manager = SimpleNamespace(
+        list_sources=lambda: [source],
+        lookup_file=lambda path, *, expected_sha256: [entry] if path == disk else [],
+    )
+    url = "https://upload.wikimedia.org/test-cover.jpg"
+    record = MetadataRecord(
+        canonical_title="The King of Chicago", provider="wikipedia",
+        description="A video game about Chicago.", artwork_url=url, confidence=0.95,
+    )
+    queries = []
+    opened = []
+
+    def lookup(title, **kwargs):
+        queries.append(title)
+        return record, "wikipedia", []
+
+    def download(metadata, *args):
+        opened.append(metadata.artwork_url)
+        raise ValueError("synthetic download stop")
+
+    monkeypatch.setattr(enrich, "lookup_metadata", lookup)
+    monkeypatch.setattr(enrich, "_download_artwork", download)
+    group = ReleaseGroup(
+        release_key="fixture", title="King OF Chicago d2", edition=None, group=None,
+        chipset=None, records=[ParsedRecord(source_filename=disk.name, title="King OF Chicago d2", ext=".adf")],
+    )
+    result = enrich.enrich_group(
+        group, nfo_dir=tmp_path / "nfo",
+        scans={disk.name: ScanRecord(disk, disk.name, 1, "fixture-hash", "")},
+        artwork_original_dir=tmp_path / "master", artwork_processed_dir=tmp_path / "processed",
+        metadata_source_manager=manager, online=True,
+    )
+
+    assert queries == ["King of Chicago, The"]
+    assert opened == [url]
+    assert result.provider == "wikipedia"
+    assert "A video game about Chicago." in result.nfo_path.read_text(encoding="utf-8")
+    assert result.dat_results[0]["match_type"] == "dat_hash"

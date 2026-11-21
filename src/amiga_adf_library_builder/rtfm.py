@@ -70,7 +70,7 @@ import warnings
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional
 
 # Reuse the local-media provenance privacy helpers (root-relative path + hash).
 # They are pure helpers with no network/state dependency.
@@ -1670,6 +1670,7 @@ def build_rtfm_for_group(
     explicit_sources: Optional[list[RtfmSource]] = None,
     library_root: Optional[Path] = None,
     basename: Optional[str] = None,
+    missing_manual_lookup: Optional[Callable[..., list[RtfmSource]]] = None,
 ) -> RtfmResult:
     """Build the ``.rtfm`` + provenance sidecar for one release group.
 
@@ -1754,6 +1755,12 @@ def build_rtfm_for_group(
     else:
         scored = [(s, score_source_match(s, group)) for s in all_sources]
         matched = [s for s, sc in scored if sc.matched]
+        if missing_manual_lookup is not None and not any(
+            source.category == CATEGORY_MANUALS for source in matched
+        ):
+            fallback_sources = missing_manual_lookup(group)
+            scored.extend((source, score_source_match(source, group)) for source in fallback_sources)
+            matched = [source for source, score in scored if score.matched]
         # Deterministic sort by (descending confidence, ascending canonical key) so
         # the "best" and "near-tie" candidates are stable and reproducible.
         ranked = sorted(
@@ -1979,6 +1986,7 @@ def _build_rtfm_all(
     extra_sources: Optional[list[RtfmSource]] = None,
     explicit_sources: Optional[dict[str, list[RtfmSource]]] = None,
     library_root: Optional[Path] = None,
+    missing_manual_lookup: Optional[Callable[..., list[RtfmSource]]] = None,
 ) -> list[RtfmResult]:
     """Build ``.rtfm`` sidecars for every release group (deterministic, offline).
 
@@ -2032,6 +2040,7 @@ def _build_rtfm_all(
                 g, cfg=cfg, rtfm_dir=rtfm_dir, sources=sources,
                 explicit_sources=selected_sources,
                 library_root=library_root, basename=names[g.release_key],
+                missing_manual_lookup=missing_manual_lookup if chosen is None else None,
             ))
             if selected_sources:
                 # Candidate review is independent of authoritative selection:
@@ -2058,9 +2067,10 @@ def _build_rtfm_all(
 
 
 def build_rtfm_all(groups, *, cfg, rtfm_dir, extra_sources=None,
-                   explicit_sources=None, library_root=None, activity=None):
+                   explicit_sources=None, library_root=None, activity=None,
+                   missing_manual_lookup=None):
     """Build manuals with live per-release, per-source and OCR progress."""
     with progress_scope(activity):
         return _build_rtfm_all(groups, cfg=cfg, rtfm_dir=rtfm_dir,
                                extra_sources=extra_sources, explicit_sources=explicit_sources,
-                               library_root=library_root)
+                               library_root=library_root, missing_manual_lookup=missing_manual_lookup)

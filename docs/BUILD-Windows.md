@@ -127,3 +127,17 @@ from source. At minimum verify:
 - original ADF/DSK files remain unchanged.
 
 Use the maintained [Release Checklist](RELEASE-CHECKLIST.md) and [Developer Guide](DEVELOPER-GUIDE.md). Documentation-only changes do not need a new application tag; main pushes still trigger the current build workflow.
+
+
+## ScreenScraper release credentials
+
+For a private build, supply `SCREENSCRAPER_DEV_ID` and
+`SCREENSCRAPER_DEV_PASSWORD` through the build process environment. Set
+`SCREENSCRAPER_SOFTNAME` if ScreenScraper issued a specific software name.
+With both credentials absent, the build omits the developer identity. A partial
+pair fails the build.
+
+The build masks the developer identity in both Windows formats. The masking
+data ships with the app, so recipients can recover it. The build leaves the
+credentials out of Git source. Use the regular API developer password and
+keep the separate debug password out of all release settings.

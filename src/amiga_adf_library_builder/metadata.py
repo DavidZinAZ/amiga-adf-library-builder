@@ -24,7 +24,7 @@ from typing import Any, Callable, Optional
 
 from .manual_approvals import validate_source_url
 from .title_norm import canonical_title
-from .utils import now_iso as utc_now
+from .utils import cache_deadline_active, save_cache_deadline, now_iso as utc_now
 from .wikipedia_client import (
     DEFAULT_POLICY,
     WikipediaGate,
@@ -1448,12 +1448,27 @@ def lookup_metadata(title: str, *, cache_dir: Path, curated_dir: Path,
         if mobygames_key:
             _try_provider("mobygames",
                           lambda: mobygames_lookup(title, api_key=mobygames_key, timeout=timeout, opener=opener))
-    if accepted is None and wikipedia_enabled:
+    wiki_miss = Path(cache_dir) / "wikipedia-misses" / f"{cache_key(title)}.json"
+    if accepted is None and wikipedia_enabled and not refresh and cache_deadline_active(wiki_miss):
+        _log("Wikipedia: reusing a recent no-match result.")
+        relevance_events.append({
+            "provider": "wikipedia", "canonical_title": "", "category": "not_found",
+            "confidence": 0.0, "reason": "cached_no_result", "evidence": [],
+        })
+    elif accepted is None and wikipedia_enabled:
         wiki_diagnostics: list[dict] = []
         _try_provider("wikipedia",
                       lambda: wikipedia_lookup(
                           title, timeout=timeout, opener=opener,
                           gate=gate, diagnostics=wiki_diagnostics))
+        decisions = {entry.get("decision") for entry in wiki_diagnostics}
+        if (
+            accepted is None
+            and relevance_events[-1]["reason"] == "no_result"
+            and "no_acceptable_candidate" in decisions
+            and decisions <= {"ok", "no_acceptable_candidate"}
+        ):
+            save_cache_deadline(wiki_miss, 24 * 60 * 60)
         # (GH-192 online-usability pass) Surface the per-request decision trail:
         # which query form was sent, the URL, HTTP status, rate-limit flag,
         # Retry-After, the backoff/pause decision, candidate title, confidence,

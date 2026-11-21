@@ -23,6 +23,18 @@ Disk-byte matching compares compatible SHA-1, MD5, or CRC values and file sizes 
 
 The GUI, lookup, and pipeline should use the resolved Library-Root metadata-source database. Do not create a second index in the application data directory as a workaround.
 
+When a disk hash matches a DAT entry, the app uses the DAT title for online
+lookup. It keeps descriptions and artwork from an accepted Wikipedia article.
+If online lookup misses, the DAT provides fallback metadata.
+
+Repeat online builds reuse successful metadata and downloaded artwork. Wikipedia
+searches that complete with no matching article are remembered for 24 hours.
+Artwork responses that ask the app to slow down defer further downloads from the
+same host so the rest of the build can continue. Explicit metadata refresh
+bypasses cached Wikipedia misses and still respects artwork host backoff.
+The optional RetroKit lookup runs after saved and local manual sources have
+been checked.
+
 ## Local Media
 
 Add artwork roots and manual roots separately. Recognised artwork category folders are detected automatically; the GUI no longer asks for an asset type per folder. Flat folder layouts retain a default/saved category internally for compatibility.
@@ -43,7 +55,27 @@ Shared and per-disk artwork/RTFM choices, file reassignment, and undo are docume
 
 ## Online integrations
 
-Wikipedia and ScreenScraper are the generic Providers-tab entries. Configure only fields the current app exposes. ScreenScraper availability depends on the configured access; a Ready/configured state is not proof that a relevant lookup will succeed.
+Wikipedia and ScreenScraper are the generic Providers-tab entries. ScreenScraper
+is off by default. To use it in a release with a developer identity, enable
+**Providers > ScreenScraper** and turn on online lookup for your build. Use
+**Set ScreenScraper login** to save your regular member username and password
+in the encrypted vault. Saving both fields blank selects guest access, subject
+to ScreenScraper availability and limits. A configured status does not make a
+live request.
+
+Use **Test ScreenScraper login** to verify the saved member account with
+ScreenScraper. The test needs the app's developer identity and performs no game lookup.
+
+For a private Windows install, use **Set local developer credentials** to save
+the developer ID and password in the encrypted vault. Enter the assigned
+software name if ScreenScraper supplied one. The GUI uses the local identity
+for account tests and online builds.
+
+For source and CLI runs, supply the developer identity through
+`SCREENSCRAPER_DEV_ID`, `SCREENSCRAPER_DEV_PASSWORD`, and optionally
+`SCREENSCRAPER_SOFTNAME`. The CLI uses an enabled `[screenscraper]` table and
+`--online`. Optional CLI member credentials use `SCREENSCRAPER_SSID` and
+`SCREENSCRAPER_SSPASSWORD`.
 
 The core also has provider-specific integration paths, including optional key-based sources. Those are distinct from the generic GUI registry. Consult configuration fields in the current source rather than assuming every core provider has a GUI panel. Manual source searching likewise has its own controls and permission.
 

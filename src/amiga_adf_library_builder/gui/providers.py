@@ -376,16 +376,6 @@ class WikipediaProvider(Provider):
 def _screenscraper_field_defaults() -> list[ProviderField]:
     return [
         ProviderField(
-            key="base_url",
-            label="ScreenScraper API endpoint",
-            default="https://www.screenscraper.fr/api2/",
-            placeholder="https://www.screenscraper.fr/api2/",
-            help_text=(
-                "ScreenScraper WebAPI endpoint. Only change if using a mirror or "
-                "self-hosted proxy."
-            ),
-        ),
-        ProviderField(
             key="timeout_seconds",
             label="Time limit per request (seconds)",
             default="15.0",
@@ -473,7 +463,7 @@ def _build_screenscraper_config_dict(
     """Build a typed ``[screenscraper]`` TOML table (mirrors ScreenScraperConfig)."""
     return {
         "enabled": enabled,
-        "base_url": base_url or "https://www.screenscraper.fr/api2/",
+        "base_url": base_url or "https://api.screenscraper.fr/api2/",
         "timeout_seconds": float(timeout_seconds or 15.0),
         "max_response_bytes": int(max_response_bytes or 2_000_000),
         "max_concurrency": int(max_concurrency or 1),
@@ -521,7 +511,7 @@ class ScreenScraperProvider(Provider):
             requires_secret=True,
         )
         self._enabled = False
-        self._base_url = "https://www.screenscraper.fr/api2/"
+        self._base_url = "https://api.screenscraper.fr/api2/"
         self._timeout_seconds = "15.0"
         self._max_response_bytes = "2000000"
         self._max_concurrency = "1"
@@ -547,7 +537,7 @@ class ScreenScraperProvider(Provider):
     def set_field(self, key: str, value: str) -> None:
         with self._lock:
             if key == "base_url":
-                self._base_url = (value or "").rstrip("/")
+                return  # Ignore endpoints previously saved by older GUI versions.
             elif key == "timeout_seconds":
                 self._timeout_seconds = value
             elif key == "max_response_bytes":

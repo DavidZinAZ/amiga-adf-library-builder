@@ -68,6 +68,10 @@ Inspect provider diagnostics before assuming an empty result means a title does 
 
 Open Build & Export, confirm the displayed destination and requirements, then click **Export library**. The application writes the final files into a run-owned staging folder. Review the summary for missing required artwork, choices awaiting review, and actual errors.
 
+With **1G1R: one release per game** enabled, choose which release to keep for
+each game that has multiple eligible releases. The choices apply to this
+export. Cancel a prompt to stop the export before it writes files.
+
 Exported disk filenames determine per-disk JPEG/RTFM companion names. Unassigned disks use shared media. Copy inspected output to your device as a separate step; the app does not write source originals or automatically publish to an SD card.
 
 See [User Guide](USER-GUIDE.md), [Gotek Export Format](gotek-export-format.md), and [Troubleshooting](TROUBLESHOOTING.md).

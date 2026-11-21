@@ -1,12 +1,23 @@
 # Changelog
 
-## Unreleased — repository maintenance
+## Unreleased
 
-- Refresh current guides for v0.3.13 and consolidate stale/repetitive GUI, installation, provider, and developer instructions.
-- Archive ticket-specific root QA/task records and the older documentation audit; relocate the source launcher to tools.
-- Add a maintained release checklist, local Markdown-link checker, and documentation CI.
-- Update bug-report prompts, supported-release wording, example provider opt-in settings, and portable-runtime ignore rules.
-- Keep application version and existing release tags unchanged.
+### Added
+
+- ScreenScraper is an opt-in metadata provider. Windows users can save a member login and, for private installs, developer credentials in the encrypted vault. The live login test distinguishes rejected developer credentials from restricted API access.
+- The GUI prompts for one eligible release per multi-version game during 1G1R export. Choices apply to the current export, and cancelling stops it before export files are written.
+
+### Fixed
+
+- Exact DAT hash matches supply the title for Wikipedia searches while preserving accepted Wikipedia descriptions and artwork.
+- Repeat builds reuse cached metadata and artwork, remember completed Wikipedia misses for 24 hours, and defer rate-limited artwork requests across sessions. RetroKit checks only releases that still need a manual.
+- Post-build diagnostics update on the GUI thread to prevent a native Qt crash during curation refresh.
+- The Wikipedia query module imports on Python 3.11.
+
+### Packaging and documentation
+
+- The Windows build can use an optional developer identity supplied through the build environment. The shipped identity is obfuscated and recoverable from the executable.
+- Update the Windows build, provider, and export guides. Consolidate the current guides and archive historical QA records.
 
 ## 0.3.13 — 2026-10-16
 
@@ -20,6 +31,7 @@
 ## 0.3.12 — 2026-10-16
 
 - Simplify export to a single Export library action, with destination and Check only retained.
+- Consolidate destination configuration under ADF Library Export Folder while preserving existing paths and CLI compatibility.
 - Rename visible source branding to Local Media; remove the artwork asset-type selector and detect category folders automatically.
 - Leave online providers off on fresh installs, preserving explicitly saved provider choices.
 - Combine whole-release merging and selected-disk moves in one dialog with preview and undo.
@@ -288,12 +300,3 @@
 - Replaced skeletal exported NFO generation with rich cached enrichment output.
 - Bundled curated records for the four currently accepted releases.
 - Added online-provider and cache tests.
-
-## Unreleased
-
-### GH-187 — Simplify export folder configuration
-
-- Removed redundant "Export destination" row from the Library tab; the GUI no longer exposes or persists `output_dir`.
-- Renamed "Export work folder" to "ADF Library Export Folder" to accurately describe where finished export/library files are written.
-- Existing configured export paths are preserved; `default_output_dir` and `Preset.output_dir` fields retained for backward compatibility.
-- The CLI `--output-dir` flag and `output_dir` config key remain unchanged (valid-but-unused in the current pipeline).

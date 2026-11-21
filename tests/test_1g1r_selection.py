@@ -377,3 +377,16 @@ class TestIdempotency:
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+def test_export_choice_overrides_conflicting_saved_versions():
+    first = make_group("testgamev10|", title="Test Game v1.0")
+    second = make_group("testgamev20|", title="Test Game v2.0")
+    saved = {"testgamev10": first.release_key, "testgamev20": second.release_key}
+    with pytest.raises(ValueError, match="Conflicting saved"):
+        select_one_per_game([first, second], decisions=saved)
+    result = select_one_per_game(
+        [first, second], decisions=saved, export_choices={"testgame": second.release_key}
+    )
+    assert result.selected == [second]
+    assert result.selection_manifest[0]["decision"] == "operator_export_choice"
+    assert saved == {"testgamev10": first.release_key, "testgamev20": second.release_key}

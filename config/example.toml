@@ -103,29 +103,16 @@ retry_after_cap_seconds = 60
 # Reuse lookups already downloaded instead of re-requesting them.
 use_cache = true
 
-# --- ScreenScraper metadata/artwork/manual provider (OPTIONAL, DISABLED by default) --
-# Opt-in metadata, artwork, and manual lookup via ScreenScraper WebAPI.
-# Requires developer credentials (devid, devpassword, softname) from ScreenScraper.
-# Member credentials (ssid, sspassword) are optional for higher limits.
-# Credentials are NEVER stored in config files; they come from the SecretStore
-# / environment variables (SCREENSCRAPER_DEV_ID, SCREENSCRAPER_DEV_PASSWORD,
-# SCREENSCRAPER_SOFTNAME, SCREENSCRAPER_SSID, SCREENSCRAPER_SSPASSWORD) only.
-#
-# The provider supports three lookup methods in precedence order:
-# 1. Hash-first: ROM hash lookup using CRC/MD5/SHA1 (exact match, highest confidence)
-# 2. Provider ID reuse: cached ScreenScraper game ID from prior successful match
-# 3. Title + system search: validated title + Amiga system search (relevance-gated)
-#
-# Artwork selection respects configured region preference. PDF manuals are retrieved
-# via the mediaManuelJeu.php endpoint and fed into the existing RTFM pipeline.
-#
-# The provider is OFFLINE at import time. No network calls occur until a real
-# fetch with --online. Tests inject fake openers; no live network in test suite.
-# All outbound requests are guarded by the existing SSRF guard (metadata.guard_url).
-# Rate limits and quotas are respected with a single bounded retry.
+# --- ScreenScraper online metadata provider (disabled by default) ---
+# CLI usage requires --online and SCREENSCRAPER_DEV_ID / SCREENSCRAPER_DEV_PASSWORD.
+# Set SCREENSCRAPER_SOFTNAME if ScreenScraper assigned a specific software name.
+# Optional member login uses SCREENSCRAPER_SSID and SCREENSCRAPER_SSPASSWORD.
+# Windows releases can supply the developer identity at build time and save
+# the member login in the local vault. Keep credentials out of this file.
+# The app tries the disk fingerprint first, then searches by title and system.
 [screenscraper]
 enabled = false
-# base_url = "https://www.screenscraper.fr/api2/"
+# Authenticated requests use https://api.screenscraper.fr/api2/.
 # timeout_seconds = 15.0
 # max_response_bytes = 2000000
 # max_concurrency = 1

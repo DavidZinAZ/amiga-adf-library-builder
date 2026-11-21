@@ -848,3 +848,61 @@ class TestBoundedBehaviour:
             assert gate.policy.min_interval_seconds == 3.0
         finally:
             reset_global_gate()
+
+
+def test_wikipedia_queries_offer_normalized_bare_title():
+    cases = {
+        "King of Chicago, The": "The King of Chicago",
+        "Untouchables, The": "The Untouchables",
+        "Ultima VI The False Prophet v1.12": "Ultima VI The False Prophet",
+        "King OF Chicago d2": "King OF Chicago",
+    }
+    for release, normalized in cases.items():
+        variants = build_query_variants(release)
+        assert any(v.label == "bare_quoted" and v.search == normalized for v in variants)
+    assert candidate_is_same_subject("King OF Chicago d2", "The King of Chicago")
+
+
+def test_wikipedia_clean_miss_survives_a_new_session(tmp_path, monkeypatch):
+    calls = []
+
+    def miss(title, *, diagnostics, **kwargs):
+        calls.append(title)
+        diagnostics.extend([{"decision": "ok"}, {"decision": "no_acceptable_candidate"}])
+
+    monkeypatch.setattr(metadata_module, "wikipedia_lookup", miss)
+    for refresh in (False, False, True):
+        metadata_module.lookup_metadata(
+            "Fixture Game", cache_dir=tmp_path / "cache", curated_dir=tmp_path / "curated",
+            refresh=refresh, wikipedia_gate=WikipediaGate(),
+        )
+    assert calls == ["Fixture Game", "Fixture Game"]
+
+
+def test_artwork_host_backoff_survives_a_new_session(tmp_path, monkeypatch):
+    from urllib.error import HTTPError
+    from amiga_adf_library_builder import enrich
+    from amiga_adf_library_builder.models import ReleaseGroup
+
+    attempts = []
+    def artwork_request(record, *args):
+        attempts.append(record.artwork_url)
+        raise HTTPError(record.artwork_url, 429, "rate limited", {"Retry-After": "120"}, None)
+
+    def cached_record(title, **kwargs):
+        return metadata_module.MetadataRecord(
+            canonical_title=title, provider="wikipedia",
+            artwork_url=f"https://upload.wikimedia.org/{title.replace(' ', '-')}.jpg",
+        ), "cache", []
+
+    monkeypatch.setattr(enrich, "_download_artwork", artwork_request)
+    monkeypatch.setattr(enrich, "lookup_metadata", cached_record)
+    for title in ("Fixture One", "Fixture Two"):
+        result = enrich.enrich_group(
+            ReleaseGroup(title, title, None, None, None),
+            nfo_dir=tmp_path / "nfo", scans={},
+            artwork_original_dir=tmp_path / "masters", artwork_processed_dir=tmp_path / "art",
+            metadata_cache_dir=tmp_path / "cache", online=True,
+        )
+    assert len(attempts) == 1
+    assert any(event.detail == "cached artwork retry deadline" for event in result.events)

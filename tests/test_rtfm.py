@@ -1260,3 +1260,23 @@ def test_condensation_notes_recorded_in_provenance(tmp_path):
     raw = res.provenance_path.read_text()
     assert any("condensation" in n for n in res.notes)
     assert "condensation" in raw
+
+
+def test_online_manual_fallback_only_checks_releases_missing_a_local_manual(tmp_path):
+    from amiga_adf_library_builder import rtfm
+
+    local = tmp_path / "manuals"
+    _write_sources(local, {"Fixture With Manual.txt": b"Getting started with the fixture.\n"})
+    groups = [_manual_group("Fixture With Manual"), _manual_group("Missing Manual Game")]
+    requests = []
+
+    def lookup(group):
+        requests.append(group.title)
+        return []
+
+    rtfm.build_rtfm_all(
+        groups, cfg=_cfg({"manuals": local}), rtfm_dir=tmp_path / "out",
+        missing_manual_lookup=lookup,
+    )
+
+    assert requests == ["Missing Manual Game"]

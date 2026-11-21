@@ -300,10 +300,23 @@ def test_close_mid_finalization_is_bounded(tmp_path: Path):
 
 
 # --- requirement 5: timing report in the Diagnostics log ---------------------
-def test_finalization_timing_report_reaches_diagnostics(tmp_path: Path):
+def test_finalization_timing_report_reaches_diagnostics(tmp_path: Path, monkeypatch):
+    from PySide6.QtCore import QThread
+
     win = _make_window(tmp_path / "issue192-report")
+    append_diag = win._append_diag
+    wrong_thread = []
+
+    def record_diagnostic(line):
+        if QThread.currentThread() != win.thread():
+            wrong_thread.append(line)
+            return
+        append_diag(line)
+
+    monkeypatch.setattr(win, "_append_diag", record_diagnostic)
     orig = _build_corpus(win._paths.base)
     _run_to_idle(win, orig)
+    assert not wrong_thread, wrong_thread
 
     text = win._diag.toPlainText()
     assert "Finalize: total" in text, "finalization timing report missing from Diagnostics"

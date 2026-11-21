@@ -277,7 +277,7 @@ def test_screenscraper_config_from_dict_disabled():
 def test_screenscraper_config_from_dict_enabled():
     cfg = ScreenScraperConfig.from_dict({"enabled": True})
     assert cfg.enabled is True
-    assert cfg.base_url == "https://www.screenscraper.fr/api2/"
+    assert cfg.base_url == "https://api.screenscraper.fr/api2/"
     assert cfg.timeout_seconds == 15.0
     assert cfg.max_response_bytes == 2_000_000
     assert cfg.max_concurrency == 1
@@ -558,9 +558,8 @@ def test_download_artwork(monkeypatch, tmp_path):
 
     result = provider.download_artwork("1111", "box", "us")
     assert result == image_data
-    assert "id=1111" in opener.log[0]
-    assert "media=box" in opener.log[0]
-    assert "region=us" in opener.log[0]
+    assert "jeuid=1111" in opener.log[0]
+    assert "media=box%28us%29" in opener.log[0]
 
 
 def test_download_artwork_disabled(monkeypatch, tmp_path):
@@ -583,8 +582,8 @@ def test_download_manual(monkeypatch, tmp_path):
 
     result = provider.download_manual("1111", "us")
     assert result == pdf_data
-    assert "id=1111" in opener.log[0]
-    assert "region=us" in opener.log[0]
+    assert "jeuid=1111" in opener.log[0]
+    assert "media=manuel%28us%29" in opener.log[0]
 
 
 def test_download_manual_disabled(monkeypatch, tmp_path):
@@ -816,3 +815,131 @@ def test_to_metadata_record():
     assert md.description == "Classic game."
     assert md.artwork_url == "https://example.com/art.jpg"
     assert md.artwork_provider == "screenscraper"
+
+def test_lookup_group_fingerprints_its_own_aga_disk(tmp_path):
+    import hashlib
+    from types import SimpleNamespace
+    from urllib.parse import parse_qs, urlsplit
+
+    disk_path = tmp_path / "game.adf"
+    disk_bytes = b"fixture disk image"
+    disk_path.write_bytes(disk_bytes)
+    group = SimpleNamespace(
+        title="Star Voyage", chipset="AGA",
+        disks=[SimpleNamespace(source_filename=disk_path.name)],
+    )
+    scan = SimpleNamespace(path=disk_path, size=len(disk_bytes))
+    opener = _xml_opener(_jeu_infos_xml(game_id=1111, title=group.title))
+    provider = ScreenScraperProvider(
+        ScreenScraperConfig(enabled=True), tmp_path,
+        dev_id="fake-dev", dev_password="fake-app-password",
+        ssid="fake-member", sspassword="fake-member-password", opener=opener,
+    )
+
+    result = provider.lookup_group(group, {"another.adf": object(), disk_path.name: scan})
+
+    assert result.found
+    assert result.provider_id == "1111"
+    request = urlsplit(opener.log[0])
+    assert request.hostname == "api.screenscraper.fr"
+    params = parse_qs(request.query)
+    assert params["systemeid"] == ["111"]
+    assert params["romtaille"] == [str(len(disk_bytes))]
+    assert params["sha1"] == [hashlib.sha1(disk_bytes).hexdigest()]
+    assert params["devid"] == ["fake-dev"]
+    assert params["ssid"] == ["fake-member"]
+    assert disk_path.name not in request.query
+
+
+def test_authenticated_screen_scraper_rejects_custom_endpoint(tmp_path):
+    config = ScreenScraperConfig(enabled=True, base_url="https://example.org/api2/")
+    with pytest.raises(ScreenScraperAuthError, match="official HTTPS API endpoint"):
+        ScreenScraperProvider(config, tmp_path, dev_id="fake-dev", dev_password="fake-password")
+
+
+def test_screen_scraper_drops_credential_bearing_media_links():
+    from amiga_adf_library_builder.screenscraper import _public_media_url
+
+    assert _public_media_url("https://api.screenscraper.fr/media?%64evpassword=fake-secret") is None
+    assert _public_media_url("https://api.screenscraper.fr/media?ssid=member") is None
+    url = "https://api.screenscraper.fr/media?jeuid=56"
+    assert _public_media_url(url) == url
+
+
+@pytest.mark.parametrize("online", [False, True])
+def test_pipeline_uses_configured_screenscraper_only_online(tmp_path, monkeypatch, online):
+    import urllib.request
+    from urllib.parse import parse_qs, urlsplit
+
+    from amiga_adf_library_builder import enrich
+    from amiga_adf_library_builder.paths import resolve_config
+    from amiga_adf_library_builder.pipeline import run_pipeline
+    from amiga_adf_library_builder.run_config import RunConfig
+
+    original = tmp_path / "original"
+    original.mkdir()
+    (original / "Star Voyage.adf").write_bytes(b"fixture disk")
+    config, _ = resolve_config(library_root=str(tmp_path))
+    monkeypatch.setenv("SCREENSCRAPER_DEV_ID", "fake-dev")
+    monkeypatch.setenv("SCREENSCRAPER_DEV_PASSWORD", "fake-app-password")
+    monkeypatch.setattr(enrich, "lookup_metadata", lambda *a, **kw: (None, "offline", []))
+    monkeypatch.setattr("amiga_adf_library_builder.screenscraper.guard_url", lambda *a, **kw: None)
+    opener = _xml_opener(_jeu_infos_xml(game_id=1111, title="Star Voyage"))
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *handlers: type(
+        "FixtureOpener", (), {"open": staticmethod(opener)},
+    )())
+
+    result = run_pipeline(
+        config, RunConfig(online=online),
+        screenscraper_config={"enabled": True, "download_artwork": False, "download_manuals": False},
+        screenscraper_member=("fake-member", "fake-member-password"),
+    )
+
+    assert len(opener.log) == int(online)
+    if online:
+        assert parse_qs(urlsplit(opener.log[0]).query)["ssid"] == ["fake-member"]
+        assert result["per_group"][0]["provider"] == "screenscraper"
+
+
+@pytest.mark.parametrize(("account", "member_id", "accepted"), [
+    ("FixtureMember", "123", True),
+    ("fixturemember", "0", False),
+    ("somebody-else", "123", False),
+    ("", "", False),
+])
+def test_verify_member_login_checks_authenticated_account(tmp_path, account, member_id, accepted):
+    from urllib.parse import parse_qs, urlsplit
+
+    opener = _xml_opener(
+        f"<Data><ssuser><id>{account}</id><numid>{member_id}</numid></ssuser></Data>".encode()
+    )
+    provider = ScreenScraperProvider(
+        ScreenScraperConfig(enabled=True), tmp_path, dev_id="fixture-app",
+        dev_password="fixture-dev-password", ssid="fixturemember",
+        sspassword="fixture-member-password", opener=opener,
+    )
+    assert provider.verify_member_login() is accepted
+    request = urlsplit(opener.log[0])
+    assert request.hostname == "api.screenscraper.fr"
+    assert request.path == "/api2/ssuserInfos.php"
+    params = parse_qs(request.query)
+    assert params["ssid"] == ["fixturemember"]
+    assert params["sspassword"] == ["fixture-member-password"]
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_login_error_preserves_safe_http_status(tmp_path, status):
+    from urllib.error import HTTPError
+
+    def reject(request, **kwargs):
+        raise HTTPError(request.full_url, status, "fixture member password", {}, None)
+
+    provider = ScreenScraperProvider(
+        ScreenScraperConfig(enabled=True), tmp_path,
+        dev_id="fixture-dev", dev_password="fixture-dev-password",
+        ssid="fixture-member", sspassword="fixture-member-password", opener=reject,
+    )
+    with pytest.raises(ScreenScraperAuthError) as error:
+        provider.verify_member_login()
+    assert error.value.status == status
+    assert "password" not in str(error.value)

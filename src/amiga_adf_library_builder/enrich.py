@@ -21,12 +21,10 @@ from . import artwork as artwork_mod
 from .logging_utils import redact
 from .metadata import MetadataRecord, cache_key, guard_url, lookup_metadata
 from .metadata_source import MetadataSourceManager
-from . import screenscraper as ss_mod
 from .models import ReleaseGroup, ScanRecord
-from .utils import write_json_atomic, now_iso as _now_iso
+from .utils import cache_deadline_active, save_cache_deadline, write_json_atomic, now_iso as _now_iso
 from .naming import _sanitize
 from .nfo_render import render_gotek_nfo
-import os
 
 # Retained for exporter-gate compatibility. Artwork policy is aspect-fit within
 # 150x150, never cropped or upscaled; there is no minimum source dimension.
@@ -446,12 +444,9 @@ def _download_artwork(record: MetadataRecord, dest_dir: Path, title: str,
     # Guard against fetching non-public address space. _download_artwork always
     # performs a real network request, so resolve DNS here.
     guard_url(record.artwork_url, resolve=True)
-    # Paced fetch with bounded 429/Retry-After handling (see
-    # _fetch_artwork_bytes). A rate-limited image endpoint no longer abandons
-    # the artwork immediately; it backs off and retries, then still surfaces
-    # the real HTTP status in the download-failed diagnostic when exhausted.
+    # The enrichment run persists throttling deadlines and continues immediately.
     data, content_type = _fetch_artwork_bytes(record.artwork_url, timeout=timeout,
-                                              max_bytes=max_bytes)
+                                              max_bytes=max_bytes, max_retries=0)
     if len(data) > max_bytes:
         raise RuntimeError("artwork download exceeds 12 MB safety limit")
     if not data:
@@ -753,18 +748,148 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
     # matches). Exact URLs, never guessed.
     approval_sources: list = list(getattr(group, "approved_sources", None) or [])
 
+    filename_title = " ".join(x for x in [group.title or "", group.edition or ""] if x).strip()
+    lookup_title = filename_title
+    # A byte-verified DAT title takes priority over filename guesses.
+    dat_hash_entry = None
+    dat_title = ""
+    _dat_events: list[EnrichEvent] = []
+    _dat_results: list[dict] = []  # per-disk match results with source info
+    if metadata_source_manager is not None:
+        try:
+            _sources = metadata_source_manager.list_sources()
+            _enabled_sources = [s for s in _sources if s.enabled]
+            # (GH-192 prod FAILURE 4) Only say "Checking…" when a lookup is
+            # actually about to happen. Announcing a check that never occurs
+            # made the GUI claim DAT was consulted while every run reported
+            # dat_source_disabled.
+            if _enabled_sources:
+                _act("Checking DAT/local metadata sources…")
+                _dat_events.append(EnrichEvent(
+                    category=EnrichCategory.DAT,
+                    detail=f"dat_loaded sources={len(_enabled_sources)} entries={sum(s.entry_count for s in _enabled_sources)}",
+                    cache="hit", ok=True,
+                ))
+                # Compare DAT-compatible hashes for this release's disks only.
+                _sha_matches = []
+                for _parsed in group.records:
+                    _rec = scans.get(_parsed.source_filename)
+                    _sha = getattr(_rec, "sha256", None)
+                    if _sha:
+                        _disk_matches = metadata_source_manager.lookup_file(
+                            _rec.path, expected_sha256=_sha
+                        )
+                        if _disk_matches:
+                            for _entry in _disk_matches:
+                                _sha_matches.append({
+                                    "entry": _entry,
+                                    "sha256": _sha,
+                                    "source_id": _entry.source_id,
+                                    "source_name": _entry.source_id,
+                                    "match_type": "dat_hash",
+                                })
+                if _sha_matches:
+                    # Use the first byte-identity match; track all for diagnostics.
+                    dat_hash_entry = _sha_matches[0]["entry"]
+                    from .metadata_source import clean_tosec_title
+                    dat_title = clean_tosec_title(dat_hash_entry.title) or ""
+                    for _m in _sha_matches:
+                        _dat_events.append(EnrichEvent(
+                            category=EnrichCategory.DAT,
+                            detail=f"dat_hash_match source={_m['source_id']} title={_m['entry'].title!r} disk_sha256={_m['sha256'][:8]}",
+                            cache="hit", ok=True,
+                        ))
+                        _dat_results.append({
+                            "source_id": _m["source_id"],
+                            "source_name": _m["source_name"],
+                            "match_type": "dat_hash",
+                            "title": _m["entry"].title,
+                            "matched": True,
+                        })
+                    _act(f"DAT hash match: {dat_hash_entry.title}")
+                else:
+                    # Fallback: title-based lookup
+                    _title_matches = metadata_source_manager.lookup_by_title(
+                        lookup_title or group.title or ""
+                    )
+                    if _title_matches:
+                        _dat_entry = _title_matches[0]
+                        _dat_events.append(EnrichEvent(
+                            category=EnrichCategory.DAT,
+                            detail=f"dat_title_candidate source={_dat_entry.source_id} title={_dat_entry.title!r}",
+                            cache="hit", ok=True,
+                        ))
+                        _dat_results.append({
+                            "source_id": _dat_entry.source_id,
+                            "source_name": _dat_entry.source_id,
+                            "match_type": "title",
+                            "title": _dat_entry.title,
+                            "matched": True,
+                        })
+                    else:
+                        _dat_events.append(EnrichEvent(
+                            category=EnrichCategory.DAT,
+                            detail="dat_no_match",
+                            cache="miss", ok=True,
+                        ))
+                        _dat_results.append({
+                            "source_id": "",
+                            "source_name": "",
+                            "match_type": "",
+                            "title": "",
+                            "matched": False,
+                        })
+            else:
+                # (GH-192 prod FAILURE 4) A source DB exists but no source is
+                # enabled. Say so plainly in the run log instead of implying a
+                # lookup happened. The ``dat_source_disabled`` detail is
+                # unchanged — only the operator-facing line is new, so the
+                # existing diagnostics taxonomy is preserved.
+                _has_any = bool(_sources)
+                _dat_events.append(EnrichEvent(
+                    category=EnrichCategory.DAT,
+                    detail="dat_source_disabled",
+                    cache="negative", ok=True,
+                ))
+                _act(
+                    f"DAT/local metadata sources are all disabled "
+                    f"({len(_sources)} configured) — no DAT lookup was performed."
+                    if _has_any else
+                    "No DAT/local metadata source is configured — "
+                    "no DAT lookup was performed."
+                )
+        except Exception as exc:
+            _dat_events.append(EnrichEvent(
+                category=EnrichCategory.DAT,
+                detail=f"dat_unavailable: {exc}",
+                cache="negative", ok=False, error=str(exc),
+            ))
+            _act(f"DAT/local metadata sources unavailable: {exc}.")
+    else:
+        _dat_events.append(EnrichEvent(
+            category=EnrichCategory.DAT,
+            detail="dat_not_configured",
+            cache="negative", ok=True,
+        ))
+        _act(
+            "No DAT/local metadata source is configured — "
+            "no DAT lookup was performed."
+        )
+
+    lookup_title = dat_title or filename_title
+    metadata_cache_title = lookup_title
+    artwork_backoff_dir = metadata_cache_dir / "artwork-retry"
     # Cached metadata is useful offline; network is used only with --online.
     from .metadata import load_cached
-    lookup_title = " ".join(x for x in [group.title or "", group.edition or ""] if x).strip()
     if online:
         events.append(EnrichEvent(
             category=EnrichCategory.METADATA_LOOKUP,
             detail=f"query={lookup_title!r}", cache=("refresh" if refresh else "miss"),
         ))
         _act(
-            "Looking up metadata online (refreshing cached copy)."
+            "Refreshing metadata online…"
             if refresh
-            else "Looking up metadata online…"
+            else "Checking for cached metadata…"
         )
         try:
             metadata, provider, relevance_events = lookup_metadata(
@@ -853,6 +978,9 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
             ))
     else:
         metadata = load_cached(metadata_cache_dir, lookup_title)
+        if metadata is None and lookup_title != filename_title:
+            metadata_cache_title = filename_title
+            metadata = load_cached(metadata_cache_dir, metadata_cache_title)
         if metadata:
             provider = "cache"
             _act("Using a cached metadata copy (offline).")
@@ -874,7 +1002,19 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
             ))
 
     if metadata:
-        metadata_path = Path(metadata_cache_dir) / f"{cache_key(lookup_title)}.json"
+        metadata_path = Path(metadata_cache_dir) / f"{cache_key(metadata_cache_title)}.json"
+
+    if dat_hash_entry is not None:
+        if metadata is None:
+            metadata = MetadataRecord(
+                canonical_title=dat_title or filename_title or "Unknown",
+                description=dat_hash_entry.title,
+                provider="dat",
+                confidence=1.0,
+            )
+            provider = "dat"
+        metadata.year = metadata.year or dat_hash_entry.year
+        metadata.publisher = metadata.publisher or dat_hash_entry.publisher
 
     # manual-approval feature: force approved source URLs into the metadata record's provenance
     # fields when their role matches. Exact URLs; never guessed or overwritten
@@ -892,167 +1032,22 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
         else:  # metadata / reference
             metadata = metadata or MetadataRecord(canonical_title=lookup_title or group.title or "Unknown")
             metadata.source_url = url
-    # (GH-164 RC4) DAT/local metadata participation.
-    # Queryed after exact-hash providers and before online metadata,
-    # with identity outranking fuzzy online title matches.
-    # Each disk's sha256 is queried independently so multi-disk
-    # releases can match on any disk.
-    _dat_events: list[EnrichEvent] = []
-    _dat_results: list[dict] = []  # per-disk match results with source info
-    if metadata_source_manager is not None:
-        try:
-            _sources = metadata_source_manager.list_sources()
-            _enabled_sources = [s for s in _sources if s.enabled]
-            # (GH-192 prod FAILURE 4) Only say "Checking…" when a lookup is
-            # actually about to happen. Announcing a check that never occurs
-            # made the GUI claim DAT was consulted while every run reported
-            # dat_source_disabled.
-            if _enabled_sources:
-                _act("Checking DAT/local metadata sources…")
-                _dat_events.append(EnrichEvent(
-                    category=EnrichCategory.DAT,
-                    detail=f"dat_loaded sources={len(_enabled_sources)} entries={sum(s.entry_count for s in _enabled_sources)}",
-                    cache="hit", ok=True,
-                ))
-                # Compare DAT-compatible hashes for this release's disks only.
-                _sha_matches = []
-                for _parsed in group.records:
-                    _rec = scans.get(_parsed.source_filename)
-                    _sha = getattr(_rec, "sha256", None)
-                    if _sha:
-                        _disk_matches = metadata_source_manager.lookup_file(
-                            _rec.path, expected_sha256=_sha
-                        )
-                        if _disk_matches:
-                            for _entry in _disk_matches:
-                                _sha_matches.append({
-                                    "entry": _entry,
-                                    "sha256": _sha,
-                                    "source_id": _entry.source_id,
-                                    "source_name": _entry.source_id,
-                                    "match_type": "dat_hash",
-                                })
-                if _sha_matches:
-                    # Use the first byte-identity match; track all for diagnostics.
-                    _dat_entry = _sha_matches[0]["entry"]
-                    from .metadata_source import clean_tosec_title
-                    metadata = MetadataRecord(
-                        canonical_title=clean_tosec_title(_dat_entry.title) or lookup_title or group.title or "Unknown",
-                        description=_dat_entry.title,
-                        year=_dat_entry.year,
-                        publisher=_dat_entry.publisher,
-                        platforms=[],
-                    )
-                    metadata.provider = "dat"
-                    provider = "dat"
-                    metadata.confidence = 1.0
-                    for _m in _sha_matches:
-                        _dat_events.append(EnrichEvent(
-                            category=EnrichCategory.DAT,
-                            detail=f"dat_hash_match source={_m['source_id']} title={_m['entry'].title!r} disk_sha256={_m['sha256'][:8]}",
-                            cache="hit", ok=True,
-                        ))
-                        _dat_results.append({
-                            "source_id": _m["source_id"],
-                            "source_name": _m["source_name"],
-                            "match_type": "dat_hash",
-                            "title": _m["entry"].title,
-                            "matched": True,
-                        })
-                    _act(f"DAT hash match: {_dat_entry.title}")
-                else:
-                    # Fallback: title-based lookup
-                    _title_matches = metadata_source_manager.lookup_by_title(
-                        lookup_title or group.title or ""
-                    )
-                    if _title_matches:
-                        _dat_entry = _title_matches[0]
-                        _dat_events.append(EnrichEvent(
-                            category=EnrichCategory.DAT,
-                            detail=f"dat_title_candidate source={_dat_entry.source_id} title={_dat_entry.title!r}",
-                            cache="hit", ok=True,
-                        ))
-                        _dat_results.append({
-                            "source_id": _dat_entry.source_id,
-                            "source_name": _dat_entry.source_id,
-                            "match_type": "title",
-                            "title": _dat_entry.title,
-                            "matched": True,
-                        })
-                    else:
-                        _dat_events.append(EnrichEvent(
-                            category=EnrichCategory.DAT,
-                            detail="dat_no_match",
-                            cache="miss", ok=True,
-                        ))
-                        _dat_results.append({
-                            "source_id": "",
-                            "source_name": "",
-                            "match_type": "",
-                            "title": "",
-                            "matched": False,
-                        })
-            else:
-                # (GH-192 prod FAILURE 4) A source DB exists but no source is
-                # enabled. Say so plainly in the run log instead of implying a
-                # lookup happened. The ``dat_source_disabled`` detail is
-                # unchanged — only the operator-facing line is new, so the
-                # existing diagnostics taxonomy is preserved.
-                _has_any = bool(_sources)
-                _dat_events.append(EnrichEvent(
-                    category=EnrichCategory.DAT,
-                    detail="dat_source_disabled",
-                    cache="negative", ok=True,
-                ))
-                _act(
-                    f"DAT/local metadata sources are all disabled "
-                    f"({len(_sources)} configured) — no DAT lookup was performed."
-                    if _has_any else
-                    "No DAT/local metadata source is configured — "
-                    "no DAT lookup was performed."
-                )
-        except Exception as exc:
-            _dat_events.append(EnrichEvent(
-                category=EnrichCategory.DAT,
-                detail=f"dat_unavailable: {exc}",
-                cache="negative", ok=False, error=str(exc),
-            ))
-            _act(f"DAT/local metadata sources unavailable: {exc}.")
-    else:
-        _dat_events.append(EnrichEvent(
-            category=EnrichCategory.DAT,
-            detail="dat_not_configured",
-            cache="negative", ok=True,
-        ))
-        _act(
-            "No DAT/local metadata source is configured — "
-            "no DAT lookup was performed."
-        )
-
     # Optional ScreenScraper metadata/artwork/manual provider. Hash-first (CRC/MD5/SHA1),
     # then cached provider ID reuse, then title + system search.
     # Non-fatal; failures are caught and logged as structured events.
     _ss_success_event: Optional[EnrichEvent] = None
     _ss_success_note: Optional[str] = None
     screenscraper_result = None
-    if screenscraper_provider is not None:
+    if online and screenscraper_provider is not None and (
+        refresh or metadata is None or metadata.provider == "dat"
+        or (include_artwork and not metadata.artwork_url
+            and _find_existing_master(group, artwork_original_dir) is None)
+    ):
         try:
-            # Use the enrich_group_with_screenscraper high-level function
-            _act("Trying screenscraper metadata lookup…")
-            screenscraper_result = ss_mod.enrich_group_with_screenscraper(
-                group, scans, ss_mod.ScreenScraperConfig.from_dict({}),
-                metadata_cache_dir,
-                dev_id=os.environ.get("SCREENSCRAPER_DEV_ID", "").strip(),
-                dev_password=os.environ.get("SCREENSCRAPER_DEV_PASSWORD", "").strip(),
-                softname=os.environ.get("SCREENSCRAPER_SOFTNAME", "AmigaADFLibraryBuilder").strip(),
-                ssid=os.environ.get("SCREENSCRAPER_SSID", "").strip(),
-                sspassword=os.environ.get("SCREENSCRAPER_SSPASSWORD", "").strip(),
-                online=online,
-                opener=None,  # Uses default opener
-                resolve_urls=False,
-            )
+            _act("Trying ScreenScraper metadata lookup…")
+            screenscraper_result = screenscraper_provider.lookup_group(group, scans)
             if screenscraper_result is not None:
-                if screenscraper_result.found:
+                if screenscraper_result.found and not screenscraper_result.needs_manual_review:
                     _ss_success_event = EnrichEvent(
                         category=EnrichCategory.SCREENSCRAPER,
                         detail=(f"resolved via {screenscraper_result.match_method.value} "
@@ -1088,6 +1083,7 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                         if screenscraper_result.provider_id:
                             metadata.provider_id = screenscraper_result.provider_id
                         metadata.provider = "screenscraper"
+                        provider = "screenscraper"
                         metadata.confidence = max(metadata.confidence, screenscraper_result.confidence)
                         # Artwork URLs from ScreenScraper
                         if screenscraper_result.artwork_url:
@@ -1120,10 +1116,10 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
         except Exception as exc:  # defensive: never break enrich
             events.append(EnrichEvent(
                 category=EnrichCategory.SCREENSCRAPER_MISS,
-                detail=f"screenscraper resolve raised: {exc}",
-                ok=False, error=str(exc),
+                detail=f"ScreenScraper lookup failed ({type(exc).__name__})",
+                ok=False, error=type(exc).__name__,
             ))
-            _act(f"ScreenScraper error: {exc}.")
+            _act(f"ScreenScraper lookup failed ({type(exc).__name__}).")
 
     if _ss_success_event is not None:
         events.append(_ss_success_event)
@@ -1133,7 +1129,7 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
     from .canonical_naming import _load_canonical_library, identity_for_release_group
     from .canonical import SourceAuthority, Provenance
     from .title_norm import _strip_parenthetical_disambiguators
-    display_title = metadata.canonical_title if metadata else group.title
+    display_title = dat_title or (metadata.canonical_title if metadata else group.title)
     canon = _load_canonical_library(library_root) if library_root is not None else None
     if canon is not None:
         with canon:
@@ -1169,6 +1165,12 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
     manual_sources: list[dict] = []
     if include_artwork:
         master = _find_existing_master(group, artwork_original_dir)
+        if master is None and metadata and metadata.artwork_url:
+            for suffix in (".jpg", ".jpeg", ".png", ".webp"):
+                cached_master = artwork_original_dir / f"{cache_key(lookup_title)}{suffix}"
+                if cached_master.is_file() and cached_master.stat().st_size:
+                    master = cached_master
+                    break
         if _image_choices:
             from .media_review import selected_image
             _selected_image = selected_image(_image_choices)
@@ -1197,28 +1199,52 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                 _act("Found manual in a local library.")
                 notes.append(f"matched manual source: {lm_manual_source.name}")
         if online and metadata and metadata.artwork_url and master is None and not _image_choices:
-            _act("Fetching artwork online…")
-            events.append(EnrichEvent(
-                category=EnrichCategory.ARTWORK_LOOKUP,
-                detail="downloading artwork master from metadata URL",
-                url=metadata.artwork_url,
-            ))
             try:
-                master = _download_artwork(metadata, artwork_original_dir, lookup_title or "unknown")
-                notes.append(f"downloaded and preserved artwork master: {master}")
+                host = urllib.parse.urlsplit(metadata.artwork_url).hostname or ""
+            except ValueError:
+                host = ""
+            host_key = hashlib.sha256(host.encode()).hexdigest()
+            url_key = hashlib.sha256(metadata.artwork_url.encode()).hexdigest()
+            host_backoff = artwork_backoff_dir / f"host-{host_key}.json"
+            url_backoff = artwork_backoff_dir / f"url-{url_key}.json"
+            deferred = cache_deadline_active(host_backoff) or (
+                not refresh and cache_deadline_active(url_backoff)
+            )
+            if deferred:
+                _act("Artwork download deferred by a cached retry deadline.")
                 events.append(EnrichEvent(
-                    category=EnrichCategory.ARTWORK_GENERATED,
-                    detail="downloaded artwork master", url=metadata.artwork_url, ok=True,
+                    category=EnrichCategory.ARTWORK_SKIPPED,
+                    detail="cached artwork retry deadline", cache="negative", ok=True,
                 ))
-                _act("Artwork downloaded and ready.")
-            except Exception as exc:
-                _act(f"Artwork download failed: {exc}")
-                notes.append(f"artwork download failed: {exc}")
+            else:
+                _act("Fetching artwork online…")
                 events.append(EnrichEvent(
-                    category=EnrichCategory.ARTWORK_DOWNLOAD_FAILED,
-                    detail="artwork download raised an error",
-                    url=metadata.artwork_url, ok=False, error=str(exc),
+                    category=EnrichCategory.ARTWORK_LOOKUP,
+                    detail="downloading artwork master from metadata URL",
+                    url=metadata.artwork_url,
                 ))
+                try:
+                    master = _download_artwork(metadata, artwork_original_dir, lookup_title or "unknown")
+                    notes.append(f"downloaded and preserved artwork master: {master}")
+                    events.append(EnrichEvent(
+                        category=EnrichCategory.ARTWORK_GENERATED,
+                        detail="downloaded artwork master", url=metadata.artwork_url, ok=True,
+                    ))
+                    _act("Artwork downloaded and ready.")
+                except Exception as exc:
+                    if isinstance(exc, urllib.error.HTTPError):
+                        if exc.code in (429, 503):
+                            delay = _retry_after_seconds(exc.headers.get("Retry-After") if exc.headers else None)
+                            save_cache_deadline(host_backoff, max(300, delay or 0))
+                        elif exc.code in (404, 410):
+                            save_cache_deadline(url_backoff, 24 * 60 * 60)
+                    _act(f"Artwork download failed: {exc}")
+                    notes.append(f"artwork download failed: {exc}")
+                    events.append(EnrichEvent(
+                        category=EnrichCategory.ARTWORK_DOWNLOAD_FAILED,
+                        detail="artwork download raised an error",
+                        url=metadata.artwork_url, ok=False, error=str(exc),
+                    ))
         elif online and metadata and not metadata.artwork_url and master is None:
             _act("No artwork image found for this release.")
             events.append(EnrichEvent(

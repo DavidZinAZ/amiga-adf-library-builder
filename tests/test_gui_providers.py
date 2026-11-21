@@ -76,7 +76,7 @@ def test_screenscraper_metadata_declares_fields_and_capabilities():
     assert ss.metadata.name == "ScreenScraper"
     assert ss.metadata.auth_required == "required"
     assert ProviderCapability.HASH_RESOLUTION in ss.metadata.capabilities
-    assert "base_url" in {f.key for f in ss.metadata.fields}
+    assert "base_url" not in {f.key for f in ss.metadata.fields}
 
 
 def test_screenscraper_disabled_by_default_and_requires_config():

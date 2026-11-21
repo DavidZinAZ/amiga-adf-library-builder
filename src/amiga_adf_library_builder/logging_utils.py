@@ -38,6 +38,8 @@ SENSITIVE_TOKENS = (
     "signature",
     "sig",
     "password",
+    "devid",
+    "ssid",
     "passwd",
     "pwd",
     "key",

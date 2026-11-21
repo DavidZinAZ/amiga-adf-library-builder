@@ -25,11 +25,10 @@ What it does
 
 Security posture
 ----------------
-The bootstrapped hook is ``amiga_adf_library_builder.gui.app:run``. No vault
-files, password files, or secrets are frozen -- PyInstaller only bundles Python
-code and the (currently empty) declared data list. All runtime state
-(config/secrets/logs/cache) is created under the portable app base dir at
-runtime via ``PortablePaths``.
+The bootstrapped hook is ``amiga_adf_library_builder.gui.app:run``. The build
+can include an obfuscated ScreenScraper developer identity supplied by the
+release environment. The portable app creates its own settings, vault, logs,
+and cache at runtime via ``PortablePaths``.
 
 This tool does NOT modify GUI logic or the core library.
 """
@@ -37,6 +36,9 @@ This tool does NOT modify GUI logic or the core library.
 from __future__ import annotations
 
 import argparse
+import json
+import os
+import secrets
 import shlex
 import sys
 from pathlib import Path
@@ -542,7 +544,25 @@ def main() -> int:
     # (i.e. sys.argv[1:]). ``pyi_cmd`` keeps a leading "pyinstaller" token only
     # so ``--print-cmd`` prints the natural command; drop it here so the loader
     # does not try to freeze a file literally named "pyinstaller".
-    pyi_run(pyi_cmd[1:])
+    dev_id = os.environ.get("SCREENSCRAPER_DEV_ID", "").strip()
+    dev_password = os.environ.get("SCREENSCRAPER_DEV_PASSWORD", "").strip()
+    if bool(dev_id) != bool(dev_password):
+        print("Set both ScreenScraper build credentials or neither.", file=sys.stderr)
+        return 2
+
+    original_version_module = _FROZEN_VERSION_PATH.read_text(encoding="utf-8")
+    try:
+        if dev_id:
+            softname = os.environ.get("SCREENSCRAPER_SOFTNAME", "").strip() or "AmigaADFLibraryBuilder"
+            identity = json.dumps([dev_id, dev_password, softname]).encode("utf-8")
+            # Mask plain-text strings in the executable. Both parts ship with the app.
+            key = secrets.token_bytes(len(identity))
+            ciphertext = bytes(a ^ b for a, b in zip(key, identity, strict=True))
+            with _FROZEN_VERSION_PATH.open("a", encoding="utf-8") as module:
+                module.write(f"SCREENSCRAPER_BUILD_IDENTITY = {(key, ciphertext)!r}\n")
+        pyi_run(pyi_cmd[1:])
+    finally:
+        _FROZEN_VERSION_PATH.write_text(original_version_module, encoding="utf-8")
     return 0
 
 

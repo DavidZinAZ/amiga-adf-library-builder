@@ -58,7 +58,8 @@ EXPECTED_ELLIPSIS_BUTTONS = (
     "Choose…",
     "Open log files…",
     "Check connection…",
-    "Set credentials…",
+    "Set ScreenScraper login…",
+    "Check configuration…",
 )
 
 #: Expected success message for connection check (GH-42).

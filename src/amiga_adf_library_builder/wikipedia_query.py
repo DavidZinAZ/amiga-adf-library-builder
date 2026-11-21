@@ -33,12 +33,14 @@ __all__ = [
     "norm_key",
 ]
 
-# Version/disc suffixes that must never be part of a Wikipedia search string.
+# Release suffixes removed from Wikipedia lookup titles.
 _VERSION_SUFFIX_RE = re.compile(
     r"\s+(?:v|ver|version)\s*\d+(?:[._]\d+)*\s*$"
     r"|\s+\(\s*(?:v|ver|version)\s*\d+(?:[._]\d+)*\s*\)\s*$",
     re.IGNORECASE,
 )
+_DISK_SUFFIX_RE = re.compile(r"\s+(?:d\d+|(?i:disk|disc)\s+\d+(?:\s+of\s+\d+)?)$")
+_TRAILING_ARTICLE_RE = re.compile(r"^(.+),\s*(the|a|an)$", re.IGNORECASE)
 # Trailing disambiguator, e.g. "(1991 video game)".
 _PAREN_QUALIFIER_RE = re.compile(r"\s*\([^()]*\)\s*$")
 # A four-digit release year inside a trailing parenthetical.
@@ -120,6 +122,14 @@ def _version_token(value: str) -> Optional[str]:
     return numeral
 
 
+def _without_release_suffixes(value: str) -> str:
+    previous = None
+    while value != previous:
+        previous = value
+        value = _VERSION_SUFFIX_RE.sub("", _DISK_SUFFIX_RE.sub("", value)).strip()
+    return value
+
+
 def build_query_variants(title: str, *, limit: int = 6) -> list[QueryVariant]:
     """Return ordered, de-duplicated Wikipedia query forms for ``title``.
 
@@ -148,7 +158,8 @@ def build_query_variants(title: str, *, limit: int = 6) -> list[QueryVariant]:
         #    ``bare_quoted`` send the SAME text but DIFFERENT API queries
         #    (only the latter drops the context terms), so collapsing them
         #    would remove the variant that resolves "Oil Barons".
-        key = f"{label}|{re.sub(r'\s+', ' ', search.casefold())}"
+        normalized_search = re.sub(r"\s+", " ", search.casefold())
+        key = f"{label}|{normalized_search}"
         if key in seen:
             return
         seen.add(key)
@@ -160,7 +171,11 @@ def build_query_variants(title: str, *, limit: int = 6) -> list[QueryVariant]:
     add(raw, "verbatim", raw)
 
     # 2. Version-suffix stripped: "Foo (v1.2)" -> "Foo".
-    no_version = _VERSION_SUFFIX_RE.sub("", raw).strip()
+    no_version = _without_release_suffixes(raw)
+    article = _TRAILING_ARTICLE_RE.fullmatch(no_version)
+    if article:
+        stem, prefix = article.groups()
+        no_version = f"{prefix.title()} {stem}"
     if no_version and no_version != raw:
         add(no_version, "version_stripped", raw)
 
@@ -210,7 +225,7 @@ def build_query_variants(title: str, *, limit: int = 6) -> list[QueryVariant]:
     # for titles whose page omits those words. This variant is tried LAST, so
     # it costs nothing on the normal path, and the same strict subject test
     # still guards acceptance.
-    add(raw, "bare_quoted", raw)
+    add(no_version or raw, "bare_quoted", raw)
 
     if limit > 0:
         return variants[:limit]
@@ -248,7 +263,7 @@ def subject_tokens(value: str, *, strip_version_suffix: bool = False) -> list[st
     # tokenizing, but ONLY when the caller opts in (the requested-release
     # side). See the docstring for why the candidate side must keep it.
     if strip_version_suffix:
-        text = _VERSION_SUFFIX_RE.sub("", text).strip() or text
+        text = _without_release_suffixes(text) or text
     qualifier = ""
     match = _PAREN_QUALIFIER_RE.search(text)
     if match:
