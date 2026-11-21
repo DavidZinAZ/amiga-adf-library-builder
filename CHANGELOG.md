@@ -1,8 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.3.16 — 2026-11-20
 
 - Try ScreenScraper first for missing artwork. Use Wikipedia when ScreenScraper cannot provide a usable image.
+- Keep Wikipedia image backoff independent of ScreenScraper. Reuse local media and preserve the release name from an exact DAT match.
 
 ## 0.3.15 — 2026-11-20
 
