@@ -134,18 +134,10 @@ jobs:
           PY
 
       - name: Build onedir portable app
-        env:
-          SCREENSCRAPER_DEV_ID: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.SCREENSCRAPER_DEV_ID || '' }}
-          SCREENSCRAPER_DEV_PASSWORD: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.SCREENSCRAPER_DEV_PASSWORD || '' }}
-          SCREENSCRAPER_SOFTNAME: ${{ startsWith(github.ref, 'refs/tags/v') && vars.SCREENSCRAPER_SOFTNAME || '' }}
         run: |
           python tools/build_windows.py --target onedir --clean
 
       - name: Build onefile portable exe
-        env:
-          SCREENSCRAPER_DEV_ID: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.SCREENSCRAPER_DEV_ID || '' }}
-          SCREENSCRAPER_DEV_PASSWORD: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.SCREENSCRAPER_DEV_PASSWORD || '' }}
-          SCREENSCRAPER_SOFTNAME: ${{ startsWith(github.ref, 'refs/tags/v') && vars.SCREENSCRAPER_SOFTNAME || '' }}
         run: |
           python tools/build_windows.py --target onefile
 
@@ -239,6 +231,16 @@ jobs:
           name: amiga-adf-gui-onefile
           path: dist/
 
+      - name: Extract release notes
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          awk -v version="${RELEASE_TAG#v}" '
+            $1 == "##" { if (found) exit; found = ($2 == version); next }
+            found { print }
+          ' CHANGELOG.md > dist/release-notes.md
+          grep -q '[^[:space:]]' dist/release-notes.md
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
@@ -247,6 +249,7 @@ jobs:
           draft: false
           prerelease: false
           generate_release_notes: true
+          body_path: dist/release-notes.md
           files: |
             dist/amiga-adf-gui-portable.zip
             dist/amiga-adf-gui.exe

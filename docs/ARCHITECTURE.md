@@ -135,9 +135,7 @@ The frozen GUI keeps application state under its portable application base:
 ```text
 config/
 data/
-logs/
-cache/
-themes/
+themes/ (optional custom themes)
 ```
 
 The Amiga library root is separate. It contains preservation source data,

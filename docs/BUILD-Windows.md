@@ -93,9 +93,9 @@ Frozen builds use the executable directory as their default application base:
 <app-base>/
 ├── config/
 ├── data/
-├── logs/
-├── cache/
-└── themes/
+├── Library-Root/
+│   └── logs/      created when needed
+└── themes/        optional custom themes
 ```
 
 `AMIGA_ADF_GUI_BASE` can override the base for advanced use.

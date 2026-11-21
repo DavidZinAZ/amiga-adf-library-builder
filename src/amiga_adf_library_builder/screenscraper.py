@@ -107,6 +107,7 @@ import io
 from .utils import write_json_atomic
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -339,9 +340,13 @@ class ScreenScraperResult:
     artwork_url: Optional[str] = None
     artwork_provider: str = "screenscraper"
     artwork_source_url: Optional[str] = None
+    artwork_candidates: list[tuple[str, Optional[str], Optional[str]]] = field(default_factory=list)
+    artwork_region: Optional[str] = None
     artwork_media_type: Optional[str] = None  # e.g., "box", "screenshot", "title"
 
     # Manual (populated when download_manuals=True)
+    manual_regions: list[Optional[str]] = field(default_factory=list)
+    manual_available: bool = False
     manual_url: Optional[str] = None
     manual_region: Optional[str] = None
     manual_language: Optional[str] = None
@@ -350,6 +355,7 @@ class ScreenScraperResult:
     external_ids: dict[str, str] = field(default_factory=dict)
 
     # Diagnostics
+    transport_error: Optional[str] = None
     needs_manual_review: bool = False
     relevance_category: Optional[str] = None
     relevance_confidence: float = 0.0
@@ -368,7 +374,7 @@ def _cache_dir_for_metadata(cache_dir: Path) -> Path:
 
 def _cache_file(cache_dir: Path, key: str) -> Path:
     """Return the cache file path for a given key."""
-    safe_key = hashlib.sha256(key.encode()).hexdigest()[:32]
+    safe_key = hashlib.sha256(("media-v3:" + key).encode()).hexdigest()[:32]
     return _cache_dir_for_metadata(cache_dir) / f"{safe_key}.json"
 
 
@@ -428,11 +434,19 @@ def _negative_cache_file(cache_dir: Path, key: str) -> Path:
     persist across provider instances (e.g. separate CLI/GUI runs sharing
     the same cache root), which is what prevents repeated negative lookups.
     """
-    safe_key = hashlib.sha256(f"neg:{key}".encode("utf-8")).hexdigest()[:32]
+    safe_key = hashlib.sha256(f"neg:v2:{key}".encode("utf-8")).hexdigest()[:32]
     return _cache_dir_for_metadata(cache_dir) / f"neg_{safe_key}.json"
 
 
 # --- XML parsing helpers -----------------------------------------------------
+
+def _screen_scraper_title(game: ET.Element) -> Optional[str]:
+    for path in ("nom", "title", "noms/nom_ss", "noms/nom"):
+        value = (game.findtext(path) or "").strip()
+        if value:
+            return value
+    return None
+
 
 def _parse_jeu_infos(xml_bytes: bytes) -> dict:
     """Parse ScreenScraper jeuInfos.php XML response."""
@@ -461,27 +475,18 @@ def _parse_jeu_infos(xml_bytes: bytes) -> dict:
                 result["error"] = error_elem.text
             return result
 
-        # Successful response structure
-        # <Data><Jeu>...</Jeu></Data> or similar
-        jeu = root.find(".//Jeu")
+        jeu = root if root.tag.lower() == "jeu" else root.find(".//jeu")
         if jeu is None:
-            jeu = root.find("Jeu")
+            jeu = root.find(".//Jeu")
         if jeu is None:
-            # Maybe direct root
             jeu = root
 
-        # Game ID
-        game_id_elem = jeu.find("id")
-        if game_id_elem is not None and game_id_elem.text:
-            result["game_id"] = game_id_elem.text.strip()
+        game_id = (jeu.findtext("id") or jeu.get("id") or "").strip()
+        if game_id:
+            result["game_id"] = game_id
             result["found"] = True
 
-        # Title
-        title_elem = jeu.find("nom")
-        if title_elem is None:
-            title_elem = jeu.find("title")
-        if title_elem is not None and title_elem.text:
-            result["title"] = title_elem.text.strip()
+        result["title"] = _screen_scraper_title(jeu)
 
         # Year
         year_elem = jeu.find("annee")
@@ -517,6 +522,9 @@ def _parse_jeu_infos(xml_bytes: bytes) -> dict:
             desc_elem = jeu.find("description")
         if desc_elem is not None and desc_elem.text:
             result["description"] = desc_elem.text.strip()
+        else:
+            description = (jeu.findtext("synopsis/synopsis_en") or "").strip()
+            result["description"] = description or None
 
         # Players
         players_elem = jeu.find("joueurs")
@@ -548,6 +556,12 @@ def _parse_jeu_infos(xml_bytes: bytes) -> dict:
                     "url": url.strip(),
                     "region": (region or "").lower() if region else None,
                 })
+                if media_type.lower() == "manuel":
+                    result["manuals"].append({
+                        "url": url.strip(),
+                        "region": (region or "").lower() or None,
+                        "language": media.get("langue") or media.get("language"),
+                    })
 
         # Manuals
         for manual in jeu.findall(".//manuel") + jeu.findall(".//Manuel"):
@@ -577,9 +591,7 @@ def _parse_jeu_infos(xml_bytes: bytes) -> dict:
                     break
 
     except ET.ParseError:
-        pass
-    except Exception:
-        pass
+        result["transport_error"] = "Invalid XML response"
     return result
 
 
@@ -595,14 +607,8 @@ def _parse_jeu_recherche(xml_bytes: bytes) -> list[dict]:
                 "year": None,
                 "publisher": None,
             }
-            game_id_elem = jeu.find("id")
-            if game_id_elem is not None and game_id_elem.text:
-                item["game_id"] = game_id_elem.text.strip()
-            title_elem = jeu.find("nom")
-            if title_elem is None:
-                title_elem = jeu.find("title")
-            if title_elem is not None and title_elem.text:
-                item["title"] = title_elem.text.strip()
+            item["game_id"] = (jeu.findtext("id") or jeu.get("id") or "").strip() or None
+            item["title"] = _screen_scraper_title(jeu)
             year_elem = jeu.find("annee")
             if year_elem is None:
                 year_elem = jeu.find("year")
@@ -615,8 +621,8 @@ def _parse_jeu_recherche(xml_bytes: bytes) -> list[dict]:
                 item["publisher"] = pub_elem.text.strip()
             if item["game_id"] or item["title"]:
                 results.append(item)
-    except Exception:
-        pass
+    except ET.ParseError as error:
+        raise ScreenScraperError("Invalid XML response") from error
     return results
 
 
@@ -650,9 +656,7 @@ def _select_best_media(medias: list[dict], preferred_regions: tuple[str, ...], m
             type_matches.sort(key=region_rank)
             return type_matches[0]
 
-    # Fallback: any media, sorted by region
-    medias.sort(key=lambda m: region_rank(m) if (region_rank := lambda m: preferred_regions.index(m.get("region", "")) if m.get("region", "") in preferred_regions else len(preferred_regions)) else len(preferred_regions))
-    return medias[0] if medias else None
+    return None
 
 
 def _select_best_manual(manuals: list[dict], preferred_regions: tuple[str, ...]) -> Optional[dict]:
@@ -900,10 +904,12 @@ class ScreenScraperProvider:
 
     # --- Core lookup methods -------------------------------------------------
 
-    def lookup_group(self, group: Any, scans: dict[str, Any]) -> Optional[ScreenScraperResult]:
+    def lookup_group(self, group: Any, scans: dict[str, Any], *, lookup_title: Optional[str] = None) -> Optional[ScreenScraperResult]:
         """Match this release using a fingerprint of one of its own disks."""
         chipset = (getattr(group, "chipset", None) or "").upper()
         system_id = AGA_AMIGA_SYSTEM_ID if chipset.startswith("AGA") else DEFAULT_AMIGA_SYSTEM_ID
+        title = lookup_title or group.title
+        hash_error = None
         for disk in getattr(group, "disks", ()):
             scan = scans.get(disk.source_filename)
             if scan is None:
@@ -914,12 +920,23 @@ class ScreenScraperProvider:
             except OSError:
                 continue
             result = self.lookup_by_hash(
-                None, None, sha1, group.title, size=scan.size, system_id=system_id,
+                None, None, sha1, title, size=scan.size, system_id=system_id,
             )
             if result.found:
                 return result
+            hash_error = result.transport_error
             break
-        return self.lookup_by_title(group.title, group=group, system_id=system_id)
+        result = self.lookup_by_title(title, group=group, system_id=system_id)
+        if not result.found and result.transport_error is None:
+            game_title = re.sub(r"\s+v\d+(?:\.\d+)*[a-z]?$", "", title, flags=re.IGNORECASE)
+            name, separator, article = game_title.rpartition(", ")
+            if separator and article.lower() in {"the", "a", "an"}:
+                game_title = f"{article} {name}"
+            if game_title != title:
+                result = self.lookup_by_title(game_title, group=group, system_id=system_id)
+        if not result.found and result.transport_error is None:
+            result.transport_error = hash_error
+        return result
 
     def lookup_by_hash(
         self,
@@ -975,6 +992,8 @@ class ScreenScraperProvider:
                 resolve=self._resolve_urls,
             )
             parsed = _parse_jeu_infos(xml_data)
+            if parsed.get("transport_error"):
+                return ScreenScraperResult(transport_error=parsed["transport_error"])
 
             if parsed.get("found") and parsed.get("game_id"):
                 result = self._result_from_parsed(parsed, ScreenScraperMatchMethod.EXACT_HASH)
@@ -1022,9 +1041,8 @@ class ScreenScraperProvider:
             raise
         except ScreenScraperQuotaExceeded:
             raise
-        except Exception:
-            # Non-fatal: treat as miss
-            return ScreenScraperResult(found=False, match_method=ScreenScraperMatchMethod.NONE)
+        except Exception as error:
+            return ScreenScraperResult(transport_error=type(error).__name__)
 
     def lookup_by_provider_id(self, provider_id: str) -> ScreenScraperResult:
         """Lookup game by cached ScreenScraper game ID."""
@@ -1053,6 +1071,8 @@ class ScreenScraperProvider:
                 resolve=self._resolve_urls,
             )
             parsed = _parse_jeu_infos(xml_data)
+            if parsed.get("transport_error"):
+                return ScreenScraperResult(transport_error=parsed["transport_error"])
 
             if parsed.get("found") and parsed.get("game_id"):
                 result = self._result_from_parsed(parsed, ScreenScraperMatchMethod.PROVIDER_ID)
@@ -1068,8 +1088,8 @@ class ScreenScraperProvider:
             raise
         except ScreenScraperQuotaExceeded:
             raise
-        except Exception:
-            return ScreenScraperResult(found=False, match_method=ScreenScraperMatchMethod.NONE)
+        except Exception as error:
+            return ScreenScraperResult(transport_error=type(error).__name__)
 
     def lookup_by_title(
         self, title: str, group: Any = None, *, system_id: Optional[str] = None,
@@ -1109,7 +1129,7 @@ class ScreenScraperProvider:
 
             # If multiple candidates, we need to disambiguate
             # For now, take the first exact title match
-            exact_matches = [c for c in candidates if c.get("title", "").lower() == title.lower()]
+            exact_matches = [c for c in candidates if (c.get("title") or "").lower() == title.lower()]
             if len(exact_matches) == 1:
                 # Single exact match - fetch full details
                 game_id = exact_matches[0].get("game_id")
@@ -1159,8 +1179,8 @@ class ScreenScraperProvider:
             raise
         except ScreenScraperQuotaExceeded:
             raise
-        except Exception:
-            return ScreenScraperResult(found=False, match_method=ScreenScraperMatchMethod.NONE)
+        except Exception as error:
+            return ScreenScraperResult(transport_error=type(error).__name__)
 
     # --- Artwork download ----------------------------------------------------
 
@@ -1169,6 +1189,8 @@ class ScreenScraperProvider:
         provider_id: str,
         media_type: str = "box",
         region: Optional[str] = None,
+        *,
+        system_id: str = DEFAULT_AMIGA_SYSTEM_ID,
     ) -> Optional[bytes]:
         """Download artwork for a game.
 
@@ -1184,8 +1206,9 @@ class ScreenScraperProvider:
             return None
 
         params = self._build_auth_params()
-        params["systemeid"] = DEFAULT_AMIGA_SYSTEM_ID
+        params["systemeid"] = system_id
         params["jeuid"] = provider_id
+        media_type = "box-2D" if media_type == "box-2d" else media_type
         params["media"] = f"{media_type}({region})" if region else media_type
 
         url = self.config.base_url + "mediaJeu.php?" + urllib.parse.urlencode(params)
@@ -1198,6 +1221,8 @@ class ScreenScraperProvider:
                 opener=self._opener,
                 resolve=self._resolve_urls,
             )
+        except (ScreenScraperRateLimited, ScreenScraperQuotaExceeded, ScreenScraperAuthError):
+            raise
         except Exception:
             return None
 
@@ -1207,6 +1232,8 @@ class ScreenScraperProvider:
         self,
         provider_id: str,
         region: Optional[str] = None,
+        *,
+        system_id: str = DEFAULT_AMIGA_SYSTEM_ID,
     ) -> Optional[bytes]:
         """Download PDF manual for a game.
 
@@ -1221,7 +1248,7 @@ class ScreenScraperProvider:
             return None
 
         params = self._build_auth_params()
-        params["systemeid"] = DEFAULT_AMIGA_SYSTEM_ID
+        params["systemeid"] = system_id
         params["jeuid"] = provider_id
         params["media"] = f"manuel({region})" if region else "manuel"
 
@@ -1235,8 +1262,42 @@ class ScreenScraperProvider:
                 opener=self._opener,
                 resolve=self._resolve_urls,
             )
+        except (ScreenScraperRateLimited, ScreenScraperQuotaExceeded, ScreenScraperAuthError):
+            raise
         except Exception:
             return None
+
+    def acquire_manual(self, provider_id: str, region: Optional[str], *, system_id: str, activity: Optional[Callable[[str], None]] = None) -> Optional[Path]:
+        """Reuse a cached PDF or download the advertised manual for this game."""
+        key = hashlib.sha256(f"{system_id}:{provider_id}:{region or ''}".encode()).hexdigest()
+        path = _cache_dir_for_metadata(self.cache_dir) / "manuals" / f"{key}.pdf"
+        if path.is_file():
+            with path.open("rb") as cached:
+                if cached.read(5) == b"%PDF-":
+                    if activity is not None:
+                        activity("Reused cached ScreenScraper PDF manual.")
+                    return path
+        data = self.download_manual(provider_id, region, system_id=system_id)
+        if not data or not data.startswith(b"%PDF-"):
+            return None
+        path.parent.mkdir(parents=True, exist_ok=True)
+        from tempfile import NamedTemporaryFile
+
+        with NamedTemporaryFile(dir=path.parent, delete=False) as staged:
+            temporary = Path(staged.name)
+            try:
+                staged.write(data)
+            except OSError:
+                staged.close()
+                temporary.unlink(missing_ok=True)
+                raise
+        try:
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
+        if activity is not None:
+            activity("Downloaded ScreenScraper PDF manual.")
+        return path
 
     # --- Result conversion helpers -------------------------------------------
 
@@ -1262,17 +1323,23 @@ class ScreenScraperProvider:
         # Select best artwork
         if self.config.download_artwork and parsed.get("medias"):
             # Prefer box art, then title screen, then screenshot
-            media_types = ["box", "cover", "title", "screenshot"]
-            best_media = _select_best_media(parsed["medias"], self.config.preferred_regions, media_types)
-            if best_media:
-                result.artwork_url = _public_media_url(best_media["url"])
-                result.artwork_media_type = best_media["type"]
-                result.artwork_source_url = self.config.base_url + "mediaJeu.php"  # placeholder
+            media_types = ["box-2d", "box", "cover", "sstitle", "title", "ss", "screenshot"]
+            remaining = list(parsed["medias"])
+            while (media := _select_best_media(remaining, self.config.preferred_regions, media_types)):
+                candidate = (media["type"], media.get("region"), _public_media_url(media["url"]))
+                if candidate not in result.artwork_candidates:
+                    result.artwork_candidates.append(candidate)
+                remaining.remove(media)
+            if result.artwork_candidates:
+                result.artwork_media_type, result.artwork_region, result.artwork_url = result.artwork_candidates[0]
+                result.artwork_source_url = self.config.base_url + "mediaJeu.php"
 
         # Select best manual
         if self.config.download_manuals and parsed.get("manuals"):
             best_manual = _select_best_manual(parsed["manuals"], self.config.preferred_regions)
             if best_manual:
+                result.manual_available = True
+                result.manual_regions = list(dict.fromkeys(item.get("region") for item in parsed["manuals"]))
                 result.manual_url = _public_media_url(best_manual["url"])
                 result.manual_region = best_manual.get("region")
                 result.manual_language = best_manual.get("language")
@@ -1296,7 +1363,11 @@ class ScreenScraperProvider:
             region=cached.get("region"),
             language=cached.get("language"),
             artwork_url=_public_media_url(cached.get("artwork_url")),
+            artwork_candidates=[(kind, region, _public_media_url(url)) for kind, region, url in cached.get("artwork_candidates", [])],
             artwork_media_type=cached.get("artwork_media_type"),
+            artwork_region=cached.get("artwork_region"),
+            manual_regions=cached.get("manual_regions", []),
+            manual_available=bool(cached.get("manual_available")),
             manual_url=_public_media_url(cached.get("manual_url")),
             manual_region=cached.get("manual_region"),
             manual_language=cached.get("manual_language"),
@@ -1317,7 +1388,11 @@ class ScreenScraperProvider:
             "region": result.region,
             "language": result.language,
             "artwork_url": result.artwork_url,
+            "artwork_candidates": result.artwork_candidates,
             "artwork_media_type": result.artwork_media_type,
+            "artwork_region": result.artwork_region,
+            "manual_regions": result.manual_regions,
+            "manual_available": result.manual_available,
             "manual_url": result.manual_url,
             "manual_region": result.manual_region,
             "manual_language": result.manual_language,

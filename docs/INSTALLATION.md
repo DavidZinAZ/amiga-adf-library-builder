@@ -17,7 +17,7 @@ Releases are unsigned; Windows may request additional confirmation. Obtain files
 
 ## Portable state
 
-The frozen application's base is normally its executable directory. It creates portable configuration, cache/log/theme directories and `Library-Root`. The Library tab selects original disks and export output; the GUI Library-Root is managed automatically.
+The frozen application stores its settings and identity database beside the executable. Build logs, provider caches, and generated assets live under `Library-Root`. The Library tab selects the original disk and export folders.
 
 Advanced/source use can override the application base with `AMIGA_ADF_GUI_BASE`. This moves the app-relative base, including its Library-Root. CLI library-root/path overrides remain separate. See [Data Layout](DATA-LAYOUT.md).
 

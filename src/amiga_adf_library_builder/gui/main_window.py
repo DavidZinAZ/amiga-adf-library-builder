@@ -1899,14 +1899,13 @@ class MainWindow(QMainWindow):
         )
 
     def _on_open_logs(self) -> None:
-        # Use the same logs_dir that write_run_log writes to (cfg.logs_dir)
-        # which is under library_root/logs, not the portable app's logs dir.
-        # We need to get it from the last successful run's PathConfig.
+        # Honor the last run's configured path and otherwise open library logs.
         path = getattr(self, "_last_run_logs_dir", None) or self._paths.logs_dir
         try:
             from PySide6.QtGui import QDesktopServices
             from PySide6.QtCore import QUrl
 
+            Path(path).mkdir(parents=True, exist_ok=True)
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
         except Exception:
             QMessageBox.information(self, "Log files", str(path))

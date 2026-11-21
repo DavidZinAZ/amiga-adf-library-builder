@@ -57,9 +57,9 @@ The Windows GUI has a separate portable application base:
 │   ├── gui-settings.toml
 │   └── secrets.vault
 ├── data/
-├── logs/
-├── cache/
-└── themes/
+│   └── identity.db
+├── Library-Root/              managed library, build logs, and provider cache
+└── themes/                    optional custom themes
 ```
 
 When frozen, `<app-base>` normally resolves next to the executable. It can be

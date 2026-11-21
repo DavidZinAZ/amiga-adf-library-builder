@@ -1,8 +1,7 @@
 """Portable, app-relative directory layout for the Windows GUI.
 
-The GUI must never hard-code user/home paths. Every runtime directory
-(config, data, logs, cache, themes) is resolved relative to an *app base
-directory* so the build is portable (extract-and-run, spaces in paths work).
+The GUI resolves its paths relative to an *app base directory* so the build
+is portable (extract-and-run, spaces in paths work).
 
 Default base resolution (override with ``AMIGA_ADF_GUI_BASE`` or by passing
 ``base_dir`` explicitly, e.g. in tests):
@@ -12,7 +11,7 @@ Default base resolution (override with ``AMIGA_ADF_GUI_BASE`` or by passing
 * In development, the same rule resolves to the venv/bin dir; callers that want
   a project-local layout should pass ``base_dir`` explicitly.
 
-All directories are created lazily via :meth:`PortablePaths.ensure_all`.
+Startup creates only the required application state directories.
 """
 
 from __future__ import annotations
@@ -70,7 +69,7 @@ class PortablePaths:
 
     @property
     def logs_dir(self) -> Path:
-        return self.base / "logs"
+        return self.library_root / "logs"
 
     @property
     def cache_dir(self) -> Path:
@@ -93,13 +92,10 @@ class PortablePaths:
         return [
             self.config_dir,
             self.data_dir,
-            self.logs_dir,
-            self.cache_dir,
-            self.themes_dir,
         ]
 
     def ensure_all(self) -> list[Path]:
-        """Create every runtime directory; return the list actually created."""
+        """Create the required app state directories and return the new paths."""
         created: list[Path] = []
         for d in self.all_dirs():
             if not d.exists():

@@ -68,6 +68,18 @@ builds. Turning it off skips Wikipedia searches and Wikipedia metadata cache
 hits during online builds, so other enabled providers can fill the gap.
 Saved artwork files and offline metadata remain available.
 
+When the release matches and ScreenScraper advertises media, the artwork
+option downloads a cover or screenshot if no artwork is already available.
+If a download is unusable, the app tries other advertised media.
+With manuals enabled for the build and in ScreenScraper, an advertised PDF
+can supply the RTFM builder after saved and local manual sources are checked.
+Downloaded artwork and PDFs are reused on subsequent builds. Offline builds
+can also reuse saved covers and generated RTFM sidecars.
+
+Public Windows downloads require a ScreenScraper developer identity saved
+locally before the member login can be tested. Use **Set local developer
+credentials** and **Set ScreenScraper login** under **Providers**.
+
 Use **Test ScreenScraper login** to verify the saved member account with
 ScreenScraper. The test needs the app's developer identity and performs no game lookup.
 

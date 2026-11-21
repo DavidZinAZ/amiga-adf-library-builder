@@ -54,10 +54,11 @@ def test_portable_paths_layout(tmp_path: Path):
     created = pp.ensure_all()
     assert pp.config_dir.is_dir()
     assert pp.data_dir.is_dir()
-    assert pp.logs_dir.is_dir()
-    assert pp.cache_dir.is_dir()
-    assert pp.themes_dir.is_dir()
-    assert len(created) == 5
+    assert pp.logs_dir == pp.library_root / "logs"
+    assert not (pp.base / "logs").exists()
+    assert not pp.cache_dir.exists()
+    assert not pp.themes_dir.exists()
+    assert created == [pp.config_dir, pp.data_dir]
     # App-relative: nothing under a user/home path.
     assert "home" not in str(pp.config_dir).split("/")
 

@@ -663,3 +663,37 @@ def test_1g1r_export_requests_a_choice_for_every_multi_version_game(tmp_path, ca
             b"Fixture Beta v2.0 (Disk 1 of 1).adf",
             b"single",
         }
+
+
+@pytest.mark.parametrize("state, expected", [("pending", "Defender of the Crown"), ("accepted", "Defender")])
+def test_dat_verified_title_updates_pending_preview_without_changing_accepted_title(tmp_path, state, expected):
+    old = {"release_key": "defender||||", "title": "Defender", "source_files": ["Defender.adf"]}
+    path = build_staged_library_from_result({"per_group": [old]}, library_root=tmp_path, run_id="run-1")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["library"]["releases"][old["release_key"]]["curation_state"] = state
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    new = dict(old, title="Defender of the Crown", dat_verified_title=True)
+    path = build_staged_library_from_result({"per_group": [new]}, library_root=tmp_path, run_id="run-2")
+    release = json.loads(path.read_text(encoding="utf-8"))["library"]["releases"][old["release_key"]]
+    assert release["title"] == expected
+    assert release["release_key"] == old["release_key"]
+    assert release["adf_files"] == old["source_files"]
+
+
+@pytest.mark.parametrize("omitted", [False, True])
+def test_preview_refreshes_downloaded_media_after_blank_prior_build(tmp_path, omitted):
+    key = "fixture||||"
+    old = {"release_key": key, "title": "Fixture", "source_files": ["Fixture.adf"],
+           "notes": ["offline; no cached metadata"], "artwork_missing": True}
+    path = build_staged_library_from_result({"per_group": [old]}, library_root=tmp_path, run_id="run-1")
+    if omitted:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["library"]["releases"][key]["media_choices"] = {"box-front": [], "manual": []}
+        path.write_text(json.dumps(payload), encoding="utf-8")
+    new = dict(old, artwork_processed="cover.jpg", artwork_missing=False, notes=["Online match"],
+               rtfm_results=[{"written": True, "rtfm_path": "manual.rtfm"}])
+    path = build_staged_library_from_result({"per_group": [new]}, library_root=tmp_path, run_id="run-2")
+    release = json.loads(path.read_text(encoding="utf-8"))["library"]["releases"][key]
+    assert release["notes"] == "Online match"
+    assert release["artwork_front"] == (None if omitted else "cover.jpg")
+    assert release["rtfm_files"] == ([] if omitted else ["manual.rtfm"])

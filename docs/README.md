@@ -1,6 +1,6 @@
 # Amiga ADF Library Builder Documentation
 
-**Current documentation baseline: v0.3.14 — 2026-11-20**
+**Current documentation baseline: v0.3.15 — 2026-11-20**
 
 Everything in the main list below is intended to describe the current
 application. Ticket-era, migration, research, and superseded implementation
@@ -19,6 +19,7 @@ documents have been moved under [`archive/`](archive/).
 ## Developer / technical documentation
 
 - [Developer Guide](DEVELOPER-GUIDE.md) — development setup, architecture, testing, packaging, contribution/release workflow.
+- [AI-engine handoff](AI-ENGINE-HANDOFF.md) — resume the current ScreenScraper, Preview, and Windows release work.
 - [Architecture](ARCHITECTURE.md) — current high-level shared-core architecture.
 - [State Ownership Map](STATE-OWNERSHIP-MAP.md) — current durable-state ownership model.
 - [Data and State Layout](DATA-LAYOUT.md) — current library/application state layout.

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.15 — 2026-11-20
+
+- Apply verified DAT titles to pending Preview rows and use them for ScreenScraper title searches.
+- Show newly acquired media and current build notes in Preview after restoring prior curation. Retry ScreenScraper misses with the game's title without its release version.
+- Open the library log folder before the first build and create fewer empty folders beside the Windows executable.
+
+- Download advertised ScreenScraper artwork and PDF manuals for matched releases. Try alternate media when a download is unusable, and reuse saved artwork and manual sidecars offline.
+
+- Read ScreenScraper’s documented game response format and distinguish request errors from unmatched disks.
+- Publish Windows builds without embedded ScreenScraper developer credentials. Configure a local developer identity and member login in the GUI to use ScreenScraper.
+
 ## 0.3.14 — 2026-11-20
 
 ### Added

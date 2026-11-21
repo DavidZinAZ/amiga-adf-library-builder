@@ -1671,6 +1671,7 @@ def build_rtfm_for_group(
     library_root: Optional[Path] = None,
     basename: Optional[str] = None,
     missing_manual_lookup: Optional[Callable[..., list[RtfmSource]]] = None,
+    reuse_sidecar: bool = False,
 ) -> RtfmResult:
     """Build the ``.rtfm`` + provenance sidecar for one release group.
 
@@ -1788,6 +1789,13 @@ def build_rtfm_for_group(
             result.provenance_path = prov_path
             return result
     if not matched:
+        if reuse_sidecar and not explicit and rtfm_path.is_file() and rtfm_path.stat().st_size:
+            result.rtfm_path = rtfm_path
+            result.written = True
+            result.provenance_path = prov_path if prov_path.is_file() else None
+            result.notes.append("Reused an existing manual sidecar offline.")
+            report(f"{group.title}: reused existing manual sidecar")
+            return result
         # Nothing found. Route for review (operator may add a manual) rather
         # than emitting an empty file. Record the best non-matching candidate
         # stems (if any) for auditability without leaking host paths.
@@ -1987,6 +1995,7 @@ def _build_rtfm_all(
     explicit_sources: Optional[dict[str, list[RtfmSource]]] = None,
     library_root: Optional[Path] = None,
     missing_manual_lookup: Optional[Callable[..., list[RtfmSource]]] = None,
+    reuse_sidecars: bool = False,
 ) -> list[RtfmResult]:
     """Build ``.rtfm`` sidecars for every release group (deterministic, offline).
 
@@ -2041,6 +2050,7 @@ def _build_rtfm_all(
                 explicit_sources=selected_sources,
                 library_root=library_root, basename=names[g.release_key],
                 missing_manual_lookup=missing_manual_lookup if chosen is None else None,
+                reuse_sidecar=reuse_sidecars and chosen is None,
             ))
             if selected_sources:
                 # Candidate review is independent of authoritative selection:
@@ -2068,9 +2078,10 @@ def _build_rtfm_all(
 
 def build_rtfm_all(groups, *, cfg, rtfm_dir, extra_sources=None,
                    explicit_sources=None, library_root=None, activity=None,
-                   missing_manual_lookup=None):
+                   missing_manual_lookup=None, reuse_sidecars=False):
     """Build manuals with live per-release, per-source and OCR progress."""
     with progress_scope(activity):
         return _build_rtfm_all(groups, cfg=cfg, rtfm_dir=rtfm_dir,
                                extra_sources=extra_sources, explicit_sources=explicit_sources,
-                               library_root=library_root, missing_manual_lookup=missing_manual_lookup)
+                               library_root=library_root, missing_manual_lookup=missing_manual_lookup,
+                               reuse_sidecars=reuse_sidecars)

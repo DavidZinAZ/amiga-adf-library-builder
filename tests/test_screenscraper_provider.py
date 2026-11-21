@@ -950,3 +950,114 @@ def test_login_error_preserves_safe_http_status(tmp_path, status):
         provider.verify_member_login()
     assert error.value.status == status
     assert "password" not in str(error.value)
+
+
+def test_documented_lowercase_xml_search_and_details(tmp_path):
+    search = b'<Data><jeux><jeu id="1111"><noms><nom_ss>Star Voyage</nom_ss></noms></jeu></jeux></Data>'
+    details = b'<Data><jeu><id>1111</id><noms><nom_ss>Star Voyage</nom_ss></noms><synopsis><synopsis_en>Fixture description.</synopsis_en></synopsis></jeu></Data>'
+
+    def opener(request, timeout=0):
+        return _Resp(search if "jeuRecherche.php" in request.full_url else details)
+
+    provider = ScreenScraperProvider(
+        ScreenScraperConfig(enabled=True), tmp_path, dev_id="fake-dev",
+        dev_password="fake-password", opener=opener,
+    )
+    result = provider.lookup_by_title("Star Voyage")
+    assert result.found and result.provider_id == "1111"
+    assert result.canonical_title == "Star Voyage"
+    assert result.description == "Fixture description."
+
+
+def test_pipeline_downloads_advertised_screenscraper_media_and_reuses_it(tmp_path, monkeypatch):
+    from urllib.parse import parse_qs, urlsplit
+
+    fitz = pytest.importorskip("pymupdf")
+    from PIL import Image
+
+    from amiga_adf_library_builder.paths import resolve_config
+    from amiga_adf_library_builder.pipeline import run_pipeline
+    from amiga_adf_library_builder.run_config import RunConfig
+
+    original = tmp_path / "original"
+    original.mkdir()
+    (original / "Star Voyage.adf").write_bytes(b"fixture disk")
+    config, _ = resolve_config(library_root=str(tmp_path))
+    artwork = io.BytesIO()
+    Image.new("RGB", (40, 40), "blue").save(artwork, "PNG")
+    with fitz.open() as doc:
+        page = doc.new_page()
+        page.insert_text((72, 72), "Star Voyage manual. Press Fire to start your voyage.")
+        manual = doc.tobytes()
+    details = b'''<Data><jeu><id>1111</id><nom>Star Voyage</nom><medias>
+      <media type="box-2D" region="eu">https://api.screenscraper.fr/test?devpassword=fixture</media>
+      <media type="sstitle" region="eu">https://api.screenscraper.fr/alternate</media>
+      <media type="manuel" region="eu">https://api.screenscraper.fr/test?devpassword=fixture</media>
+    </medias></jeu></Data>'''
+    calls = []
+
+    def opener(request, timeout=0):
+        url = urlsplit(request.full_url)
+        endpoint = url.path.rsplit("/", 1)[-1]
+        media = parse_qs(url.query).get("media")
+        calls.append((endpoint, media))
+        if media == ["box-2D(eu)"]:
+            return _Resp(b"image unavailable")
+        return _Resp({
+            "jeuInfos.php": details, "mediaJeu.php": artwork.getvalue(),
+            "mediaManuelJeu.php": manual,
+        }[endpoint])
+
+    monkeypatch.setattr("amiga_adf_library_builder.screenscraper.guard_url", lambda *a, **kw: None)
+    monkeypatch.setattr("urllib.request.build_opener", lambda *handlers: type(
+        "FixtureOpener", (), {"open": staticmethod(opener)},
+    )())
+    for _ in range(2):
+        result = run_pipeline(
+            config, RunConfig(online=True),
+            wikipedia_config={"enabled": False},
+            screenscraper_config={"enabled": True},
+            screenscraper_developer=("fixture-dev", "fixture-secret", "Fixture"),
+        )
+        assert len(result["artwork_resized"]) == 1
+        assert len(result["rtfm"]["built"]) == 1
+    offline = run_pipeline(config, RunConfig(online=False), wikipedia_config={"enabled": False})
+    assert len(offline["artwork_resized"]) == 1
+    assert len(offline["rtfm"]["built"]) == 1
+    assert calls == [
+        ("jeuInfos.php", None), ("mediaJeu.php", ["box-2D(eu)"]),
+        ("mediaJeu.php", ["sstitle(eu)"]),
+        ("mediaManuelJeu.php", ["manuel(eu)"]),
+    ]
+    assert not any("fixture-secret" in p.read_text(encoding="utf-8")
+                   for p in tmp_path.rglob("*.source.json"))
+
+
+def test_screen_scraper_title_fallback_uses_verified_dat_title(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from urllib.parse import parse_qs, urlsplit
+
+    opener = _xml_opener(b"<Data><jeux/></Data>")
+    provider = ScreenScraperProvider(
+        ScreenScraperConfig(enabled=True), tmp_path, dev_id="fixture", dev_password="fixture",
+        opener=opener,
+    )
+    group = SimpleNamespace(title="Defender", disks=[], chipset=None)
+    provider.lookup_group(group, {}, lookup_title="Defender of the Crown")
+    assert parse_qs(urlsplit(opener.log[0]).query)["recherche"] == ["Defender of the Crown"]
+    assert group.title == "Defender"
+
+
+def test_screenscraper_retries_versioned_dat_title_as_plain_game_title(tmp_path):
+    from types import SimpleNamespace
+    from urllib.parse import parse_qs, urlsplit
+
+    opener = _xml_opener(b"<Data><jeux/></Data>")
+    provider = ScreenScraperProvider(
+        ScreenScraperConfig(enabled=True), tmp_path, dev_id="fixture", dev_password="fixture",
+        opener=opener,
+    )
+    group = SimpleNamespace(title="Dark Queen of Krynn, The v1.0", disks=[], chipset=None)
+    provider.lookup_group(group, {}, lookup_title=group.title)
+    searches = [parse_qs(urlsplit(url).query)["recherche"][0] for url in opener.log]
+    assert searches == ["Dark Queen of Krynn, The v1.0", "The Dark Queen of Krynn"]

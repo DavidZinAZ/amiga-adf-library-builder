@@ -591,14 +591,22 @@ def run_pipeline(
     # (GH-24) Manuals/RTFM selection is independent of artwork. When the
     # operator turns it off, the deterministic RTFM build is skipped entirely
     # (zero provider work) even if an [rtfm] config is present and enabled.
-    if rtfm_config_path and include_manuals_rtfm:
+    screenscraper_manuals = (
+        screenscraper_provider is not None and screenscraper_provider.config.download_manuals
+    )
+    reuse_manual_sidecars = not online and rtfm_dir.is_dir()
+    manual_configured = bool(rtfm_config_path or screenscraper_manuals or reuse_manual_sidecars)
+    if include_manuals_rtfm and manual_configured:
         try:
             from . import rtfm as rtfm_mod
             from .paths import load_rtfm_config
 
-            rtfm_cfg = rtfm_mod.RtfmConfig.from_dict(load_rtfm_config(rtfm_config_path))
-            # GH-176 diagnostic: resolved enabled state and reason
-            _rtfm_config_source = "gui-rtfm.toml" if rtfm_config_path.endswith("gui-rtfm.toml") else "provider-config"
+            if rtfm_config_path:
+                rtfm_cfg = rtfm_mod.RtfmConfig.from_dict(load_rtfm_config(rtfm_config_path))
+                _rtfm_config_source = "gui-rtfm.toml" if rtfm_config_path.endswith("gui-rtfm.toml") else "provider-config"
+            else:
+                rtfm_cfg = rtfm_mod.RtfmConfig.from_dict({"enabled": True})
+                _rtfm_config_source = "screenscraper" if screenscraper_manuals else "offline-sidecars"
             manual_trace["resolved_enabled_state"] = bool(rtfm_cfg.enabled)
             manual_trace["config_source"] = _rtfm_config_source
             if rtfm_cfg.enabled:
@@ -645,6 +653,44 @@ def run_pipeline(
                     except Exception:
                         manual_trace["provider_statuses"].append("retrokit:error")
 
+                if screenscraper_manuals:
+                    from .screenscraper import AGA_AMIGA_SYSTEM_ID, DEFAULT_AMIGA_SYSTEM_ID
+
+                    matches = {
+                        group.release_key: result.screenscraper_match
+                        for group, result in zip(groups, enrich_results)
+                    }
+                    retrokit_lookup = missing_manual_lookup
+
+                    def missing_manual_lookup(group):
+                        if cancel_event is not None and cancel_event.is_set():
+                            return []
+                        match = matches.get(group.release_key)
+                        if match is None:
+                            try:
+                                match = screenscraper_provider.lookup_group(group, scan_map)
+                            except Exception as exc:
+                                _act(f"RTFM phase: ScreenScraper lookup failed ({type(exc).__name__}).")
+                        if match and match.found and not match.needs_manual_review and match.provider_id and match.manual_available:
+                            system_id = AGA_AMIGA_SYSTEM_ID if (group.chipset or "").upper().startswith("AGA") else DEFAULT_AMIGA_SYSTEM_ID
+                            try:
+                                regions = list(dict.fromkeys([match.manual_region, *match.manual_regions]))
+                                for region in regions[:3]:
+                                    path = screenscraper_provider.acquire_manual(
+                                        match.provider_id, region, system_id=system_id,
+                                        activity=lambda message: _act(f"{group.title}: {message}"),
+                                    )
+                                    if path is not None:
+                                        return [rtfm_mod.RtfmSource(
+                                            path=path, root=path.parent, category=rtfm_mod.CATEGORY_MANUALS,
+                                            stem=group.title, provider="screenscraper",
+                                            source_url=screenscraper_provider.config.base_url + "mediaManuelJeu.php",
+                                        )]
+                                _act(f"RTFM phase: no usable ScreenScraper PDF for {group.title}")
+                            except Exception as exc:
+                                _act(f"RTFM phase: ScreenScraper manual failed ({type(exc).__name__}).")
+                        return retrokit_lookup(group) if retrokit_lookup else []
+
                 _explicit_manual_sources = {}
                 for _g, _r in zip(groups, enrich_results):
                     for _ms in getattr(_r, "manual_sources", None) or []:
@@ -671,6 +717,7 @@ def run_pipeline(
                     explicit_sources=_explicit_manual_sources,
                     library_root=library_root,
                     activity=_act,
+                    reuse_sidecars=reuse_manual_sidecars,
                 )
                 _rtfm_built = [
                     r for r in rtfm_results
@@ -1046,6 +1093,9 @@ def run_pipeline(
             {
                 "release_key": g.release_key,
                 "title": g.title,
+                "dat_verified_title": any(
+                    match.get("match_type") == "dat_hash" for match in (r.dat_results if r else [])
+                ),
                 # (GH-99) Canonical staged identity fields: the ReleaseGroup
                 # already carries the parsed edition/crack-group when the
                 # filenames provide evidence. These are the values the
@@ -1334,11 +1384,11 @@ def run_pipeline(
             "staging_root": str(export_result.staging_root),
         }
     result["rtfm"] = {
-        "configured": bool(rtfm_config_path),
+        "configured": manual_configured,
         # (GH-24) True when an [rtfm] config is present AND the operator's
         # manuals/RTFM selection is on. A config that is present but deselected
         # reports selected=False and builds nothing.
-        "selected": bool(rtfm_config_path and include_manuals_rtfm),
+        "selected": manual_configured and include_manuals_rtfm,
         "built": [
             str(r.rtfm_path) for r in rtfm_results
             if r.written and r.rtfm_path and r.rtfm_path.is_file()
@@ -1505,12 +1555,33 @@ def build_staged_library_from_result(
 
         library.releases[release_key] = entry
 
+    fresh_details = {
+        key: (entry.artwork_front, entry.rtfm_files, entry.notes)
+        for key, entry in library.releases.items()
+    }
     # (GH-99, defect 3) Restore the operator's prior staged decisions on
     # top of the freshly built state (same release_key only).
     # (GH-107 Slice 2) Also try content-hash matching for same-content-under-new-path.
     library.carry_over(
         previous, identity_store=identity_store, original_dir=original_dir
     )
+    for key, entry in library.releases.items():
+        artwork, manuals, notes = fresh_details[key]
+        if not (entry.media_choices.keys() - {"manual"}) and not entry.artwork_front and artwork:
+            entry.artwork_front = artwork
+        if "manual" not in entry.media_choices and not entry.rtfm_files and manuals:
+            entry.rtfm_files = manuals
+        if key in previous.releases and not any(
+            action.action == CurationAction.NOTE_ADDED for action in entry.actions
+        ):
+            entry.notes = notes
+
+    # Fresh verified titles replace automatic pending titles carried from older runs.
+    for pg in per_group:
+        if pg.get("dat_verified_title") and pg.get("title"):
+            entry = library.releases.get(pg["release_key"])
+            if entry is not None and entry.curation_state == StagedState.PENDING:
+                entry.title = pg["title"]
 
     # (GH-107 Slice 3) Build/persist the canonical Game/Release/Disk model
     # for this run at <library_root>/curation/canonical.db. The staged state

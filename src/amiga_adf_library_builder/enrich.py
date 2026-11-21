@@ -94,6 +94,7 @@ class EnrichResult:
     # local-media provider. Each entry: {path, root, filename, category}.
     # Empty for image-only matches; these are consumed by the RTFM build.
     manual_sources: list = field(default_factory=list)
+    screenscraper_match: Optional[object] = None
     media_candidates: list = field(default_factory=list)
 
 
@@ -453,6 +454,11 @@ def _download_artwork(record: MetadataRecord, dest_dir: Path, title: str,
         raise RuntimeError("artwork download returned an empty body")
     if content_type and not content_type.startswith("image/"):
         raise RuntimeError(f"artwork URL returned non-image content type: {content_type}")
+    return _save_artwork_master(record, dest_dir, title, data, content_type)
+
+
+def _save_artwork_master(record: MetadataRecord, dest_dir: Path, title: str,
+                         data: bytes, content_type: str) -> Path:
     suffix = mimetypes.guess_extension(content_type) or Path(urllib.parse.urlparse(record.artwork_url).path).suffix
     suffix = suffix.lower()
     if suffix not in {".jpg", ".jpeg", ".png", ".webp"}:
@@ -1046,7 +1052,9 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
     ):
         try:
             _act("Trying ScreenScraper metadata lookup…")
-            screenscraper_result = screenscraper_provider.lookup_group(group, scans)
+            screenscraper_result = screenscraper_provider.lookup_group(
+                group, scans, lookup_title=dat_title or None
+            )
             if screenscraper_result is not None:
                 if screenscraper_result.found and not screenscraper_result.needs_manual_review:
                     _ss_success_event = EnrichEvent(
@@ -1086,10 +1094,6 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                         metadata.provider = "screenscraper"
                         provider = "screenscraper"
                         metadata.confidence = max(metadata.confidence, screenscraper_result.confidence)
-                        # Artwork URLs from ScreenScraper
-                        if screenscraper_result.artwork_url:
-                            metadata.artwork_page_urls = [screenscraper_result.artwork_url]
-                            metadata.artwork_provider = screenscraper_result.artwork_provider
                         # External IDs
                         if screenscraper_result.external_ids:
                             pass  # Store for potential downstream use
@@ -1136,8 +1140,14 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
         with canon:
             identity = identity_for_release_group(canon, group)
             if identity:
+                if dat_title:
+                    canon.claim_field(
+                        "game", identity[1], "title", dat_title,
+                        Provenance(source="dat", authority=SourceAuthority.DAT),
+                    )
                 value, prov = canon.resolve_field("game", identity[1], "title")
-                if value and (metadata is None or prov.authority > SourceAuthority.PARSER):
+                minimum = SourceAuthority.DAT if dat_title else SourceAuthority.PARSER
+                if value and (metadata is None or prov.authority > minimum):
                     display_title = value
                 elif display_title:
                     # Strip disambiguation before claiming so provider
@@ -1166,7 +1176,7 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
     manual_sources: list[dict] = []
     if include_artwork:
         master = _find_existing_master(group, artwork_original_dir)
-        if master is None and metadata and metadata.artwork_url:
+        if master is None:
             for suffix in (".jpg", ".jpeg", ".png", ".webp"):
                 cached_master = artwork_original_dir / f"{cache_key(lookup_title)}{suffix}"
                 if cached_master.is_file() and cached_master.stat().st_size:
@@ -1199,6 +1209,51 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
                 })
                 _act("Found manual in a local library.")
                 notes.append(f"matched manual source: {lm_manual_source.name}")
+        if (
+            online and metadata and not metadata.artwork_url and master is None and not _image_choices
+            and screenscraper_result and screenscraper_result.found and not screenscraper_result.needs_manual_review
+            and screenscraper_result.provider_id and screenscraper_result.artwork_media_type
+        ):
+            try:
+                from io import BytesIO
+                from PIL import Image
+                from .screenscraper import AGA_AMIGA_SYSTEM_ID, DEFAULT_AMIGA_SYSTEM_ID
+
+                system_id = AGA_AMIGA_SYSTEM_ID if (group.chipset or "").upper().startswith("AGA") else DEFAULT_AMIGA_SYSTEM_ID
+                _act("Fetching artwork from ScreenScraper…")
+                candidates = screenscraper_result.artwork_candidates or [(
+                    screenscraper_result.artwork_media_type, screenscraper_result.artwork_region,
+                    screenscraper_result.artwork_url,
+                )]
+                for media_type, region, public_url in candidates[:5]:
+                    data = screenscraper_provider.download_artwork(
+                        screenscraper_result.provider_id, media_type, region, system_id=system_id,
+                    )
+                    if not data:
+                        continue
+                    try:
+                        with Image.open(BytesIO(data)) as image:
+                            content_type = Image.MIME.get(image.format, "")
+                            image.verify()
+                    except (OSError, SyntaxError, ValueError):
+                        _act("ScreenScraper returned invalid artwork. Checking the next listed image.")
+                        continue
+                    source = MetadataRecord(
+                        canonical_title=metadata.canonical_title, artwork_provider="screenscraper",
+                        artwork_url=public_url or "",
+                        artwork_source_url=screenscraper_provider.config.base_url + "mediaJeu.php",
+                    )
+                    master = _save_artwork_master(source, artwork_original_dir, lookup_title, data, content_type)
+                    events.append(EnrichEvent(
+                        category=EnrichCategory.ARTWORK_GENERATED,
+                        detail="downloaded ScreenScraper artwork master", ok=True,
+                    ))
+                    break
+                if master is None:
+                    _act("ScreenScraper artwork was unavailable.")
+            except Exception as exc:
+                _act(f"ScreenScraper artwork failed ({type(exc).__name__}).")
+
         if online and metadata and metadata.artwork_url and master is None and not _image_choices:
             try:
                 host = urllib.parse.urlsplit(metadata.artwork_url).hostname or ""
@@ -1384,7 +1439,8 @@ def enrich_group(group: ReleaseGroup, *, nfo_dir: Path, scans: dict[str, ScanRec
     return EnrichResult(nfo_path, master, processed, processed is None, notes, metadata_path, provider, processed is None, events, needs_manual_review=needs_manual_review,
                         metadata_confidence=(metadata.confidence if metadata is not None else None),
                         review_items=_review_items, dat_results=_dat_results,
-                        manual_sources=manual_sources, media_candidates=_image_candidates)
+                        manual_sources=manual_sources, media_candidates=_image_candidates,
+                        screenscraper_match=screenscraper_result)
 
 
 def enrich_all(groups: list[ReleaseGroup], *, nfo_dir: Path, scans: list[ScanRecord],
