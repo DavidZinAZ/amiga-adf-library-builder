@@ -678,6 +678,7 @@ def run_pipeline(
                                 for region in regions[:3]:
                                     path = screenscraper_provider.acquire_manual(
                                         match.provider_id, region, system_id=system_id,
+                                        max_bytes=rtfm_cfg.docs.max_bytes,
                                         activity=lambda message: _act(f"{group.title}: {message}"),
                                     )
                                     if path is not None:

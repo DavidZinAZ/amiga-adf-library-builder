@@ -121,6 +121,7 @@ from typing import Any, Callable, Optional
 
 from . import metadata as _metadata
 from .metadata import MetadataRecord, UnsafeUrlError, validate_metadata_relevance, guard_url
+from .metadata_source import title_match_keys
 
 # --- Bounds / defaults -------------------------------------------------------
 
@@ -927,13 +928,16 @@ class ScreenScraperProvider:
             hash_error = result.transport_error
             break
         result = self.lookup_by_title(title, group=group, system_id=system_id)
-        if not result.found and result.transport_error is None:
+        if (not result.found or result.needs_manual_review) and result.transport_error is None:
             game_title = re.sub(r"\s+v\d+(?:\.\d+)*[a-z]?$", "", title, flags=re.IGNORECASE)
-            name, separator, article = game_title.rpartition(", ")
-            if separator and article.lower() in {"the", "a", "an"}:
-                game_title = f"{article} {name}"
+            inverted = re.fullmatch(r"(.+?),\s+(The|An|A)(?:\s+(.+))?", game_title, re.IGNORECASE)
+            if inverted:
+                name, article, subtitle = inverted.groups()
+                game_title = f"{article} {name}" + (f": {subtitle}" if subtitle else "")
             if game_title != title:
-                result = self.lookup_by_title(game_title, group=group, system_id=system_id)
+                retry = self.lookup_by_title(game_title, group=group, system_id=system_id)
+                if retry.found or not result.found:
+                    result = retry
         if not result.found and result.transport_error is None:
             result.transport_error = hash_error
         return result
@@ -1127,18 +1131,17 @@ class ScreenScraperProvider:
                 self._mark_negative_cache(cache_key)
                 return ScreenScraperResult(found=False, match_method=ScreenScraperMatchMethod.NONE)
 
-            # If multiple candidates, we need to disambiguate
-            # For now, take the first exact title match
-            exact_matches = [c for c in candidates if (c.get("title") or "").lower() == title.lower()]
+            # Compare normalized names, retaining version tokens and requiring a unique game ID.
+            keys = title_match_keys(title)
+            exact_matches = {
+                c["game_id"] for c in candidates
+                if c.get("game_id") and keys & title_match_keys(c.get("title"))
+            }
             if len(exact_matches) == 1:
-                # Single exact match - fetch full details
-                game_id = exact_matches[0].get("game_id")
-                if game_id:
-                    result = self.lookup_by_provider_id(game_id)
-                    if result.found:
-                        # Override match method to reflect the original title search
-                        result.match_method = ScreenScraperMatchMethod.TITLE_SEARCH
-                    return result
+                result = self.lookup_by_provider_id(next(iter(exact_matches)))
+                if result.found:
+                    result.match_method = ScreenScraperMatchMethod.TITLE_SEARCH
+                return result
 
             # Multiple or no exact matches - try to validate first candidate through relevance
             # For now, route to review if ambiguous
@@ -1234,6 +1237,8 @@ class ScreenScraperProvider:
         region: Optional[str] = None,
         *,
         system_id: str = DEFAULT_AMIGA_SYSTEM_ID,
+        max_bytes: Optional[int] = None,
+        activity: Optional[Callable[[str], None]] = None,
     ) -> Optional[bytes]:
         """Download PDF manual for a game.
 
@@ -1258,16 +1263,25 @@ class ScreenScraperProvider:
             return _fetch_binary(
                 url,
                 timeout=self.config.timeout_seconds,
-                max_bytes=self.config.max_response_bytes,
+                max_bytes=max_bytes if max_bytes is not None else self.config.max_response_bytes,
                 opener=self._opener,
                 resolve=self._resolve_urls,
             )
         except (ScreenScraperRateLimited, ScreenScraperQuotaExceeded, ScreenScraperAuthError):
             raise
-        except Exception:
+        except ScreenScraperError as exc:
+            if activity is not None:
+                activity(f"ScreenScraper manual download failed: {exc}")
+            return None
+        except Exception as exc:
+            if activity is not None:
+                activity(f"ScreenScraper manual download failed ({type(exc).__name__}).")
             return None
 
-    def acquire_manual(self, provider_id: str, region: Optional[str], *, system_id: str, activity: Optional[Callable[[str], None]] = None) -> Optional[Path]:
+    def acquire_manual(
+        self, provider_id: str, region: Optional[str], *, system_id: str,
+        max_bytes: Optional[int] = None, activity: Optional[Callable[[str], None]] = None,
+    ) -> Optional[Path]:
         """Reuse a cached PDF or download the advertised manual for this game."""
         key = hashlib.sha256(f"{system_id}:{provider_id}:{region or ''}".encode()).hexdigest()
         path = _cache_dir_for_metadata(self.cache_dir) / "manuals" / f"{key}.pdf"
@@ -1277,7 +1291,13 @@ class ScreenScraperProvider:
                     if activity is not None:
                         activity("Reused cached ScreenScraper PDF manual.")
                     return path
-        data = self.download_manual(provider_id, region, system_id=system_id)
+        data = self.download_manual(
+            provider_id, region, system_id=system_id, max_bytes=max_bytes, activity=activity,
+        )
+        if data == b"" and activity is not None:
+            activity("ScreenScraper returned no manual file.")
+        if data and not data.startswith(b"%PDF-") and activity is not None:
+            activity("ScreenScraper returned a manual response that is not a PDF.")
         if not data or not data.startswith(b"%PDF-"):
             return None
         path.parent.mkdir(parents=True, exist_ok=True)

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.17 — 2026-11-20
+
+- Retry ScreenScraper searches with standard game titles and compare normalized names before marking a match ambiguous.
+- Use the document extraction limit for ScreenScraper PDF downloads and report unusable manual responses in the run log.
+
 ## 0.3.16 — 2026-11-20
 
 - Try ScreenScraper first for missing artwork. Use Wikipedia when ScreenScraper cannot provide a usable image.

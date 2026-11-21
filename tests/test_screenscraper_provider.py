@@ -1063,6 +1063,56 @@ def test_screenscraper_retries_versioned_dat_title_as_plain_game_title(tmp_path)
     assert searches == ["Dark Queen of Krynn, The v1.0", "The Dark Queen of Krynn"]
 
 
+def test_screenscraper_retries_bards_tale_with_standard_title(tmp_path):
+    from types import SimpleNamespace
+    from urllib.parse import parse_qs, urlsplit
+
+    opener = _xml_opener(b"<Data><jeux/></Data>")
+    provider = ScreenScraperProvider(
+        ScreenScraperConfig(enabled=True), tmp_path, dev_id="fixture", dev_password="fixture",
+        opener=opener,
+    )
+    group = SimpleNamespace(title="Bard's Tale III, The Thief of Fate", disks=[], chipset=None)
+    provider.lookup_group(group, {})
+    searches = [parse_qs(urlsplit(url).query)["recherche"][0] for url in opener.log]
+    assert searches == ["Bard's Tale III, The Thief of Fate", "The Bard's Tale III: Thief of Fate"]
+
+
+def test_screenscraper_manual_uses_its_own_size_limit(tmp_path):
+    pdf = b"%PDF-1.7\n" + b"payload" * 100
+    provider = ScreenScraperProvider(
+        ScreenScraperConfig(enabled=True, max_response_bytes=100), tmp_path,
+        dev_id="fixture", dev_password="fixture", opener=_xml_opener(pdf),
+    )
+    messages = []
+    assert provider.acquire_manual("100", None, system_id="64", max_bytes=200, activity=messages.append) is None
+    assert "exceeds 200 bytes" in messages[-1]
+    path = provider.acquire_manual("100", None, system_id="64", max_bytes=1000)
+    assert path.read_bytes() == pdf
+
+
+@pytest.mark.parametrize("other_title", ["Pac-Man", "Deluxe Pac Man"])
+def test_screenscraper_requires_unique_normalized_title(tmp_path, other_title):
+    search = _jeu_recherche_xml([
+        {"game_id": "1111", "title": "Deluxe Pac-Man"},
+        {"game_id": "2222", "title": other_title},
+    ])
+    details = _jeu_infos_xml(game_id=1111, title="Deluxe Pac-Man")
+
+    def opener(request, timeout=0):
+        return _Resp(search if "jeuRecherche.php" in request.full_url else details)
+
+    provider = ScreenScraperProvider(
+        ScreenScraperConfig(enabled=True), tmp_path, dev_id="fixture", dev_password="fixture",
+        opener=opener,
+    )
+    result = provider.lookup_by_title("Deluxe Pac Man")
+    if other_title == "Pac-Man":
+        assert result.provider_id == "1111" and not result.needs_manual_review
+    else:
+        assert result.needs_manual_review
+
+
 @pytest.mark.parametrize("usable", [True, False])
 def test_screen_artwork_is_tried_before_wikipedia(tmp_path, monkeypatch, usable):
     import urllib.error

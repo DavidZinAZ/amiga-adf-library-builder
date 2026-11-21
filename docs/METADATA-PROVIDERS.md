@@ -73,6 +73,8 @@ tries ScreenScraper before Wikipedia. It tries alternative advertised images
 and uses Wikipedia if ScreenScraper yields no usable image.
 With manuals enabled for the build and in ScreenScraper, an advertised PDF
 can supply the RTFM builder after saved and local manual sources are checked.
+PDF downloads use the RTFM document size limit. The run log reports missing
+files, responses that are not PDFs, and downloads that exceed the limit.
 Downloaded artwork and PDFs are reused on subsequent builds. Offline builds
 can also reuse saved covers and generated RTFM sidecars.
 

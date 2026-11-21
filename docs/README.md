@@ -1,6 +1,6 @@
 # Amiga ADF Library Builder Documentation
 
-**Current documentation baseline: v0.3.16 — 2026-11-20**
+**Current documentation baseline: v0.3.17 — 2026-11-20**
 
 Everything in the main list below is intended to describe the current
 application. Ticket-era, migration, research, and superseded implementation
