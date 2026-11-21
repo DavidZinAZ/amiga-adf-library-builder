@@ -134,10 +134,18 @@ jobs:
           PY
 
       - name: Build onedir portable app
+        env:
+          SCREENSCRAPER_DEV_ID: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.SCREENSCRAPER_DEV_ID || '' }}
+          SCREENSCRAPER_DEV_PASSWORD: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.SCREENSCRAPER_DEV_PASSWORD || '' }}
+          SCREENSCRAPER_SOFTNAME: ${{ startsWith(github.ref, 'refs/tags/v') && vars.SCREENSCRAPER_SOFTNAME || '' }}
         run: |
           python tools/build_windows.py --target onedir --clean
 
       - name: Build onefile portable exe
+        env:
+          SCREENSCRAPER_DEV_ID: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.SCREENSCRAPER_DEV_ID || '' }}
+          SCREENSCRAPER_DEV_PASSWORD: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.SCREENSCRAPER_DEV_PASSWORD || '' }}
+          SCREENSCRAPER_SOFTNAME: ${{ startsWith(github.ref, 'refs/tags/v') && vars.SCREENSCRAPER_SOFTNAME || '' }}
         run: |
           python tools/build_windows.py --target onefile
 
